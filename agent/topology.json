@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    { "name": "BC1", "ingress": "enp25s0f0np0", "egress": "enp25s0f1np1" },
+    { "name": "BC2", "ingress": "enp26s0f0np0", "egress": "enp26s0f1np1" },
+    { "name": "BC3", "ingress": "enp27s0f0np0", "egress": "enp27s0f1np1" },
+    { "name": "BC4", "ingress": "enp28s0f0np0", "egress": "enp28s0f1np1" },
+    { "name": "BC5", "ingress": "enp103s0f0np0", "egress": "enp103s0f1np1" },
+    { "name": "BC6", "ingress": "enp104s0f0np0", "egress": "enp104s0f1np1" },
+    { "name": "BC7", "ingress": "enp105s0f0np0", "egress": "enp105s0f1np1" }
+  ],
+  "management_interfaces": ["enp179s0f0", "enp179s0f1"],
+  "subnet_prefix": "192.168",
+  "domain": 24
+}

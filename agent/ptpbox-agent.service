@@ -1,0 +1,25 @@
+[Unit]
+Description=PTPBox observation API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+Environment=PTPBOX_ROOT=/home/user/PTPBox
+Environment=PTPBOX_STATE_DIR=/home/user/PTPBox/runtime
+Environment=PTPBOX_BIND=0.0.0.0
+Environment=PTPBOX_PORT=8090
+Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static
+ExecStart=/usr/bin/python3 /opt/ptpbox-web/agent/ptpbox_agent.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user/PTPBox/runtime
+
+[Install]
+WantedBy=multi-user.target
