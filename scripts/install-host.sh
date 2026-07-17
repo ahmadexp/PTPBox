@@ -31,6 +31,12 @@ EOF
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 
+# Replace the temporary unprivileged preview only after every install step above
+# has succeeded, keeping downtime to the systemd handoff itself.
+if runuser -u user -- tmux has-session -t PTPBoxWeb 2>/dev/null; then
+  runuser -u user -- tmux kill-session -t PTPBoxWeb
+fi
+
 systemctl daemon-reload
 systemctl enable --now ptpbox-agent.service
 
