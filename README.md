@@ -1,88 +1,218 @@
-# PTPBox Precision Time Lab
+<div align="center">
 
-PTPBox turns a multi-NIC Linux host into an observable PTP cascade. This modern
-control room makes the physical topology legible, charts error accumulation at
-each hop, runs repeatable servo experiments, inventories PHCs and timestamping
-capabilities, and stages guarded configuration changes.
+<img src="public/og.png" alt="PTPBox Precision Time Lab — a cascade of timing instruments with nanosecond traces" width="100%">
 
-The original shell-based PTPBox project remains the inspiration and hardware
-foundation: [Time-Appliances-Project/Incubation-Projects](https://github.com/Time-Appliances-Project/Incubation-Projects/tree/master/Software/PTPBox).
+# PTPBox
 
-## Product surfaces
+### Precision Time Lab
 
-- **Overview** — live cascade topology, clock state, offset growth, RMS, MTIE,
-  and selected-clock servo details.
-- **Analytics** — multi-trace offset explorer, density view, and per-hop error
-  budget.
-- **Experiments** — step, wander, holdover, and gain-sweep recipes with tunable
-  PI parameters.
-- **Interfaces** — physical NIC, driver, line-rate, bus, PHC, and hardware
-  timestamping inventory.
-- **Configuration** — protocol, profile, message rate, servo, and guardrail
-  settings with a staged safe-apply review.
-- **Event log** — clock-state, servo, measurement, and operator events.
+**Build an entire PTP cascade inside one multi-NIC Linux host. Observe every hop. Measure accumulated error. Tune the servo. Repeat.**
+
+[![CI](https://img.shields.io/github/actions/workflow/status/ahmadexp/PTPBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/ahmadexp/PTPBox/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-77e2b3?style=flat-square)](LICENSE)
+[![LinuxPTP](https://img.shields.io/badge/LinuxPTP-4.x-61dce3?style=flat-square)](https://linuxptp.nwtime.org/)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A522.13-61dce3?style=flat-square)](package.json)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-61dce3?style=flat-square)](agent/ptpbox_agent.py)
+
+[Live demo](https://ptpbox-precision-lab.turbalance-3786.chatgpt.site) · [Install](docs/INSTALLATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware guide](docs/HARDWARE.md) · [API](docs/API.md)
+
+</div>
+
+---
+
+PTPBox is a modern revival of the original namespace-based PTPBox experiment.
+It uses physical NICs, Linux network namespaces, LinuxPTP, and hardware PHCs to
+turn one server into a chain of isolated clocks. The Precision Observatory adds
+the control room the project always deserved: live topology, offset traces,
+per-hop error budgets, repeatable experiments, hardware inventory, guarded
+configuration, and an explicit simulation fallback for demos.
+
+> [!IMPORTANT]
+> The web UI is safe to explore immediately. Starting the physical cascade moves
+> the NICs declared in `agent/topology.json` into network namespaces. Review that
+> file carefully and keep every management interface in
+> `management_interfaces` before running `ptpboxctl setup` or `start`.
+
+## See timing error grow, hop by hop
+
+<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing an eight-clock cascade and accumulated offset traces" width="100%">
+
+The first viewport is the experiment: GM to OC, measured one clock at a time.
+Select any node to isolate its trace, current master offset, path delay,
+frequency adjustment, PHC, quality score, and active servo constants.
+
+## What you can do
+
+| Surface | Purpose |
+| --- | --- |
+| **Cascade overview** | See topology, link state, per-hop delay, accumulated offset, RMS, MTIE, and lock quality in one instrument view. |
+| **Analytics** | Compare traces, inspect offset density, and attribute the total error budget to individual hops. |
+| **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
+| **Servo tuning** | Adjust PI gains and thresholds, preview behavior, validate, stage, and roll changes through the chain. |
+| **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
+| **Event stream** | Follow clock-state transitions, measurement windows, threshold events, and operator actions. |
+| **Demo mode** | Use deterministic, physically plausible telemetry whenever a live agent is unavailable. |
+
+## Product tour
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/analytics.jpg" alt="PTPBox timing analytics"></td>
+    <td width="50%"><img src="docs/images/experiments.jpg" alt="PTPBox servo experiment designer"></td>
+  </tr>
+  <tr>
+    <td><strong>Stability analytics</strong><br>Trace selection, density, RMS, MTIE, and contribution per hop.</td>
+    <td><strong>Repeatable experiments</strong><br>Step response, holdover, wander, and gain-sweep recipes.</td>
+  </tr>
+</table>
+
+<img src="docs/images/interfaces.jpg" alt="PTPBox live NIC and PHC inventory" width="100%">
+
+## Two ways to run it
+
+### 1. Observer / demo mode — no root required
+
+This serves the complete UI, discovers the host, reads LinuxPTP logs, and stages
+configuration without moving interfaces or starting privileged processes.
+
+```bash
+git clone https://github.com/ahmadexp/PTPBox.git
+cd PTPBox
+npm ci
+npm run build:standalone
+
+PTPBOX_ROOT="$PWD" \
+PTPBOX_WEB_ROOT="$PWD/dist-standalone" \
+python3 agent/ptpbox_agent.py
+```
+
+Open [http://localhost:8090](http://localhost:8090). If the agent cannot find
+live measurements, the Observatory labels itself as a hardware model and keeps
+every visualization interactive.
+
+### 2. Full host integration — physical cascade
+
+```bash
+# 1. Map this machine's PTP ports and protect its management links.
+$EDITOR agent/topology.json
+
+# 2. Build, install, and start the persistent web agent.
+npm ci
+npm run build:standalone
+sudo PTPBOX_USER="$(id -un)" PTPBOX_ROOT="$PWD" bash scripts/install-host.sh
+
+# 3. Validate before moving any NIC.
+sudo ptpboxctl discover
+sudo ptpboxctl status
+```
+
+The UI is then available at `http://<ptpbox-host>:8090`. See the complete
+[installation and upgrade guide](docs/INSTALLATION.md) before starting the data
+plane.
 
 ## Architecture
 
-The UI is a React application with two build targets:
+```mermaid
+flowchart LR
+    Browser["Precision Observatory\nReact UI"]
+    Agent["PTPBox agent\nPython · unprivileged"]
+    Inventory["sysfs · ethtool\nNIC / PHC inventory"]
+    Logs["LinuxPTP logs\ntelemetry parser"]
+    Helper["ptpboxctl\nfixed privileged verbs"]
+    NS["BC1 … BC7\nnetwork namespaces"]
+    PTP["ptp4l · phc2sys\nhardware clocks"]
 
-1. `npm run build` produces the deployable Sites/Cloudflare build.
-2. `npm run build:standalone` produces a static bundle that the dependency-free
-   Python agent serves directly on the PTPBox host.
-
-`agent/ptpbox_agent.py` runs without root for inventory and log observation.
-Privileged namespace and LinuxPTP lifecycle operations are isolated in
-`scripts/ptpboxctl.py`; the optional host installer exposes only fixed lifecycle
-subcommands through sudo.
-
-## Local development
-
-```bash
-npm install
-npm run dev
+    Browser <-->|"HTTP · :8090"| Agent
+    Agent --> Inventory
+    Agent --> Logs
+    Agent -. "sudo: start / stop / restart / status only" .-> Helper
+    Helper --> NS
+    NS --> PTP
 ```
 
-The UI probes `http://<current-host>:8090/api/status`. When the host agent is not
-available it automatically enters an explicit, deterministic hardware-model
-mode so every view remains useful for demonstrations.
+The agent runs as the operator, not root. Observation stays unprivileged.
+Lifecycle control crosses a narrow sudo boundary that accepts four fixed
+commands and no arbitrary arguments. See [Architecture](docs/ARCHITECTURE.md)
+and [Security](SECURITY.md).
 
-## Build and verify
+## What gets measured
 
-```bash
-npm test
-npm run build:standalone
-python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py
-bash -n scripts/install-host.sh
+- Master offset and RMS offset for each clock
+- Per-hop delta and cumulative cascade error
+- Mean path delay and frequency adjustment
+- Lock/tracking state and recovery events
+- MTIE windows and mask verdicts
+- Offset distribution, P95, skew, and contribution share
+- NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
+- Experiment metadata, servo constants, and capture lifecycle
+
+The live agent parses native LinuxPTP output. Missing data is never silently
+presented as live; the UI switches to its deterministic hardware-model mode.
+
+## Hardware
+
+The reference host uses seven dual-port timing-capable adapters for the cascade
+plus separate management ports. PTPBox is not tied to ConnectX hardware: Intel
+E810, i210/i225, ixgbe devices, and mixed-PHC systems work as long as LinuxPTP
+and hardware timestamping are available.
+
+<table>
+  <tr>
+    <td width="48%"><img src="docs/images/original-hardware.jpg" alt="Original PTPBox server with seven NVIDIA ConnectX-6 adapters"></td>
+    <td width="52%"><img src="docs/images/original-topology.png" alt="Original PTPBox network namespace topology diagram"></td>
+  </tr>
+  <tr>
+    <td><strong>The original seven-NIC PTPBox host</strong></td>
+    <td><strong>The original namespace cascade concept</strong></td>
+  </tr>
+</table>
+
+Read the [hardware and topology guide](docs/HARDWARE.md) for discovery commands,
+shared-PHC behavior, interface mapping, and a preflight checklist.
+
+## Repository map
+
+```text
+app/                 Precision Observatory UI
+agent/               Read-only host API, topology, systemd template
+scripts/             Safe lifecycle, install, and uninstall helpers
+standalone/          Static-host entrypoint for the on-box agent
+docs/                Installation, architecture, API, hardware, experiments
+tests/               Rendered-product checks
+.github/workflows/   CI for UI, Python, shell, and standalone builds
 ```
 
-## Host preview without root
-
-Build the standalone bundle, copy `agent/` and `dist-standalone/` to the host,
-then run:
+## Development
 
 ```bash
-PTPBOX_ROOT=$HOME/PTPBox \
-PTPBOX_WEB_ROOT=$HOME/PTPBox-Web/dist-standalone \
-python3 $HOME/PTPBox-Web/agent/ptpbox_agent.py
+npm ci
+npm run dev          # local application server
+make check           # lint, tests, both builds, Python and shell validation
 ```
 
-Open `http://<ptpbox-host>:8090`. Observation works immediately. Lifecycle
-controls remain unavailable until the optional privileged helper is installed.
+The main application uses React 19, TypeScript, Vinext/Vite, and Canvas-based
+telemetry charts. The host agent uses only the Python standard library.
 
-## Full host integration
+## Project status
 
-After inspecting `agent/topology.json` and confirming the management interfaces
-are excluded, build the standalone bundle and run:
+The Observatory, standalone host, inventory agent, configuration staging, and
+guarded lifecycle controller are implemented. The next milestones are durable
+experiment storage, direct PMC datasets, automated MTIE/TDEV/Allan deviation,
+and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
 
-```bash
-sudo bash scripts/install-host.sh
-```
+## Heritage
 
-The installer places the web bundle and agent under `/opt/ptpbox-web`, installs
-the controller as `/usr/local/sbin/ptpboxctl`, validates a narrow sudoers rule,
-and starts `ptpbox-agent.service` on port 8090.
+This project modernizes the public
+[Time Appliances Project PTPBox prototype](https://github.com/Time-Appliances-Project/Incubation-Projects/tree/master/Software/PTPBox),
+created by Ahmad Byagowi. The namespace architecture, seven-node cascade, and
+hardware photographs come from that work.
 
-Moving NICs into namespaces interrupts traffic on those ports. The controller
-refuses to move any interface listed under `management_interfaces`, but the
-topology must still be reviewed on each host before the first `setup` or
-`start`.
+## Contributing
+
+Bug reports, hardware profiles, measurement ideas, and UI improvements are
+welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and keep hardware safety
+front and center.
+
+## License
+
+[MIT](LICENSE) © 2026 Ahmad Byagowi.

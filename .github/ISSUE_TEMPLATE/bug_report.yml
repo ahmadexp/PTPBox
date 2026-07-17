@@ -1,0 +1,53 @@
+name: Bug report
+description: Report incorrect behavior in the UI, agent, controller, or installer.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: checkboxes
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private addresses, serial numbers, and sensitive logs.
+          required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Precision Observatory UI
+        - Host agent / API
+        - ptpboxctl lifecycle
+        - Installer / systemd
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include the expected result and the actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, LinuxPTP version, NICs, drivers, and whether ports share a PHC.
+      placeholder: Ubuntu 26.04, LinuxPTP 4.4, mlx5_core 7.0...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start in observer mode
+        2. Open Interfaces
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      render: shell

@@ -17,8 +17,7 @@ from typing import Any
 STATE_DIR = Path(os.environ.get("PTPBOX_CONTROL_STATE", "/run/ptpbox"))
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", "/etc/ptpbox/topology.json"))
-CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", "/home/user/PTPBox/runtime/config.json"))
-FALLBACK_CONFIG = Path("/etc/ptpbox/config.json")
+CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", "/etc/ptpbox/config.json"))
 PIDS_FILE = STATE_DIR / "processes.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -71,7 +70,7 @@ def topology() -> dict[str, Any]:
 def config() -> dict[str, Any]:
     value = load_json(CONFIG_FILE)
     if not isinstance(value, dict):
-        value = load_json(FALLBACK_CONFIG, DEFAULT_CONFIG)
+        value = DEFAULT_CONFIG
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     if isinstance(value, dict):
         merged.update({key: item for key, item in value.items() if key != "servo"})

@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=user
-Group=user
-Environment=PTPBOX_ROOT=/home/user/PTPBox
-Environment=PTPBOX_STATE_DIR=/home/user/PTPBox/runtime
+User=@PTPBOX_USER@
+Group=@PTPBOX_GROUP@
+Environment=PTPBOX_ROOT=@PTPBOX_ROOT@
+Environment=PTPBOX_STATE_DIR=@PTPBOX_ROOT@/runtime
 Environment=PTPBOX_BIND=0.0.0.0
 Environment=PTPBOX_PORT=8090
 Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/user/PTPBox/runtime
+ReadWritePaths=@PTPBOX_ROOT@/runtime
 
 [Install]
 WantedBy=multi-user.target

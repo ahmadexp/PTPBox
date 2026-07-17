@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose an experiment, measurement, hardware profile, or product improvement.
+title: "[Feature]: "
+labels: [enhancement, needs-triage]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Measurement / analysis
+        - Experiment workflow
+        - Hardware / topology
+        - Servo / protocol configuration
+        - User interface
+        - API / integration
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the timing-lab workflow or limitation, not only the proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware or standards context
+      description: Mention relevant NICs, profiles, metrics, or standards.

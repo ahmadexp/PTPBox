@@ -40,5 +40,23 @@
     "wrangler": "4.92.0"
   },
   "type": "module",
-  "description": "Precision Time Protocol cascade observability and control room"
+  "description": "Precision Time Protocol cascade observability and control room",
+  "author": "Ahmad Byagowi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahmadexp/PTPBox.git"
+  },
+  "homepage": "https://github.com/ahmadexp/PTPBox#readme",
+  "bugs": {
+    "url": "https://github.com/ahmadexp/PTPBox/issues"
+  },
+  "keywords": [
+    "ptp",
+    "ieee-1588",
+    "linuxptp",
+    "precision-time",
+    "hardware-timestamping",
+    "network-namespaces"
+  ]
 }
