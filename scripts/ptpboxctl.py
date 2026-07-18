@@ -16,6 +16,7 @@ from typing import Any
 
 STATE_DIR = Path(os.environ.get("PTPBOX_CONTROL_STATE", "/run/ptpbox"))
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
+LINUXPTP_CONFIG_DIR = Path(os.environ.get("PTPBOX_LINUXPTP_CONFIG_DIR", "/etc/linuxptp"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", "/etc/ptpbox/topology.json"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", "/etc/ptpbox/config.json"))
 PIDS_FILE = STATE_DIR / "processes.json"
@@ -23,8 +24,8 @@ PIDS_FILE = STATE_DIR / "processes.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "domain": 24,
     "transport": "L2",
-    "delay_mechanism": "P2P",
-    "log_sync_interval": -4,
+    "delay_mechanism": "E2E",
+    "log_sync_interval": 0,
     "two_step": True,
     "hardware_timestamping": True,
     "servo": {
@@ -115,11 +116,12 @@ def setup() -> dict[str, Any]:
     return {"ok": True, "configured_namespaces": configured, "interfaces": len(assigned)}
 
 
-def render_ptp_config(role: str, path: Path) -> None:
+def render_ptp_config(role: str, path: Path, boundary_jbod: bool = False) -> None:
     values = config()
     servo = values["servo"]
     transport = {"L2": "L2", "UDPv4": "UDPv4", "UDPv6": "UDPv6"}[values["transport"]]
-    role_line = "serverOnly 1" if role == "server" else "clientOnly 1"
+    role_line = "serverOnly 1" if role == "server" else "clientOnly 1" if role == "client" else ""
+    jbod_line = "boundary_clock_jbod 1" if boundary_jbod else ""
     text = f"""[global]
 domainNumber {int(values['domain'])}
 network_transport {transport}
@@ -127,6 +129,8 @@ delay_mechanism {values['delay_mechanism']}
 time_stamping {'hardware' if values['hardware_timestamping'] else 'software'}
 twoStepFlag {1 if values['two_step'] else 0}
 logSyncInterval {int(values['log_sync_interval'])}
+summary_interval {int(values['log_sync_interval'])}
+tx_timestamp_timeout 100
 clock_servo {servo['type']}
 pi_proportional_const {float(servo['kp'])}
 pi_integral_const {float(servo['ki'])}
@@ -137,8 +141,11 @@ logging_level 6
 use_syslog 0
 verbose 1
 {role_line}
+{jbod_line}
 """
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    path.chmod(0o644)
 
 
 def timestamp_provider(namespace: str, interface: str) -> int | None:
@@ -150,6 +157,23 @@ def timestamp_provider(namespace: str, interface: str) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def prioritize_timestamp_workers() -> list[int]:
+    """Apply LinuxPTP's documented ICE worker mitigation when present."""
+    prioritized: list[int] = []
+    for comm_path in Path("/proc").glob("[0-9]*/comm"):
+        try:
+            name = comm_path.read_text(encoding="utf-8").strip()
+            pid = int(comm_path.parent.name)
+        except (OSError, ValueError):
+            continue
+        if not name.startswith("ice-ptp-"):
+            continue
+        result = command(["chrt", "-r", "--pid", "30", str(pid)], check=False)
+        if result.returncode == 0:
+            prioritized.append(pid)
+    return prioritized
 
 
 def spawn(label: str, args: list[str], processes: list[dict[str, Any]]) -> None:
@@ -171,10 +195,13 @@ def start() -> dict[str, Any]:
     if current["running"]:
         return {"ok": True, "message": "cascade is already running", **current}
     setup()
+    prioritize_timestamp_workers()
     topo = topology()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    server_config = STATE_DIR / "ptp4l-server.conf"
-    client_config = STATE_DIR / "ptp4l-client.conf"
+    # Ubuntu's packaged AppArmor profile permits ptp4l configuration below
+    # /etc/linuxptp, but intentionally rejects arbitrary files below /run.
+    server_config = LINUXPTP_CONFIG_DIR / "ptpbox-server.conf"
+    client_config = LINUXPTP_CONFIG_DIR / "ptpbox-client.conf"
     render_ptp_config("server", server_config)
     render_ptp_config("client", client_config)
     values = config()
@@ -184,10 +211,18 @@ def start() -> dict[str, Any]:
         first = topo["nodes"][0]
         spawn("BC1-GM", ["ip", "netns", "exec", first["name"], "ptp4l", "-f", str(server_config), "-i", first["egress"], "-m", "-q"], processes)
         for node in topo["nodes"][1:-1]:
-            spawn(f"{node['name']}-OC", ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(client_config), "-i", node["ingress"], "-m", "-q"], processes)
             source_phc = timestamp_provider(node["name"], node["ingress"])
             sink_phc = timestamp_provider(node["name"], node["egress"])
-            if source_phc is None or sink_phc is None or source_phc != sink_phc:
+            shared_phc = source_phc is not None and source_phc == sink_phc
+            # The explicitly directional OC -> GM model mirrors the original
+            # PTPBox and works across heterogeneous drivers. Split-PHC cards
+            # receive a bridge; shared-PHC cards need no extra synchronizer.
+            spawn(
+                f"{node['name']}-OC",
+                ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(client_config), "-i", node["ingress"], "-m", "-q"],
+                processes,
+            )
+            if not shared_phc:
                 spawn(
                     f"{node['name']}-PHC",
                     [
@@ -200,7 +235,11 @@ def start() -> dict[str, Any]:
                     ],
                     processes,
                 )
-            spawn(f"{node['name']}-GM", ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(server_config), "-i", node["egress"], "-m", "-q"], processes)
+            spawn(
+                f"{node['name']}-GM",
+                ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(server_config), "-i", node["egress"], "-m", "-q"],
+                processes,
+            )
         last = topo["nodes"][-1]
         spawn(f"{last['name']}-OC", ["ip", "netns", "exec", last["name"], "ptp4l", "-f", str(client_config), "-i", last["ingress"], "-m", "-q"], processes)
     except Exception:

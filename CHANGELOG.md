@@ -4,6 +4,19 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a live Start/Stop cascade control backed by the narrowly scoped sudo
+  policy, periodic process-state refresh, and AppArmor-compatible LinuxPTP
+  configuration paths on Ubuntu hosts.
+- Restored the original directional OC/GM process model, adding a PHC bridge
+  only for split-PHC NICs and avoiding an unnecessary bridge on shared clocks.
+- Configured one signed LinuxPTP log sample per Sync update, persistent ICE
+  timestamp-worker priority, and the original one-Sync-per-second cadence.
+- Restored end-to-end delay measurement to match the original PTPBox hardware.
+- Added explicit hardware-sample validation: impossible path delays remain in
+  the raw API but are visibly degraded and excluded from charts and RMS.
+- Kept managed LinuxPTP processes alive across observation-agent upgrades and
+  restarts while preserving explicit web Stop control.
+
 ### Added
 
 - Precision Observatory UI with cascade topology, timing traces, analytics,

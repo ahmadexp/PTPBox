@@ -99,7 +99,9 @@ Query parameters:
         "servo_state": "s2",
         "source": "BC2-OC.log",
         "observed_at": 1784327800.0,
-        "raw": true
+        "raw": true,
+        "valid": true,
+        "validation_error": null
       },
       "samples": []
     }
@@ -111,6 +113,11 @@ Query parameters:
 old. It becomes `stale` for old measurements and `waiting` when no parsable
 LinuxPTP sample exists. `samples` can be empty on an incremental request even
 while `measurement` and window statistics remain populated.
+
+The raw payload preserves invalid samples but marks them `valid: false`. For
+this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
+driver timestamp failure. Such samples are counted separately and excluded
+from RMS and charts; their original values remain available through the API.
 
 ## Configuration
 
@@ -127,8 +134,8 @@ Validates and atomically stages a complete configuration document.
   "profile": "G.8275.1 Telecom",
   "domain": 24,
   "transport": "L2",
-  "delay_mechanism": "P2P",
-  "log_sync_interval": -4,
+  "delay_mechanism": "E2E",
+  "log_sync_interval": 0,
   "two_step": true,
   "hardware_timestamping": true,
   "servo": {

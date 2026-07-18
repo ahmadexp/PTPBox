@@ -61,6 +61,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual([-12.0, 7.0], [sample["offset_ns"] for sample in samples])
         self.assertEqual(["s1", "s2"], [sample["servo_state"] for sample in samples])
         self.assertTrue(all(sample["raw"] for sample in samples))
+        self.assertTrue(all(sample["valid"] for sample in samples))
         self.assertAlmostEqual(0.063, samples[1]["observed_at"] - samples[0]["observed_at"], places=3)
 
     def test_telemetry_uses_physical_topology_order_and_incremental_cutoff(self) -> None:
@@ -90,6 +91,18 @@ class TelemetryTests(unittest.TestCase):
 
         samples = AGENT.parse_log_measurements(path)
         self.assertEqual([8.0, 3.0], [sample["offset_ns"] for sample in samples])
+
+    def test_flags_impossible_hardware_path_delay_without_changing_raw_value(self) -> None:
+        path = self.log_dir / "BC7-OC.log"
+        path.write_text(
+            "ptp4l[10.000]: master offset 17 s2 freq 3 path delay 781275143\n",
+            encoding="utf-8",
+        )
+
+        sample = AGENT.parse_log_measurements(path)[0]
+        self.assertEqual(17.0, sample["offset_ns"])
+        self.assertEqual(781275143.0, sample["mean_path_delay_ns"])
+        self.assertFalse(sample["valid"])
 
 
 if __name__ == "__main__":

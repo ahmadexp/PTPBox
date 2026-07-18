@@ -25,7 +25,7 @@ if [[ -z "$PTPBOX_USER_HOME" || "$PTPBOX_ROOT_DIR" != /* ]]; then
   exit 1
 fi
 
-install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /var/log/ptpbox
+install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /etc/linuxptp /run/netns /run/ptpbox /var/log/ptpbox
 install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_agent.py"
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
@@ -57,7 +57,8 @@ if runuser -u "$PTPBOX_USER_NAME" -- tmux has-session -t PTPBoxWeb 2>/dev/null; 
 fi
 
 systemctl daemon-reload
-systemctl enable --now ptpbox-agent.service
+systemctl enable ptpbox-agent.service
+systemctl restart ptpbox-agent.service
 
 echo "PTPBox is available at http://$(hostname -I | awk '{print $1}'):8090"
 echo "Operator: $PTPBOX_USER_NAME"

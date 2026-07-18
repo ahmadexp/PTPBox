@@ -36,6 +36,7 @@ ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
 TELEMETRY_STALE_AFTER_SECONDS = 5.0
+TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
     r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
@@ -48,8 +49,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "profile": "G.8275.1 Telecom",
     "domain": 24,
     "transport": "L2",
-    "delay_mechanism": "P2P",
-    "log_sync_interval": -4,
+    "delay_mechanism": "E2E",
+    "log_sync_interval": 0,
     "two_step": True,
     "hardware_timestamping": True,
     "servo": {
@@ -244,15 +245,19 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
         if not match:
             continue
         source_time_match = LOG_TIME_PATTERN.search(line[: match.start()])
+        path_delay = float(match.group("delay"))
+        valid = 0.0 <= path_delay <= TELEMETRY_MAX_PATH_DELAY_NS
         parsed.append(
             {
                 "offset_ns": float(match.group("offset")),
                 "frequency_ppb": float(match.group("freq")),
-                "mean_path_delay_ns": float(match.group("delay")),
+                "mean_path_delay_ns": path_delay,
                 "servo_state": (match.group("servo_state") or "").lower() or None,
                 "source_time": float(source_time_match.group("seconds")) if source_time_match else None,
                 "source": display_path(path),
                 "raw": True,
+                "valid": valid,
+                "validation_error": None if valid else "path delay outside the 0–1 ms lab envelope",
             }
         )
 
@@ -315,6 +320,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
                 break
         measurement = all_samples[-1] if all_samples else None
         window_samples = [sample for sample in all_samples if sample["observed_at"] >= cutoff]
+        valid_window_samples = [sample for sample in window_samples if sample["valid"]]
         samples = window_samples
         if since is not None:
             samples = [sample for sample in samples if sample["observed_at"] > since]
@@ -328,26 +334,35 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
                 "measurement": measurement,
                 "samples": samples,
                 "window_sample_count": len(window_samples),
+                "window_valid_sample_count": len(valid_window_samples),
+                "window_invalid_sample_count": len(window_samples) - len(valid_window_samples),
                 "rms_ns": (
-                    sum(float(sample["offset_ns"]) ** 2 for sample in window_samples) / len(window_samples)
-                ) ** 0.5 if window_samples else None,
+                    sum(float(sample["offset_ns"]) ** 2 for sample in valid_window_samples) / len(valid_window_samples)
+                ) ** 0.5 if valid_window_samples else None,
                 "logs": len(candidates),
             }
         )
-    measured = sum(1 for clock in clocks if clock["measurement"])
+    measured = sum(1 for clock in clocks if clock["measurement"] and clock["measurement"]["valid"])
+    degraded = sum(1 for clock in clocks if clock["measurement"] and not clock["measurement"]["valid"])
     fresh = sum(
         1
         for clock in clocks
-        if clock["measurement"] and now - float(clock["measurement"]["observed_at"]) <= TELEMETRY_STALE_AFTER_SECONDS
+        if clock["measurement"]
+        and clock["measurement"]["valid"]
+        and now - float(clock["measurement"]["observed_at"]) <= TELEMETRY_STALE_AFTER_SECONDS
     )
     sample_count = sum(len(clock["samples"]) for clock in clocks)
+    valid_sample_count = sum(sum(1 for sample in clock["samples"] if sample["valid"]) for clock in clocks)
     mode = "live" if fresh else "stale" if measured else "waiting"
     return {
         "timestamp": now,
         "clocks": clocks,
         "measured_clocks": measured,
         "fresh_clocks": fresh,
+        "degraded_clocks": degraded,
         "sample_count": sample_count,
+        "valid_sample_count": valid_sample_count,
+        "invalid_sample_count": sample_count - valid_sample_count,
         "mode": mode,
         "raw": True,
         "smoothing": "none",
@@ -368,7 +383,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.1.0",
+        "agent_version": "1.2.0",
         "timestamp": time.time(),
     }
 

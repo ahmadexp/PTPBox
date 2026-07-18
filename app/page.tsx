@@ -29,6 +29,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Square,
   Terminal,
   TimerReset,
   X,
@@ -38,7 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Section = "Overview" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
-type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "NO DATA" | "STALE";
+type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "NO DATA" | "STALE" | "FAULTY";
 
 type ClockNode = {
   id: string;
@@ -84,6 +85,8 @@ type TelemetrySample = {
   sample_id: string;
   source: string;
   raw: true;
+  valid: boolean;
+  validation_error: string | null;
 };
 
 type TelemetryClock = {
@@ -94,6 +97,8 @@ type TelemetryClock = {
   measurement: TelemetrySample | null;
   samples: TelemetrySample[];
   window_sample_count: number;
+  window_valid_sample_count: number;
+  window_invalid_sample_count: number;
   rms_ns: number | null;
   logs: number;
 };
@@ -103,7 +108,10 @@ type TelemetryPayload = {
   clocks: TelemetryClock[];
   measured_clocks: number;
   fresh_clocks: number;
+  degraded_clocks: number;
   sample_count: number;
+  valid_sample_count: number;
+  invalid_sample_count: number;
   mode: "live" | "stale" | "waiting";
   raw: true;
   smoothing: "none";
@@ -188,6 +196,7 @@ function rangeSeconds(range: string) {
 function stateFromMeasurement(sample: TelemetrySample | null, stale: boolean, role: TelemetryClock["role"]): ClockState {
   if (role === "grandmaster") return "REFERENCE";
   if (!sample) return "NO DATA";
+  if (!sample.valid) return "FAULTY";
   if (stale) return "STALE";
   if (sample.servo_state === "s2") return "LOCKED";
   if (sample.servo_state === "s1") return "TRACKING";
@@ -211,9 +220,9 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       egress: clock.egress,
       phc: measurement?.source ?? "—",
       color: TRACE_COLORS[index % TRACE_COLORS.length],
-      measured: Boolean(measurement),
-      sampleCount: clock.window_sample_count,
-      source: measurement?.source ?? "No LinuxPTP sample",
+      measured: Boolean(measurement?.valid),
+      sampleCount: clock.window_valid_sample_count,
+      source: measurement?.validation_error ?? measurement?.source ?? "No LinuxPTP sample",
       lastSampleAt: measurement?.observed_at ?? null,
     };
   });
@@ -221,7 +230,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
 
 function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
   return payload.clocks
-    .flatMap((clock) => clock.samples.map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns }, key: `${clock.id}:${sample.sample_id}` })))
+    .flatMap((clock) => clock.samples.filter((sample) => sample.valid).map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns }, key: `${clock.id}:${sample.sample_id}` })))
     .sort((left, right) => left.t - right.t);
 }
 
@@ -414,6 +423,7 @@ export default function PTPBoxDashboard() {
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
   const newestSampleAge = newestSampleAt && telemetryStatus ? Math.max(0, telemetryStatus.timestamp - newestSampleAt) : null;
+  const invalidWindowSamples = telemetryStatus?.clocks.reduce((total, clock) => total + clock.window_invalid_sample_count, 0) ?? 0;
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -442,28 +452,38 @@ export default function PTPBoxDashboard() {
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 1800);
-    fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal })
-      .then((response) => {
+    let disposed = false;
+    let initialProbe = true;
+    const pollStatus = async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 1800);
+      try {
+        const response = await fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
         if (!response.ok) throw new Error("agent unavailable");
-        return response.json();
-      })
-      .then((status: AgentStatus) => {
+        const status = await response.json() as AgentStatus;
+        if (disposed) return;
         setAgentStatus(status);
-        setConnection("waiting");
-        setHistory([]);
-        setNodes(waitingNodes("Waiting for LinuxPTP"));
-      })
-      .catch(() => {
-        setConnection("simulation");
-        setNodes(INITIAL_NODES);
-        setHistory(buildHistory());
-      })
-      .finally(() => window.clearTimeout(timer));
+        if (initialProbe) {
+          setConnection("waiting");
+          setHistory([]);
+          setNodes(waitingNodes("Waiting for LinuxPTP"));
+        }
+      } catch {
+        if (!disposed && initialProbe) {
+          setConnection("simulation");
+          setNodes(INITIAL_NODES);
+          setHistory(buildHistory());
+        }
+      } finally {
+        initialProbe = false;
+        window.clearTimeout(timeout);
+      }
+    };
+    void pollStatus();
+    const timer = window.setInterval(() => void pollStatus(), 2000);
     return () => {
-      controller.abort();
-      window.clearTimeout(timer);
+      disposed = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -494,7 +514,7 @@ export default function PTPBoxDashboard() {
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
 
         const ids = payload.clocks.map((clock) => clock.id);
-        const measuredIds = payload.clocks.filter((clock) => clock.measurement && clock.role !== "grandmaster").map((clock) => clock.id);
+        const measuredIds = payload.clocks.filter((clock) => clock.measurement?.valid && clock.role !== "grandmaster").map((clock) => clock.id);
         setSelectedNode((current) => ids.includes(current) ? current : measuredIds[measuredIds.length - 1] ?? ids[ids.length - 1] ?? current);
         setVisibleTraces((current) => {
           const retained = current.filter((id) => measuredIds.includes(id));
@@ -578,20 +598,26 @@ export default function PTPBoxDashboard() {
     URL.revokeObjectURL(url);
   };
 
-  const startCascade = async () => {
+  const controlCascade = async (action: "start" | "stop") => {
     setControlBusy(true);
     try {
       const response = await fetch(`${agentBaseUrl()}/api/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start" }),
+        body: JSON.stringify({ action }),
       });
       const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error || "cascade start failed");
-      setToast("Cascade started · waiting for the first raw LinuxPTP samples");
-      setConnection("waiting");
+      if (!response.ok) throw new Error(result.error || `cascade ${action} failed`);
+      setAgentStatus((current) => ({ ...current, running: action === "start" }));
+      if (action === "start") {
+        setToast("Cascade started · waiting for the first raw LinuxPTP samples");
+        setConnection("waiting");
+      } else {
+        setToast("Cascade stopped · captured raw samples remain available");
+        setConnection("stale");
+      }
     } catch (error) {
-      setToast(error instanceof Error ? error.message : "Cascade start is unavailable");
+      setToast(error instanceof Error ? error.message : `Cascade ${action} is unavailable`);
     } finally {
       setControlBusy(false);
     }
@@ -602,8 +628,8 @@ export default function PTPBoxDashboard() {
       profile,
       domain: 24,
       transport: "L2",
-      delay_mechanism: "P2P",
-      log_sync_interval: -4,
+      delay_mechanism: "E2E",
+      log_sync_interval: 0,
       two_step: twoStep,
       hardware_timestamping: hardwareTs,
       servo: {
@@ -725,8 +751,19 @@ export default function PTPBoxDashboard() {
             <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "LINUXPTP LOG STREAM"}</span>
             <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "raw=true · smoothing=none"}</code>
             <span>{history.length.toLocaleString()} samples buffered</span>
+            {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} invalid rejected</span>}
             <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
-            {agentStatus && connection !== "live" && <button type="button" className="quiet-button" disabled={controlBusy} onClick={startCascade}><Play size={12} /> {controlBusy ? "Starting…" : "Start cascade"}</button>}
+            {agentStatus && connection !== "simulation" && (
+              <button
+                type="button"
+                className={`quiet-button cascade-control ${agentStatus.running ? "running" : ""}`}
+                disabled={controlBusy}
+                onClick={() => void controlCascade(agentStatus.running ? "stop" : "start")}
+              >
+                {agentStatus.running ? <Square size={11} fill="currentColor" /> : <Play size={12} />}
+                {controlBusy ? (agentStatus.running ? "Stopping…" : "Starting…") : (agentStatus.running ? "Stop cascade" : "Start cascade")}
+              </button>
+            )}
           </div>
 
           {section === "Overview" && (
@@ -741,7 +778,7 @@ export default function PTPBoxDashboard() {
                     {nodes.map((node, index) => (
                       <div className="node-unit" key={node.id}>
                         {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {node.measured ? `${node.meanPathDelay} ns` : "—"}</small></div>}
-                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
+                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
                           <div className="node-topline"><span>{node.role === "Boundary" ? "BC" : node.role === "Grandmaster" ? "GM" : "OC"}</span><i style={{ background: node.color }} /></div>
                           <div className="node-symbol"><Clock3 size={20} strokeWidth={1.4} /><span className="pulse-ring" /></div>
                           <strong>{node.label}</strong>
@@ -755,7 +792,7 @@ export default function PTPBoxDashboard() {
                 </div>
                 <div className="topology-footer">
                   <span><i className="legend-dot locked" /> Locked</span><span><i className="legend-dot tracking" /> Tracking</span><span><i className="legend-line" /> Measured hop</span>
-                  <p><Info size={13} /> Values are raw per-hop master offsets emitted by ptp4l; no smoothing or interpolation.</p>
+                  <p><Info size={13} /> Raw ptp4l offsets only; impossible hardware path delays are flagged and excluded, never smoothed.</p>
                 </div>
               </section>
 
@@ -783,7 +820,7 @@ export default function PTPBoxDashboard() {
                     <span className="chart-unit">OFFSET · ns</span>
                   </div>
                   <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a ptp4l log sample. Missing samples remain gaps; the browser does not interpolate or filter.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a validated raw ptp4l sample. Missing samples remain gaps; invalid hardware timestamps are flagged, never interpolated.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">
@@ -906,8 +943,8 @@ export default function PTPBoxDashboard() {
                     <label className="wide"><span>PTP profile</span><button className="select-control" type="button" onClick={() => setProfile((value) => value === "G.8275.1 Telecom" ? "IEEE 1588 Default" : "G.8275.1 Telecom")}>{profile}<ChevronDown size={14} /></button><small>Defines message rates, transport, and BMCA defaults.</small></label>
                     <label><span>Domain number</span><div className="input-unit"><input value="24" readOnly /><em>0–127</em></div></label>
                     <label><span>Transport</span><button className="select-control" type="button">Layer 2 <ChevronDown size={14} /></button></label>
-                    <label><span>Sync interval</span><button className="select-control" type="button">−4 · 16/s <ChevronDown size={14} /></button></label>
-                    <label><span>Delay mechanism</span><button className="select-control" type="button">Peer-to-peer <ChevronDown size={14} /></button></label>
+                    <label><span>Sync interval</span><button className="select-control" type="button">0 · 1/s <ChevronDown size={14} /></button></label>
+                    <label><span>Delay mechanism</span><button className="select-control" type="button">End-to-end <ChevronDown size={14} /></button></label>
                   </div>
                   <div className="toggle-list">
                     <div><div><strong>Two-step clock</strong><small>Send preciseOriginTimestamp in Follow_Up messages.</small></div><Toggle on={twoStep} onChange={setTwoStep} label="Two-step clock" /></div>

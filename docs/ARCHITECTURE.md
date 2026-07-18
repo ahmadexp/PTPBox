@@ -56,11 +56,25 @@ fill is applied in live mode.
 - move/restore interfaces;
 - start/stop LinuxPTP processes;
 - generate role-specific `ptp4l` configuration;
-- synchronize distinct PHCs with `phc2sys`;
+- run directional OC and GM processes for every intermediate stage, matching
+  the original PTPBox cascade;
+- bridge those processes with `phc2sys` only when the ports expose distinct
+  PHCs; shared-PHC cards need no additional synchronization process;
 - track child processes and logs.
+
+The reference host uses end-to-end delay, as did the original PTPBox. The
+generated LinuxPTP configuration matches `summary_interval` to the Sync
+interval. LinuxPTP therefore emits one signed master-offset sample per update
+instead of aggregating multiple updates into unsigned RMS summaries.
+On Intel ICE hardware, the controller applies LinuxPTP's documented real-time
+priority 30 to the driver's timestamp workers. The reference cascade uses the
+original project's one Sync per second cadence to avoid overdriving a shared
+multi-port timestamp engine.
 
 The web sudo policy permits only `start`, `stop`, `restart`, and `status` with no
 additional arguments. `setup` and `teardown` remain manual root operations.
+The observation service uses `KillMode=process`, so restarting or upgrading the
+web agent does not terminate the separately tracked timing processes.
 
 ## Data plane
 
@@ -117,7 +131,8 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | PIDs and generated LinuxPTP config |
+| `/run/ptpbox` | root | boot | managed process IDs |
+| `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible generated LinuxPTP config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |
 

@@ -17,11 +17,11 @@ Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static
 ExecStart=/usr/bin/python3 /opt/ptpbox-web/agent/ptpbox_agent.py
 Restart=on-failure
 RestartSec=2
-NoNewPrivileges=true
+KillMode=process
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@PTPBOX_ROOT@/runtime
+ReadWritePaths=@PTPBOX_ROOT@/runtime /etc/linuxptp /run/netns /run/ptpbox /var/log/ptpbox
 
 [Install]
 WantedBy=multi-user.target

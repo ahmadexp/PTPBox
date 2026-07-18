@@ -110,7 +110,8 @@ The installer:
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
 6. validates a sudoers policy for `start`, `stop`, `restart`, and `status` only;
-7. starts the web service on port 8090.
+7. prepares AppArmor-compatible LinuxPTP configuration storage;
+8. starts the web service on port 8090.
 
 ### 4. Verify the control plane
 
@@ -135,10 +136,16 @@ sudo ptpboxctl start
 sudo ptpboxctl status
 ```
 
-Or use the web control once the topology and sudo policy are installed.
+Or use the live **Start cascade / Stop cascade** control in the web UI once the
+topology and sudo policy are installed. The control tracks the real process
+state and does not require another password prompt.
 
 Logs are written under `/var/log/ptpbox`. Runtime process state and generated
-LinuxPTP configuration are stored under `/run/ptpbox`.
+LinuxPTP configuration are stored under `/run/ptpbox` and `/etc/linuxptp`
+respectively. `/etc/linuxptp` is required by Ubuntu's packaged AppArmor policy.
+Every intermediate namespace runs a directional upstream OC and downstream GM,
+as in the original PTPBox. When the two ports expose separate PHCs, the
+controller adds a dedicated `phc2sys` bridge; a shared-PHC NIC needs no bridge.
 
 ## Stop and restore
 
