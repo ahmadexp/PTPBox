@@ -37,16 +37,16 @@ configuration, and an explicit simulation fallback for demos.
 
 <img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing an eight-clock cascade and accumulated offset traces" width="100%">
 
-The first viewport is the experiment: GM to OC, measured one clock at a time.
-Select any node to isolate its trace, current master offset, path delay,
-frequency adjustment, PHC, quality score, and active servo constants.
+The first viewport is the experiment: GM to OC, measured one hardware clock at
+a time. Select any node to isolate its direct PHC difference from BC1, per-hop
+PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
 
 ## What you can do
 
 | Surface | Purpose |
 | --- | --- |
-| **Cascade overview** | See the physically verified topology, raw per-hop offset, path delay, window RMS, frequency correction, and servo state. |
-| **Analytics** | Compare unsmoothed LinuxPTP traces, inspect the endpoint distribution, and export the raw timestamped samples. |
+| **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
+| **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo tuning** | Adjust PI gains and thresholds, preview behavior, validate, stage, and roll changes through the chain. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
@@ -118,13 +118,15 @@ flowchart LR
     Agent["PTPBox agent\nPython · unprivileged"]
     Inventory["sysfs · ethtool\nNIC / PHC inventory"]
     Logs["LinuxPTP logs\ntelemetry parser"]
+    PHCs["/dev/ptp*\nread-only comparisons"]
     Helper["ptpboxctl\nfixed privileged verbs"]
     NS["BC1 … BC7\nnetwork namespaces"]
-    PTP["ptp4l · phc2sys\nhardware clocks"]
+    PTP["ptp4l\nhardware clocks"]
 
     Browser <-->|"HTTP · :8090"| Agent
     Agent --> Inventory
     Agent --> Logs
+    Agent --> PHCs
     Agent -. "sudo: start / stop / restart / status only" .-> Helper
     Helper --> NS
     NS --> PTP
@@ -137,24 +139,26 @@ and [Security](SECURITY.md).
 
 ## What gets measured
 
-- Master offset and RMS offset for each clock
-- Per-hop delta and cumulative cascade error
-- Mean path delay and frequency adjustment
+- Direct PHC difference and PHC RMS for each NIC relative to BC1
+- Read-only previous-hop delta and cumulative cascade error
+- LinuxPTP master offset, mean path delay, and frequency adjustment
 - Lock/tracking state and recovery events
 - MTIE windows and mask verdicts
 - Offset distribution, P95, skew, and contribution share
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
 - Experiment metadata, servo constants, and capture lifecycle
 
-The live agent parses native LinuxPTP output. Missing data is never silently
-presented as live; the UI switches to its deterministic hardware-model mode.
+The live agent reads mapped PHCs without changing them and separately parses
+native LinuxPTP output. Missing data is never silently presented as live; the
+UI switches to its deterministic hardware-model mode.
 
 ## Hardware
 
 The reference host uses seven dual-port timing-capable adapters for the cascade
-plus separate management ports. PTPBox is not tied to ConnectX hardware: Intel
-E810, i210/i225, ixgbe devices, and mixed-PHC systems work as long as LinuxPTP
-and hardware timestamping are available.
+plus separate management ports. Each adapter is isolated in its own namespace.
+PTPBox never hides a split-clock card with a local synchronization loop: if its
+ports do not share or hardware-synchronize a PHC, the direct comparison exposes
+that difference as part of the experiment.
 
 <table>
   <tr>
@@ -195,11 +199,11 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory, raw incremental LinuxPTP telemetry pipeline, standalone host,
-inventory agent, configuration staging, and guarded lifecycle controller are
-implemented. The next milestones are durable experiment storage, direct PMC and
-PPS comparison datasets, automated MTIE/TDEV/Allan deviation, and reusable
-topology presets. See [CHANGELOG.md](CHANGELOG.md).
+The Observatory, direct incremental PHC comparison pipeline, raw LinuxPTP servo
+telemetry, standalone host, inventory agent, configuration staging, and guarded
+lifecycle controller are implemented. The next milestones are durable
+experiment storage, PPS comparison datasets, automated MTIE/TDEV/Allan
+deviation, and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 

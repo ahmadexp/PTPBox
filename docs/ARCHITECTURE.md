@@ -34,7 +34,9 @@ operator account and reads:
 - `/sys/class/net` for link, driver, bus, MAC, speed, and PHC data;
 - `ethtool -T` when sysfs does not expose a distinct PHC;
 - `ip netns list` for namespace state;
-- `ps` for active `ptp4l`, `phc2sys`, and `ts2phc` processes;
+- `ps` for active `ptp4l` processes;
+- `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map;
+- mapped `/dev/ptp*` clocks for one-hertz, read-only midpoint comparisons;
 - raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
   `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo
   state.
@@ -43,9 +45,9 @@ It also serves the standalone application and stages JSON configuration under
 `PTPBOX_STATE_DIR`.
 
 The browser requests an initial raw window and then polls incrementally with a
-`since` cursor. Samples retain their LinuxPTP cadence and timestamp. Missing
-samples are rendered as gaps; no moving average, interpolation, or synthetic
-fill is applied in live mode.
+`since` cursor. Direct PHC comparisons and LinuxPTP diagnostics retain their
+native timestamps. Missing samples are rendered as gaps; no moving average,
+interpolation, or synthetic fill is applied in live mode.
 
 ### Lifecycle helper
 
@@ -58,8 +60,9 @@ fill is applied in live mode.
 - generate role-specific `ptp4l` configuration;
 - run directional OC and GM processes for every intermediate stage, matching
   the original PTPBox cascade;
-- bridge those processes with `phc2sys` only when the ports expose distinct
-  PHCs; shared-PHC cards need no additional synchronization process;
+- write the authoritative PHC measurement map for the unprivileged agent;
+- never run a local PHC discipline loop—the NICs synchronize only through
+  `ptp4l` over the physical chain;
 - track child processes and logs.
 
 The reference host uses end-to-end delay, as did the original PTPBox. The
@@ -94,11 +97,20 @@ by default, so the data-plane interfaces do not require IP addressing.
 For intermediate nodes:
 
 1. a client-only `ptp4l` instance disciplines the ingress PHC;
-2. `phc2sys` transfers time from ingress PHC to egress PHC when they differ;
-3. a server-only `ptp4l` instance serves the next hop.
+2. a server-only `ptp4l` instance serves the next hop from the card's egress;
+3. the observation agent reads the NIC's measurement PHC and compares it to
+   BC1 without adjusting either clock.
 
-If `ethtool -T` reports the same timestamp-provider index on both ports,
-`phc2sys` is skipped because the ports already share one PHC.
+This is the original PTPBox real-time model. A dual-port adapter that shares or
+hardware-synchronizes its port clocks naturally propagates time. If a card
+exposes genuinely independent PHCs, their divergence remains visible instead
+of being concealed by a host-side control loop.
+
+The PHC sampler opens each mapped `/dev/ptp*` read-only. For every target it
+reads BC1, the target, then BC1 again, and compares the target with the midpoint
+of the two BC1 reads. It reports both cumulative difference from BC1 and the
+difference from the previous NIC. This is measurement only: no adjustment,
+frequency command, or phase step is issued.
 
 ## Control flow
 
@@ -119,9 +131,10 @@ sequenceDiagram
     A->>C: sudo -n ptpboxctl start
     C->>C: Validate topology and management exclusions
     C->>N: Create namespaces and move declared ports
-    C->>P: Start ptp4l / phc2sys with fixed argv
+    C->>P: Start ptp4l with fixed argv
     P-->>A: LinuxPTP logs
-    A-->>UI: Telemetry and process state
+    A->>N: Read mapped PHCs without adjustment
+    A-->>UI: PHC comparisons, servo telemetry, process state
 ```
 
 ## State and files
@@ -131,7 +144,7 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs |
+| `/run/ptpbox` | root | boot | managed process IDs and read-only PHC map |
 | `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible generated LinuxPTP config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |
@@ -143,8 +156,9 @@ Process spawning uses argument arrays rather than a shell.
 
 ### Live
 
-The agent is reachable and LinuxPTP logs contain parseable measurements. The UI
-can replace modeled series with observed offset, frequency, and path delay.
+The agent is reachable and direct PHC reads are fresh. The UI replaces modeled
+series with observed PHC differences while retaining LinuxPTP frequency, delay,
+and servo state as separate diagnostics.
 
 ### Observer
 
@@ -163,8 +177,8 @@ deterministic demonstration model. No control operation is attempted.
 - Configuration is validated and serialized as JSON.
 - `ptpboxctl` never executes user-provided shell text.
 - The controller refuses overlap between assigned and management interfaces.
-- The systemd service uses `NoNewPrivileges`, `ProtectSystem=strict`,
-  `ProtectHome=read-only`, and one explicit writable runtime path.
+- The systemd service uses `ProtectSystem=strict`, `ProtectHome=read-only`, and
+  the `clock` supplementary group for read-only PHC device access.
 - Public exposure requires a separate authenticated TLS reverse proxy.
 
 See [`SECURITY.md`](../SECURITY.md) for deployment policy.

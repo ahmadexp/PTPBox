@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "ptpboxctl.py"
@@ -31,6 +32,7 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("boundary_clock_jbod 1", text)
         self.assertIn("summary_interval 0", text)
         self.assertIn("tx_timestamp_timeout 100", text)
+        self.assertIn("step_threshold 0.000000000", text)
         self.assertNotIn("serverOnly", text)
         self.assertNotIn("clientOnly", text)
 
@@ -42,6 +44,39 @@ class ControllerConfigTests(unittest.TestCase):
 
         self.assertIn("serverOnly 1", server.read_text(encoding="utf-8"))
         self.assertIn("clientOnly 1", client.read_text(encoding="utf-8"))
+
+    def test_real_time_cascade_uses_ptp4l_only(self) -> None:
+        topology = {
+            "nodes": [
+                {"name": "BC1", "ingress": "p1", "egress": "p2"},
+                {"name": "BC2", "ingress": "p3", "egress": "p4"},
+                {"name": "BC4", "ingress": "p5", "egress": "p6"},
+            ]
+        }
+        processes = []
+
+        def fake_spawn(label, args, spawned):
+            spawned.append({"label": label, "pid": len(spawned) + 1, "command": args})
+            processes.append((label, args))
+
+        pids_file = Path(self.temporary.name) / "processes.json"
+        with (
+            patch.object(CONTROLLER, "STATE_DIR", Path(self.temporary.name)),
+            patch.object(CONTROLLER, "PIDS_FILE", pids_file),
+            patch.object(CONTROLLER, "require_root"),
+            patch.object(CONTROLLER, "status", return_value={"running": False}),
+            patch.object(CONTROLLER, "setup", return_value={"ok": True}),
+            patch.object(CONTROLLER, "prioritize_timestamp_workers", return_value=[]),
+            patch.object(CONTROLLER, "topology", return_value=topology),
+            patch.object(CONTROLLER, "render_ptp_config"),
+            patch.object(CONTROLLER, "spawn", side_effect=fake_spawn),
+        ):
+            result = CONTROLLER.start()
+
+        self.assertTrue(result["running"])
+        self.assertEqual(["BC1-GM", "BC2-OC", "BC2-GM", "BC4-OC"], [label for label, _args in processes])
+        self.assertTrue(all("ptp4l" in args for _label, args in processes))
+        self.assertTrue(all("phc2sys" not in args for _label, args in processes))
 
 
 if __name__ == "__main__":

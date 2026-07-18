@@ -20,6 +20,7 @@ LINUXPTP_CONFIG_DIR = Path(os.environ.get("PTPBOX_LINUXPTP_CONFIG_DIR", "/etc/li
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", "/etc/ptpbox/topology.json"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", "/etc/ptpbox/config.json"))
 PIDS_FILE = STATE_DIR / "processes.json"
+PHC_MAP_FILE = STATE_DIR / "phcs.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "domain": 24,
@@ -32,7 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "type": "pi",
         "kp": 0.7,
         "ki": 0.3,
-        "step_threshold_ns": 20,
+        "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
     },
@@ -113,7 +114,8 @@ def setup() -> dict[str, Any]:
         command(["ip", "netns", "exec", name, "ip", "link", "set", "lo", "up"])
         configured.append(name)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return {"ok": True, "configured_namespaces": configured, "interfaces": len(assigned)}
+    phcs = write_phc_inventory(topo)
+    return {"ok": True, "configured_namespaces": configured, "interfaces": len(assigned), "phcs": phcs}
 
 
 def render_ptp_config(role: str, path: Path, boundary_jbod: bool = False) -> None:
@@ -157,6 +159,33 @@ def timestamp_provider(namespace: str, interface: str) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def write_phc_inventory(topo: dict[str, Any]) -> list[dict[str, Any]]:
+    """Persist the read-only PHC measurement map for the observation agent."""
+    inventory: list[dict[str, Any]] = []
+    for index, node in enumerate(topo["nodes"]):
+        ingress_index = timestamp_provider(node["name"], node["ingress"])
+        egress_index = timestamp_provider(node["name"], node["egress"])
+        ingress_phc = f"ptp{ingress_index}" if ingress_index is not None else None
+        egress_phc = f"ptp{egress_index}" if egress_index is not None else None
+        inventory.append(
+            {
+                "id": node["name"],
+                "namespace": node["name"],
+                "ingress": node["ingress"],
+                "egress": node["egress"],
+                "ingress_phc": ingress_phc,
+                "egress_phc": egress_phc,
+                # The first card supplies time on its egress. Every following
+                # card is measured at the ingress PHC disciplined by ptp4l.
+                "measurement_phc": egress_phc if index == 0 else ingress_phc,
+                "shared_phc": ingress_index is not None and ingress_index == egress_index,
+            }
+        )
+    PHC_MAP_FILE.write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
+    PHC_MAP_FILE.chmod(0o644)
+    return inventory
 
 
 def prioritize_timestamp_workers() -> list[int]:
@@ -204,37 +233,19 @@ def start() -> dict[str, Any]:
     client_config = LINUXPTP_CONFIG_DIR / "ptpbox-client.conf"
     render_ptp_config("server", server_config)
     render_ptp_config("client", client_config)
-    values = config()
-    servo = values["servo"]
     processes: list[dict[str, Any]] = []
     try:
         first = topo["nodes"][0]
         spawn("BC1-GM", ["ip", "netns", "exec", first["name"], "ptp4l", "-f", str(server_config), "-i", first["egress"], "-m", "-q"], processes)
         for node in topo["nodes"][1:-1]:
-            source_phc = timestamp_provider(node["name"], node["ingress"])
-            sink_phc = timestamp_provider(node["name"], node["egress"])
-            shared_phc = source_phc is not None and source_phc == sink_phc
-            # The explicitly directional OC -> GM model mirrors the original
-            # PTPBox and works across heterogeneous drivers. Split-PHC cards
-            # receive a bridge; shared-PHC cards need no extra synchronizer.
+            # Match the original real-time PTPBox model exactly: ptp4l
+            # disciplines each NIC over the wire. PHCs are observed, never
+            # synchronized by a local phc2sys control loop.
             spawn(
                 f"{node['name']}-OC",
                 ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(client_config), "-i", node["ingress"], "-m", "-q"],
                 processes,
             )
-            if not shared_phc:
-                spawn(
-                    f"{node['name']}-PHC",
-                    [
-                        "ip", "netns", "exec", node["name"], "phc2sys",
-                        "-s", node["ingress"], "-c", node["egress"], "-O", "0",
-                        "-P", str(servo["kp"]), "-I", str(servo["ki"]),
-                        "-S", str(float(servo["step_threshold_ns"]) / 1_000_000_000),
-                        "-F", str(float(servo["first_step_threshold_ns"]) / 1_000_000_000),
-                        "-m", "-q",
-                    ],
-                    processes,
-                )
             spawn(
                 f"{node['name']}-GM",
                 ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(server_config), "-i", node["egress"], "-m", "-q"],

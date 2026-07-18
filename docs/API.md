@@ -33,7 +33,7 @@ and whether privileged lifecycle control is installed.
   "processes": [],
   "running": false,
   "observer_only": false,
-  "agent_version": "1.0.0"
+  "agent_version": "1.3.0"
 }
 ```
 
@@ -62,12 +62,47 @@ and whether privileged lifecycle control is installed.
 
 ## Telemetry
 
+### `GET /api/phc`
+
+Returns one-hertz, read-only PHC comparisons. The first mapped NIC is the
+reference. Every target is bracketed by two reference reads and compared with
+their midpoint. `offset_ns` is cumulative difference from BC1;
+`previous_hop_offset_ns` is the delta from the preceding NIC. The sampler never
+sets, steps, or adjusts a clock.
+
+```json
+{
+  "reference": "BC1",
+  "reference_phc": "ptp2",
+  "method": "sequential PHC midpoint reads",
+  "raw": true,
+  "smoothing": "none",
+  "clocks": [
+    {
+      "id": "BC2",
+      "phc": "ptp1",
+      "measurement": {
+        "offset_ns": 42,
+        "previous_hop_offset_ns": 42,
+        "read_span_ns": 2100,
+        "observed_at": 1784327800.0,
+        "raw": true,
+        "valid": true,
+        "error": null
+      }
+    }
+  ]
+}
+```
+
 ### `GET /api/telemetry`
 
 The agent reads raw client-side LinuxPTP logs from `PTPBOX_LOG_DIR` (normally
 `/var/log/ptpbox`) with a legacy fallback to `PTPBOX_ROOT/BC*`. It extracts
 every offset, frequency adjustment, mean path delay, servo state, and LinuxPTP
-source timestamp without smoothing or interpolation.
+source timestamp without smoothing or interpolation. The response also embeds
+the direct PHC measurement and incremental `phc_samples` for each clock so the
+UI can plot clock differences independently from servo diagnostics.
 
 Query parameters:
 
@@ -79,6 +114,8 @@ Query parameters:
 {
   "timestamp": 1784327816.64,
   "mode": "live",
+  "phc_mode": "live",
+  "measurement_source": "direct PHC comparison",
   "measured_clocks": 1,
   "fresh_clocks": 1,
   "raw": true,
@@ -92,6 +129,17 @@ Query parameters:
       "logs": 2,
       "window_sample_count": 1920,
       "rms_ns": 18.7,
+      "measurement_phc": "ptp1",
+      "phc_rms_ns": 45.1,
+      "phc_measurement": {
+        "offset_ns": 42,
+        "previous_hop_offset_ns": 42,
+        "phc": "ptp1",
+        "observed_at": 1784327800.0,
+        "raw": true,
+        "valid": true
+      },
+      "phc_samples": [],
       "measurement": {
         "offset_ns": 42,
         "frequency_ppb": -12.4,
@@ -109,10 +157,10 @@ Query parameters:
 }
 ```
 
-`mode` is `live` only when at least one measurement is less than five seconds
-old. It becomes `stale` for old measurements and `waiting` when no parsable
-LinuxPTP sample exists. `samples` can be empty on an incremental request even
-while `measurement` and window statistics remain populated.
+`mode` describes LinuxPTP log freshness; `phc_mode` independently describes
+direct PHC-read freshness. `samples` and `phc_samples` can be empty on an
+incremental request even while their latest measurements and window statistics
+remain populated.
 
 The raw payload preserves invalid samples but marks them `valid: false`. For
 this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
@@ -142,7 +190,7 @@ Validates and atomically stages a complete configuration document.
     "type": "pi",
     "kp": 0.7,
     "ki": 0.3,
-    "step_threshold_ns": 20,
+    "step_threshold_ns": 0,
     "first_step_threshold_ns": 20000,
     "sanity_freq_limit_ppb": 200000
   }
@@ -164,7 +212,7 @@ Stages experiment metadata under `PTPBOX_STATE_DIR/experiment.json`.
   "target": "BC4",
   "amplitude_ns": 1000,
   "duration_s": 120,
-  "servo": { "kp": 0.7, "ki": 0.3, "step_threshold_ns": 20 }
+  "servo": { "kp": 0.7, "ki": 0.3, "step_threshold_ns": 0 }
 }
 ```
 

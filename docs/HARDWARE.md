@@ -20,7 +20,9 @@ Hardware timestamp provider index: N
 ```
 
 The provider index matters. Two ports can expose hardware timestamping while
-sharing one PHC. PTPBox detects this and omits unnecessary cross-PHC discipline.
+sharing one PHC. PTPBox records both providers for observation but never adds a
+cross-PHC discipline loop. Shared or hardware-synchronized NIC clocks propagate
+time naturally; genuinely distinct clocks remain visible in the measurements.
 
 ## Reference host
 
@@ -110,6 +112,7 @@ the field is retained for future OOB and UDP profile support.
 - [ ] Confirm every declared timing interface exists.
 - [ ] Confirm both ends of each cable report carrier.
 - [ ] Confirm timestamp provider indices and shared-PHC pairs.
+- [ ] Confirm `/run/ptpbox/phcs.json` selects BC1 egress and each receiver ingress.
 - [ ] Confirm LinuxPTP 4.x is installed.
 - [ ] Keep a physical or BMC console open.
 - [ ] Start with `ptpboxctl status`, then `start`.

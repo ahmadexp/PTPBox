@@ -46,6 +46,7 @@ type ClockNode = {
   label: string;
   role: "Grandmaster" | "Boundary" | "Ordinary";
   offset: number;
+  hopOffset?: number;
   meanPathDelay: number;
   rms: number;
   frequencyPpb: number;
@@ -55,6 +56,7 @@ type ClockNode = {
   phc: string;
   color: string;
   measured: boolean;
+  ptpMeasured?: boolean;
   sampleCount: number;
   source: string;
   lastSampleAt: number | null;
@@ -89,6 +91,18 @@ type TelemetrySample = {
   validation_error: string | null;
 };
 
+type PhcSample = {
+  offset_ns: number | null;
+  previous_hop_offset_ns: number | null;
+  read_span_ns: number | null;
+  observed_at: number;
+  sample_id: string;
+  phc: string;
+  raw: true;
+  valid: boolean;
+  error: string | null;
+};
+
 type TelemetryClock = {
   id: string;
   role: "grandmaster" | "boundary" | "ordinary";
@@ -101,6 +115,11 @@ type TelemetryClock = {
   window_invalid_sample_count: number;
   rms_ns: number | null;
   logs: number;
+  measurement_phc: string | null;
+  phc_measurement: PhcSample | null;
+  phc_samples: PhcSample[];
+  phc_window_sample_count: number;
+  phc_rms_ns: number | null;
 };
 
 type TelemetryPayload = {
@@ -113,6 +132,12 @@ type TelemetryPayload = {
   valid_sample_count: number;
   invalid_sample_count: number;
   mode: "live" | "stale" | "waiting";
+  phc_mode: "live" | "stale" | "waiting";
+  phc_reference: string | null;
+  phc_reference_device: string | null;
+  phc_fresh_clocks: number;
+  phc_method: string;
+  measurement_source: "direct PHC comparison";
   raw: true;
   smoothing: "none";
   history_seconds: number;
@@ -183,10 +208,22 @@ function buildHistory(length = 120): HistoryPoint[] {
   }));
 }
 
+function formatNanoseconds(value: number, signed = false) {
+  const absolute = Math.abs(value);
+  const [scaled, unit] = absolute >= 1_000_000_000
+    ? [value / 1_000_000_000, "s"]
+    : absolute >= 1_000_000
+      ? [value / 1_000_000, "ms"]
+      : absolute >= 1_000
+        ? [value / 1_000, "µs"]
+        : [value, "ns"];
+  const decimals = Math.abs(scaled) >= 100 ? 1 : Math.abs(scaled) >= 10 ? 2 : 3;
+  return `${signed && value >= 0 ? "+" : ""}${scaled.toFixed(decimals)} ${unit}`;
+}
+
 function formatOffset(value: number, measured = true) {
   if (!measured || !Number.isFinite(value)) return "—";
-  if (Math.abs(value) < 1) return `${value >= 0 ? "+" : ""}${value.toFixed(1)} ns`;
-  return `${value >= 0 ? "+" : ""}${value.toFixed(1)} ns`;
+  return formatNanoseconds(value, true);
 }
 
 function rangeSeconds(range: string) {
@@ -205,32 +242,35 @@ function stateFromMeasurement(sample: TelemetrySample | null, stale: boolean, ro
 
 function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
   return payload.clocks.map((clock, index) => {
-    const measurement = clock.measurement;
-    const stale = Boolean(measurement && payload.timestamp - measurement.observed_at > 5);
+    const ptpMeasurement = clock.measurement;
+    const phcMeasurement = clock.phc_measurement;
+    const stale = Boolean(ptpMeasurement && payload.timestamp - ptpMeasurement.observed_at > 5);
     return {
       id: clock.id,
       label: `${clock.id}${clock.role === "grandmaster" ? " · GM" : clock.role === "ordinary" ? " · OC" : ""}`,
       role: clock.role === "grandmaster" ? "Grandmaster" : clock.role === "ordinary" ? "Ordinary" : "Boundary",
-      offset: measurement?.offset_ns ?? 0,
-      meanPathDelay: measurement?.mean_path_delay_ns ?? 0,
-      rms: clock.rms_ns ?? 0,
-      frequencyPpb: measurement?.frequency_ppb ?? 0,
-      state: stateFromMeasurement(measurement, stale, clock.role),
+      offset: phcMeasurement?.offset_ns ?? 0,
+      hopOffset: phcMeasurement?.previous_hop_offset_ns ?? 0,
+      meanPathDelay: ptpMeasurement?.mean_path_delay_ns ?? 0,
+      rms: clock.phc_rms_ns ?? 0,
+      frequencyPpb: ptpMeasurement?.frequency_ppb ?? 0,
+      state: stateFromMeasurement(ptpMeasurement, stale, clock.role),
       ingress: clock.ingress,
       egress: clock.egress,
-      phc: measurement?.source ?? "—",
+      phc: clock.measurement_phc ? `/dev/${clock.measurement_phc}` : "—",
       color: TRACE_COLORS[index % TRACE_COLORS.length],
-      measured: Boolean(measurement?.valid),
-      sampleCount: clock.window_valid_sample_count,
-      source: measurement?.validation_error ?? measurement?.source ?? "No LinuxPTP sample",
-      lastSampleAt: measurement?.observed_at ?? null,
+      measured: Boolean(phcMeasurement?.valid && phcMeasurement.offset_ns !== null),
+      ptpMeasured: Boolean(ptpMeasurement?.valid),
+      sampleCount: clock.phc_window_sample_count,
+      source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
+      lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
   });
 }
 
 function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
   return payload.clocks
-    .flatMap((clock) => clock.samples.filter((sample) => sample.valid).map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns }, key: `${clock.id}:${sample.sample_id}` })))
+    .flatMap((clock) => clock.phc_samples.filter((sample) => sample.valid && sample.offset_ns !== null).map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns as number }, key: `${clock.id}:${sample.sample_id}` })))
     .sort((left, right) => left.t - right.t);
 }
 
@@ -286,12 +326,15 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
       ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("Waiting for raw LinuxPTP samples", w / 2, h / 2);
+      ctx.fillText("Waiting for direct PHC samples", w / 2, h / 2);
       return;
     }
-    const rawMax = Math.max(20, ...allValues.map((value) => Math.abs(value)));
-    const yMax = Math.ceil(rawMax / 25) * 25;
-    const yMin = -Math.max(25, Math.round(yMax * 0.18));
+    const measuredMin = Math.min(...allValues);
+    const measuredMax = Math.max(...allValues);
+    const measuredSpan = Math.max(25, measuredMax - measuredMin);
+    const padding = Math.max(12.5, measuredSpan * 0.08);
+    const yMax = Math.max(0, measuredMax) + padding;
+    const yMin = Math.min(0, measuredMin) - padding;
     const span = yMax - yMin;
     const tMin = Math.min(...data.map((point) => point.t));
     const tMax = Math.max(...data.map((point) => point.t));
@@ -314,7 +357,7 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
       ctx.stroke();
       if (!compact) {
         ctx.fillStyle = "#69818a";
-        ctx.fillText(`${Math.round(value)}`, pad.l - 10, py);
+        ctx.fillText(formatNanoseconds(value), pad.l - 10, py);
       }
     }
     for (let i = 0; i <= 6; i++) {
@@ -407,7 +450,7 @@ export default function PTPBoxDashboard() {
   const [experimentProgress, setExperimentProgress] = useState(38);
   const [kp, setKp] = useState(0.7);
   const [ki, setKi] = useState(0.3);
-  const [stepThreshold, setStepThreshold] = useState(20);
+  const [stepThreshold, setStepThreshold] = useState(0);
   const [applyOpen, setApplyOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [profile, setProfile] = useState("G.8275.1 Telecom");
@@ -509,12 +552,12 @@ export default function PTPBoxDashboard() {
         const newest = incoming.reduce((value, point) => Math.max(value, point.t), latestTelemetryAtRef.current);
         latestTelemetryAtRef.current = newest;
         setTelemetryStatus(payload);
-        setConnection(payload.mode);
+        setConnection(payload.phc_mode);
         setNodes(nodesFromTelemetry(payload));
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
 
         const ids = payload.clocks.map((clock) => clock.id);
-        const measuredIds = payload.clocks.filter((clock) => clock.measurement?.valid && clock.role !== "grandmaster").map((clock) => clock.id);
+        const measuredIds = payload.clocks.filter((clock) => clock.phc_measurement?.valid && clock.phc_measurement.offset_ns !== null && clock.role !== "grandmaster").map((clock) => clock.id);
         setSelectedNode((current) => ids.includes(current) ? current : measuredIds[measuredIds.length - 1] ?? ids[ids.length - 1] ?? current);
         setVisibleTraces((current) => {
           const retained = current.filter((id) => measuredIds.includes(id));
@@ -568,10 +611,10 @@ export default function PTPBoxDashboard() {
     const locked = nodes.filter((node) => node.role !== "Grandmaster" && node.state === "LOCKED").length;
     if (connection !== "simulation") {
       return [
-        { label: "Endpoint RMS", value: final.measured ? `${final.rms.toFixed(1)} ns` : "—", delta: "RAW", note: `${final.sampleCount} samples`, icon: Activity, good: final.measured },
-        { label: "Peak raw offset", value: values.length ? `${peak.toFixed(0)} ns` : "—", delta: "UNFILTERED", note: `${range} window`, icon: Zap, good: values.length > 0 },
+        { label: "Endpoint PHC RMS", value: final.measured ? formatNanoseconds(final.rms) : "—", delta: "DIRECT", note: `${final.sampleCount} PHC reads`, icon: Activity, good: final.measured },
+        { label: "Peak PHC difference", value: values.length ? formatNanoseconds(peak) : "—", delta: "UNFILTERED", note: `${range} vs BC1`, icon: Zap, good: values.length > 0 },
         { label: "Locked receivers", value: `${locked}/${receiverCount}`, delta: telemetryStatus?.mode.toUpperCase() ?? "WAITING", note: "LinuxPTP servo state", icon: ShieldCheck, good: locked === receiverCount && receiverCount > 0 },
-        { label: "Raw samples", value: history.length.toLocaleString(), delta: "NO SMOOTHING", note: "browser capture buffer", icon: TimerReset, good: history.length > 0 },
+        { label: "PHC comparisons", value: history.length.toLocaleString(), delta: "NO CONTROL", note: "read-only browser buffer", icon: TimerReset, good: history.length > 0 },
       ];
     }
     return [
@@ -588,12 +631,12 @@ export default function PTPBoxDashboard() {
   };
 
   const downloadRawCsv = () => {
-    const rows = ["timestamp_utc,clock,offset_ns"];
+    const rows = ["timestamp_utc,clock,phc_offset_vs_bc1_ns"];
     history.forEach((point) => Object.entries(point.values).forEach(([clock, offset]) => rows.push(`${new Date(point.t * 1000).toISOString()},${clock},${offset}`)));
     const url = URL.createObjectURL(new Blob([`${rows.join("\n")}\n`], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `ptpbox-raw-${new Date().toISOString().replaceAll(":", "-")}.csv`;
+    anchor.download = `ptpbox-phc-comparison-${new Date().toISOString().replaceAll(":", "-")}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -739,7 +782,7 @@ export default function PTPBoxDashboard() {
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
               <h1>{section === "Overview" ? "Cascade overview" : section}</h1>
-              <p>{section === "Overview" ? "See timing quality degrade hop by hop, then tune the system that creates it." : section === "Analytics" ? "Interrogate raw per-hop offset, noise, frequency correction, and path delay across every receiver." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -748,10 +791,10 @@ export default function PTPBoxDashboard() {
           </div>
 
           <div className={`data-provenance ${connection}`}>
-            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "LINUXPTP LOG STREAM"}</span>
-            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "raw=true · smoothing=none"}</code>
-            <span>{history.length.toLocaleString()} samples buffered</span>
-            {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} invalid rejected</span>}
+            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "DIRECT PHC COMPARISON"}</span>
+            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "read-only · raw=true · smoothing=none"}</code>
+            <span>{history.length.toLocaleString()} PHC samples buffered</span>
+            {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} ptp4l samples rejected</span>}
             <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
             {agentStatus && connection !== "simulation" && (
               <button
@@ -777,7 +820,7 @@ export default function PTPBoxDashboard() {
                   <div className="topology-track">
                     {nodes.map((node, index) => (
                       <div className="node-unit" key={node.id}>
-                        {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {node.measured ? `${node.meanPathDelay} ns` : "—"}</small></div>}
+                        {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {formatOffset(node.hopOffset ?? 0, node.measured)}</small></div>}
                         <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
                           <div className="node-topline"><span>{node.role === "Boundary" ? "BC" : node.role === "Grandmaster" ? "GM" : "OC"}</span><i style={{ background: node.color }} /></div>
                           <div className="node-symbol"><Clock3 size={20} strokeWidth={1.4} /><span className="pulse-ring" /></div>
@@ -792,7 +835,7 @@ export default function PTPBoxDashboard() {
                 </div>
                 <div className="topology-footer">
                   <span><i className="legend-dot locked" /> Locked</span><span><i className="legend-dot tracking" /> Tracking</span><span><i className="legend-line" /> Measured hop</span>
-                  <p><Info size={13} /> Raw ptp4l offsets only; impossible hardware path delays are flagged and excluded, never smoothed.</p>
+                  <p><Info size={13} /> NICs synchronize only through ptp4l over the wires. PHCs are read for comparison and never disciplined by the observatory.</p>
                 </div>
               </section>
 
@@ -809,7 +852,7 @@ export default function PTPBoxDashboard() {
               <div className="overview-grid">
                 <section className="instrument-panel chart-panel">
                   <div className="panel-heading chart-heading">
-                    <div><span className="section-kicker">RAW TIME ERROR</span><h2>LinuxPTP master offset</h2></div>
+                    <div><span className="section-kicker">RAW PHC DIFFERENCE</span><h2>NIC clocks relative to BC1</h2></div>
                     <div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div>
                   </div>
                   <div className="chart-legend">
@@ -817,10 +860,10 @@ export default function PTPBoxDashboard() {
                       const node = nodes.find((item) => item.id === id);
                       return node ? <button type="button" key={id} onClick={() => selectNode(id)} className={selectedNode === id ? "active" : ""}><i style={{ background: node.color }} /> {node.label}<strong>{formatOffset(node.offset, node.measured)}</strong></button> : null;
                     })}
-                    <span className="chart-unit">OFFSET · ns</span>
+                    <span className="chart-unit">PHC Δ VS BC1 · AUTO-SCALED</span>
                   </div>
                   <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a validated raw ptp4l sample. Missing samples remain gaps; invalid hardware timestamps are flagged, never interpolated.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a direct, read-only PHC comparison. No phc2sys loop, smoothing, or interpolation is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">
@@ -830,13 +873,13 @@ export default function PTPBoxDashboard() {
                   </div>
                   <div className="selected-status">
                     <div className="radial-score"><span>{activeNode.measured ? activeNode.sampleCount : 0}</span><small>SAMPLES</small></div>
-                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>latest raw master offset</small></div>
+                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
                   </div>
                   <div className="selected-metrics">
-                    <div><span>Window RMS</span><strong>{activeNode.measured ? `${activeNode.rms.toFixed(1)} ns` : "—"}</strong></div>
-                    <div><span>Mean path delay</span><strong>{activeNode.measured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
-                    <div><span>Frequency adj.</span><strong>{activeNode.measured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
-                    <div><span>Log source</span><strong>{activeNode.source}</strong></div>
+                    <div><span>PHC window RMS</span><strong>{activeNode.measured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
+                    <div><span>Previous-hop PHC Δ</span><strong>{formatOffset(activeNode.hopOffset ?? 0, activeNode.measured)}</strong></div>
+                    <div><span>PTP path delay</span><strong>{activeNode.ptpMeasured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
+                    <div><span>PTP frequency adj.</span><strong>{activeNode.ptpMeasured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
                   </div>
                   <div className="servo-mini">
                     <div><span>PI SERVO</span><strong>K<sub>p</sub> {kp.toFixed(2)} · K<sub>i</sub> {ki.toFixed(2)}</strong></div>
@@ -852,7 +895,7 @@ export default function PTPBoxDashboard() {
             <div className="analytics-layout">
               <section className="instrument-panel analytics-chart-panel">
                 <div className="panel-heading">
-                  <div><span className="section-kicker">STABILITY EXPLORER</span><h2>Raw receiver offset by clock</h2></div>
+                  <div><span className="section-kicker">STABILITY EXPLORER</span><h2>Direct PHC difference by NIC</h2></div>
                   <div className="panel-tools"><button className="quiet-button"><ListFilter size={14} /> Signals</button><button className="quiet-button" onClick={downloadRawCsv}><Download size={14} /> Raw CSV</button></div>
                 </div>
                 <div className="analytics-traces">
@@ -861,16 +904,16 @@ export default function PTPBoxDashboard() {
                 <LineChart data={history} selected={visibleTraces.length ? visibleTraces : nodes.length ? [nodes[nodes.length - 1].id] : []} nodes={nodes} />
               </section>
               <section className="instrument-panel distribution-panel">
-                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>Endpoint raw offset density</h2></div><span className="quality-badge">RAW</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>Endpoint PHC difference density</h2></div><span className="quality-badge">RAW</span></div>
                 <div className="histogram" aria-label="Raw endpoint offset histogram">{endpointDistribution.bins.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <div className="hist-axis"><span>{endpointDistribution.min.toFixed(0)}</span><span>raw samples</span><span>{endpointDistribution.max.toFixed(0)} ns</span></div>
-                <div className="distribution-stats"><div><span>σ</span><strong>{endpointDistribution.sigma.toFixed(1)} ns</strong></div><div><span>P95</span><strong>{endpointDistribution.p95.toFixed(1)} ns</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
+                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>raw samples</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
+                <div className="distribution-stats"><div><span>σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
               </section>
               <section className="instrument-panel hop-table-panel">
-                <div className="panel-heading"><div><span className="section-kicker">RAW RECEIVER DATA</span><h2>Per-hop LinuxPTP measurements</h2></div><span className="panel-meta">{range} raw window</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">PHC + SERVO DATA</span><h2>Read-only clock comparisons</h2></div><span className="panel-meta">{range} raw window</span></div>
                 <div className="data-table hop-table">
-                  <div className="table-header"><span>Clock</span><span>Offset</span><span>Path delay</span><span>RMS</span><span>Frequency</span><span>Raw samples</span><span>State</span></div>
-                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{node.measured ? `${node.meanPathDelay.toFixed(1)} ns` : "—"}</span><span>{node.measured ? `${node.rms.toFixed(1)} ns` : "—"}</span><span>{node.measured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.sampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
+                  <div className="table-header"><span>Clock / PHC</span><span>Δ vs BC1</span><span>Hop Δ</span><span>PHC RMS</span><span>PTP frequency</span><span>PHC reads</span><span>PTP state</span></div>
+                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{formatOffset(node.hopOffset ?? 0, node.measured)}</span><span>{node.measured ? formatNanoseconds(node.rms) : "—"}</span><span>{node.ptpMeasured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.sampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
                 </div>
               </section>
             </div>

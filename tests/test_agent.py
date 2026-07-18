@@ -35,13 +35,19 @@ class TelemetryTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.originals = (AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE)
+        self.phc_map = root / "phcs.json"
+        self.originals = (AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE, AGENT.PHC_MAP_FILE, AGENT.read_phc_ns)
         AGENT.ROOT = root
         AGENT.LOG_DIR = self.log_dir
         AGENT.TOPOLOGY_FILE = self.topology
+        AGENT.PHC_MAP_FILE = self.phc_map
+        with AGENT.PHC_HISTORY_LOCK:
+            AGENT.PHC_HISTORY.clear()
 
     def tearDown(self) -> None:
-        AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE = self.originals
+        AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE, AGENT.PHC_MAP_FILE, AGENT.read_phc_ns = self.originals
+        with AGENT.PHC_HISTORY_LOCK:
+            AGENT.PHC_HISTORY.clear()
         self.temporary.cleanup()
 
     def write_log(self, name: str) -> Path:
@@ -103,6 +109,29 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(17.0, sample["offset_ns"])
         self.assertEqual(781275143.0, sample["mean_path_delay_ns"])
         self.assertFalse(sample["valid"])
+
+    def test_compares_phcs_without_disciplining_them(self) -> None:
+        self.phc_map.write_text(
+            json.dumps(
+                [
+                    {"id": "BC1", "measurement_phc": "ptp2"},
+                    {"id": "BC7", "measurement_phc": "ptp13"},
+                    {"id": "BC4", "measurement_phc": "ptp5"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        reads = iter([1_000, 2_000, 2_110, 2_020, 3_000, 3_240, 3_040])
+        AGENT.read_phc_ns = lambda _device: next(reads)
+
+        sample = AGENT.record_phc_sample()
+        self.assertIsNotNone(sample)
+        payload = AGENT.phc_telemetry(history_seconds=120)
+
+        self.assertEqual("sequential PHC midpoint reads", payload["method"])
+        self.assertEqual([0.0, 100.0, 220.0], [clock["measurement"]["offset_ns"] for clock in payload["clocks"]])
+        self.assertEqual(120.0, payload["clocks"][2]["measurement"]["previous_hop_offset_ns"])
+        self.assertTrue(all(clock["measurement"]["raw"] for clock in payload["clocks"]))
 
 
 if __name__ == "__main__":

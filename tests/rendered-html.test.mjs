@@ -22,7 +22,7 @@ test("server-renders the PTPBox product shell", async () => {
   assert.match(html, /<title>PTPBox — Precision Time Lab<\/title>/i);
   assert.match(html, /Cascade overview/);
   assert.match(html, /Seven-stage clock cascade/);
-  assert.match(html, /LinuxPTP master offset/);
+  assert.match(html, /NIC clocks relative to BC1/);
   assert.match(html, /measurement mode pending/);
   assert.match(html, /Apply settings/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/i);
@@ -39,7 +39,8 @@ test("ships the live-agent and standalone-host surfaces", async () => {
 
   assert.match(page, /\/api\/status/);
   assert.match(page, /\/api\/telemetry/);
-  assert.match(page, /raw=true · smoothing=none/);
+  assert.match(page, /read-only · raw=true · smoothing=none/);
+  assert.match(page, /direct, read-only PHC comparison/i);
   assert.match(page, /Analytics/);
   assert.match(page, /Experiments/);
   assert.match(page, /Interfaces/);

@@ -9,7 +9,7 @@ that can create namespaces and run LinuxPTP processes.
 
 - Linux with network namespace support; Ubuntu 22.04 or newer is recommended
 - Python 3.11 or newer
-- LinuxPTP 4.x (`ptp4l`, `phc2sys`, and optionally `pmc`)
+- LinuxPTP 4.x (`ptp4l` and optionally `pmc`)
 - `iproute2`, `ethtool`, `systemd`, and `sudo`
 - Two timing-capable ports per boundary-clock stage
 - A separate management interface that is never assigned to a PTP namespace
@@ -71,10 +71,11 @@ interface and that it is not part of the timing chain.
 
 ### 2. Define the topology
 
-Edit [`agent/topology.json`](../agent/topology.json). Each node needs an ingress
-and egress interface. The first node runs the grandmaster-facing process, the
-last node runs the ordinary-clock endpoint, and intermediate nodes run both
-roles with PHC discipline when their ports use different hardware clocks.
+Edit [`agent/topology.json`](../agent/topology.json). Each node represents one
+dual-port NIC/card in its own namespace and needs an ingress and egress
+interface. The first node runs the grandmaster-facing process, the last node
+runs the ordinary-clock endpoint, and intermediate NICs run directional OC and
+GM `ptp4l` processes. No local PHC synchronization loop is added.
 
 ```json
 {
@@ -144,8 +145,9 @@ Logs are written under `/var/log/ptpbox`. Runtime process state and generated
 LinuxPTP configuration are stored under `/run/ptpbox` and `/etc/linuxptp`
 respectively. `/etc/linuxptp` is required by Ubuntu's packaged AppArmor policy.
 Every intermediate namespace runs a directional upstream OC and downstream GM,
-as in the original PTPBox. When the two ports expose separate PHCs, the
-controller adds a dedicated `phc2sys` bridge; a shared-PHC NIC needs no bridge.
+as in the original PTPBox. The controller records each port's timestamp provider
+in `/run/ptpbox/phcs.json`. The agent reads the selected NIC PHCs through the
+`clock` group and compares them to BC1 without modifying them.
 
 ## Stop and restore
 
@@ -217,11 +219,18 @@ preserves topology data, logs, captures, and the source checkout.
 The web service is working but `/usr/local/sbin/ptpboxctl` or its sudo rule is
 not installed. Re-run the full installer.
 
-### A port has timestamping but no separate `/dev/ptpX`
+### A card exposes two different `/dev/ptpX` devices
 
-Some multi-port adapters share one PHC. PTPBox checks the hardware timestamp
-provider index and skips redundant `phc2sys` discipline when both ports use the
-same clock.
+PTPBox reports both providers but does not synchronize them locally. If the
+adapter does not share or hardware-synchronize those clocks, its egress can
+diverge from the ingress. That divergence is part of the measured hardware
+behavior and should not be mistaken for a browser or telemetry error.
+
+### PHC comparison says permission denied
+
+The installed service uses `SupplementaryGroups=clock`. Confirm every
+`/dev/ptp*` device is group-readable by `clock`, then reinstall or restart the
+service so it receives the supplementary group.
 
 ### Legacy `ptptool` fails to load
 

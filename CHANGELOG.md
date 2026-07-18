@@ -7,8 +7,12 @@ All notable changes will be documented in this file.
 - Added a live Start/Stop cascade control backed by the narrowly scoped sudo
   policy, periodic process-state refresh, and AppArmor-compatible LinuxPTP
   configuration paths on Ubuntu hosts.
-- Restored the original directional OC/GM process model, adding a PHC bridge
-  only for split-PHC NICs and avoiding an unnecessary bridge on shared clocks.
+- Restored the original real-time process model: one isolated dual-port NIC per
+  namespace, directional OC/GM `ptp4l` processes, and no local PHC discipline
+  loop.
+- Added one-hertz, read-only PHC midpoint comparisons against BC1 with both
+  cumulative and previous-hop differences, kept separate from LinuxPTP servo
+  telemetry.
 - Configured one signed LinuxPTP log sample per Sync update, persistent ICE
   timestamp-worker priority, and the original one-Sync-per-second cadence.
 - Restored end-to-end delay measurement to match the original PTPBox hardware.
@@ -16,6 +20,8 @@ All notable changes will be documented in this file.
   the raw API but are visibly degraded and excluded from charts and RMS.
 - Kept managed LinuxPTP processes alive across observation-agent upgrades and
   restarts while preserving explicit web Stop control.
+- Restored LinuxPTP's zero normal-step threshold so ordinary noise cannot force
+  a locked servo back into acquisition.
 
 ### Added
 

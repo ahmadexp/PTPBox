@@ -16,6 +16,10 @@ if ! id "$PTPBOX_USER_NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
+# The observation service opens /dev/ptp* read-only through this conventional
+# udev-owned group. SupplementaryGroups applies it only to the service.
+getent group clock >/dev/null || groupadd --system clock
+
 PTPBOX_GROUP_NAME=$(id -gn "$PTPBOX_USER_NAME")
 PTPBOX_USER_HOME=$(getent passwd "$PTPBOX_USER_NAME" | cut -d: -f6)
 PTPBOX_ROOT_DIR=${PTPBOX_ROOT:-$PTPBOX_USER_HOME/PTPBox}

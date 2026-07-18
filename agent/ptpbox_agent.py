@@ -10,13 +10,16 @@ integration has been installed.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import mimetypes
 import os
 import re
 import socket
 import subprocess
+import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,11 +35,14 @@ CONTROL = Path(os.environ.get("PTPBOX_CONTROL", "/usr/local/sbin/ptpboxctl"))
 WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "static"))
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", Path(__file__).with_name("topology.json")))
+PHC_MAP_FILE = Path(os.environ.get("PTPBOX_PHC_MAP", "/run/ptpbox/phcs.json"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
 TELEMETRY_STALE_AFTER_SECONDS = 5.0
 TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
+PHC_HISTORY_MAX_SAMPLES = 900
+PHC_STALE_AFTER_SECONDS = 3.0
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
     r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
@@ -57,11 +63,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "type": "pi",
         "kp": 0.7,
         "ki": 0.3,
-        "step_threshold_ns": 20,
+        "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
     },
 }
+
+
+class Timespec(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+LIBC.clock_gettime.argtypes = [ctypes.c_int, ctypes.POINTER(Timespec)]
+LIBC.clock_gettime.restype = ctypes.c_int
+PHC_HISTORY: deque[dict[str, Any]] = deque(maxlen=PHC_HISTORY_MAX_SAMPLES)
+PHC_HISTORY_LOCK = threading.Lock()
 
 
 @dataclass
@@ -178,6 +195,167 @@ def load_json(path: Path, fallback: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return fallback
+
+
+def read_phc_ns(device: str) -> int:
+    """Read a Linux PHC without changing its time or frequency."""
+    fd = os.open(device, os.O_RDONLY)
+    try:
+        # Linux's FD_TO_CLOCKID macro for dynamic POSIX clocks.
+        clock_id = ((~fd) << 3) | 3
+        value = Timespec()
+        if LIBC.clock_gettime(clock_id, ctypes.byref(value)) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), device)
+        return int(value.tv_sec) * 1_000_000_000 + int(value.tv_nsec)
+    finally:
+        os.close(fd)
+
+
+def phc_inventory() -> list[dict[str, Any]]:
+    value = load_json(PHC_MAP_FILE, [])
+    if not isinstance(value, list):
+        return []
+    return [
+        item
+        for item in value
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("measurement_phc"), str)
+    ]
+
+
+def take_phc_sample() -> dict[str, Any] | None:
+    """Compare every measured NIC PHC to BC1 using midpoint reads."""
+    inventory = phc_inventory()
+    if not inventory:
+        return None
+    reference = inventory[0]
+    reference_device = f"/dev/{reference['measurement_phc']}"
+    observed_at = time.time()
+    sample_id = f"phc:{time.time_ns()}"
+    clocks: list[dict[str, Any]] = []
+    previous_offset: int | None = None
+    for index, item in enumerate(inventory):
+        device = f"/dev/{item['measurement_phc']}"
+        try:
+            if index == 0:
+                read_phc_ns(reference_device)
+                offset = 0
+                read_span = 0
+            else:
+                reference_before = read_phc_ns(reference_device)
+                target = read_phc_ns(device)
+                reference_after = read_phc_ns(reference_device)
+                offset = target - ((reference_before + reference_after) // 2)
+                read_span = reference_after - reference_before
+            hop_offset = None if previous_offset is None else offset - previous_offset
+            clocks.append(
+                {
+                    "id": item["id"],
+                    "phc": item["measurement_phc"],
+                    "offset_ns": float(offset),
+                    "previous_hop_offset_ns": float(hop_offset) if hop_offset is not None else None,
+                    "read_span_ns": float(read_span),
+                    "observed_at": observed_at,
+                    "sample_id": f"{sample_id}:{item['id']}",
+                    "raw": True,
+                    "valid": True,
+                    "error": None,
+                }
+            )
+            previous_offset = offset
+        except OSError as exc:
+            clocks.append(
+                {
+                    "id": item["id"],
+                    "phc": item["measurement_phc"],
+                    "offset_ns": None,
+                    "previous_hop_offset_ns": None,
+                    "read_span_ns": None,
+                    "observed_at": observed_at,
+                    "sample_id": f"{sample_id}:{item['id']}",
+                    "raw": True,
+                    "valid": False,
+                    "error": str(exc),
+                }
+            )
+            previous_offset = None
+    return {
+        "observed_at": observed_at,
+        "sample_id": sample_id,
+        "reference": reference["id"],
+        "reference_phc": reference["measurement_phc"],
+        "clocks": clocks,
+        "raw": True,
+        "method": "sequential PHC midpoint reads",
+    }
+
+
+def record_phc_sample() -> dict[str, Any] | None:
+    sample = take_phc_sample()
+    if sample is not None:
+        with PHC_HISTORY_LOCK:
+            PHC_HISTORY.append(sample)
+    return sample
+
+
+def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) -> dict[str, Any]:
+    now = time.time()
+    cutoff = now - max(5.0, min(history_seconds, 900.0))
+    with PHC_HISTORY_LOCK:
+        history = list(PHC_HISTORY)
+    window = [sample for sample in history if float(sample["observed_at"]) >= cutoff]
+    inventory = phc_inventory()
+    clocks: list[dict[str, Any]] = []
+    for item in inventory:
+        values = [
+            clock
+            for sample in window
+            for clock in sample["clocks"]
+            if clock["id"] == item["id"]
+        ]
+        measurement = values[-1] if values else None
+        samples = values if since is None else [sample for sample in values if float(sample["observed_at"]) > since]
+        valid_offsets = [float(sample["offset_ns"]) for sample in values if sample["valid"] and sample["offset_ns"] is not None]
+        clocks.append(
+            {
+                "id": item["id"],
+                "phc": item["measurement_phc"],
+                "measurement": measurement,
+                "samples": samples,
+                "window_sample_count": len(values),
+                "rms_ns": (
+                    sum(offset * offset for offset in valid_offsets) / len(valid_offsets)
+                ) ** 0.5 if valid_offsets else None,
+            }
+        )
+    fresh = sum(
+        1
+        for clock in clocks
+        if clock["measurement"]
+        and clock["measurement"]["valid"]
+        and now - float(clock["measurement"]["observed_at"]) <= PHC_STALE_AFTER_SECONDS
+    )
+    mode = "live" if fresh else "stale" if history else "waiting"
+    return {
+        "timestamp": now,
+        "reference": inventory[0]["id"] if inventory else None,
+        "reference_phc": inventory[0]["measurement_phc"] if inventory else None,
+        "clocks": clocks,
+        "fresh_clocks": fresh,
+        "mode": mode,
+        "raw": True,
+        "smoothing": "none",
+        "method": "sequential PHC midpoint reads",
+    }
+
+
+def phc_sampler_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        started = time.monotonic()
+        record_phc_sample()
+        stop.wait(max(0.0, 1.0 - (time.monotonic() - started)))
 
 
 def load_config() -> dict[str, Any]:
@@ -309,6 +487,8 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
     now = time.time()
     clocks: list[dict[str, Any]] = []
     nodes = topology_nodes()
+    phc_payload = phc_telemetry(history_seconds, since)
+    phc_by_id = {clock["id"]: clock for clock in phc_payload["clocks"]}
     cutoff = now - max(5.0, min(history_seconds, 900.0))
     for index, node in enumerate(nodes):
         candidates = clock_log_candidates(node["name"])
@@ -325,6 +505,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         if since is not None:
             samples = [sample for sample in samples if sample["observed_at"] > since]
         role = "grandmaster" if index == 0 else "ordinary" if index == len(nodes) - 1 else "boundary"
+        phc_clock = phc_by_id.get(node["name"], {})
         clocks.append(
             {
                 "id": node["name"],
@@ -340,6 +521,11 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
                     sum(float(sample["offset_ns"]) ** 2 for sample in valid_window_samples) / len(valid_window_samples)
                 ) ** 0.5 if valid_window_samples else None,
                 "logs": len(candidates),
+                "measurement_phc": phc_clock.get("phc"),
+                "phc_measurement": phc_clock.get("measurement"),
+                "phc_samples": phc_clock.get("samples", []),
+                "phc_window_sample_count": phc_clock.get("window_sample_count", 0),
+                "phc_rms_ns": phc_clock.get("rms_ns"),
             }
         )
     measured = sum(1 for clock in clocks if clock["measurement"] and clock["measurement"]["valid"])
@@ -364,8 +550,14 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         "valid_sample_count": valid_sample_count,
         "invalid_sample_count": sample_count - valid_sample_count,
         "mode": mode,
+        "phc_mode": phc_payload["mode"],
+        "phc_reference": phc_payload["reference"],
+        "phc_reference_device": phc_payload["reference_phc"],
+        "phc_fresh_clocks": phc_payload["fresh_clocks"],
+        "phc_method": phc_payload["method"],
         "raw": True,
         "smoothing": "none",
+        "measurement_source": "direct PHC comparison",
         "history_seconds": history_seconds,
     }
 
@@ -383,7 +575,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.2.0",
+        "agent_version": "1.3.0",
         "timestamp": time.time(),
     }
 
@@ -479,6 +671,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "history, since, and limit must be numeric"}, HTTPStatus.BAD_REQUEST)
                     return
                 self.send_json(telemetry(history_seconds, since, limit))
+            elif route == "/api/phc":
+                try:
+                    history_seconds = float(query.get("history", ["120"])[0])
+                    since = float(query["since"][0]) if "since" in query else None
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history and since must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(phc_telemetry(history_seconds, since))
             elif route == "/api/config":
                 self.send_json(load_config())
             elif route == "/healthz":
@@ -518,12 +718,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PTPBOX_PORT", "8090")))
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    stop_sampler = threading.Event()
+    sampler = threading.Thread(target=phc_sampler_loop, args=(stop_sampler,), name="ptpbox-phc-sampler", daemon=True)
+    sampler.start()
     print(f"PTPBox agent listening on http://{args.bind}:{args.port} (root={ROOT})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop_sampler.set()
+        sampler.join(timeout=2)
         server.server_close()
 
 
