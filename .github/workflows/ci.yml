@@ -42,7 +42,9 @@ jobs:
         run: npm run build:standalone
 
       - name: Validate Python
-        run: python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py
+        run: |
+          python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py
+          python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Validate shell
         run: bash -n scripts/install-host.sh scripts/uninstall-host.sh

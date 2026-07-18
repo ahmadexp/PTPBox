@@ -35,11 +35,17 @@ operator account and reads:
 - `ethtool -T` when sysfs does not expose a distinct PHC;
 - `ip netns list` for namespace state;
 - `ps` for active `ptp4l`, `phc2sys`, and `ts2phc` processes;
-- LinuxPTP log files below `PTPBOX_ROOT/BC*` for offset, frequency adjustment,
-  and path delay.
+- raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
+  `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo
+  state.
 
 It also serves the standalone application and stages JSON configuration under
 `PTPBOX_STATE_DIR`.
+
+The browser requests an initial raw window and then polls incrementally with a
+`since` cursor. Samples retain their LinuxPTP cadence and timestamp. Missing
+samples are rendered as gaps; no moving average, interpolation, or synthetic
+fill is applied in live mode.
 
 ### Lifecycle helper
 

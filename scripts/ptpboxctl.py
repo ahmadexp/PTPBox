@@ -156,6 +156,7 @@ def spawn(label: str, args: list[str], processes: list[dict[str, Any]]) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{label}.log"
     handle = log_path.open("ab", buffering=0)
+    log_path.chmod(0o644)
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(0.12)
     if process.poll() is not None:

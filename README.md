@@ -45,13 +45,13 @@ frequency adjustment, PHC, quality score, and active servo constants.
 
 | Surface | Purpose |
 | --- | --- |
-| **Cascade overview** | See topology, link state, per-hop delay, accumulated offset, RMS, MTIE, and lock quality in one instrument view. |
-| **Analytics** | Compare traces, inspect offset density, and attribute the total error budget to individual hops. |
+| **Cascade overview** | See the physically verified topology, raw per-hop offset, path delay, window RMS, frequency correction, and servo state. |
+| **Analytics** | Compare unsmoothed LinuxPTP traces, inspect the endpoint distribution, and export the raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo tuning** | Adjust PI gains and thresholds, preview behavior, validate, stage, and roll changes through the chain. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Event stream** | Follow clock-state transitions, measurement windows, threshold events, and operator actions. |
-| **Demo mode** | Use deterministic, physically plausible telemetry whenever a live agent is unavailable. |
+| **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
 
 ## Product tour
 
@@ -61,7 +61,7 @@ frequency adjustment, PHC, quality score, and active servo constants.
     <td width="50%"><img src="docs/images/experiments.jpg" alt="PTPBox servo experiment designer"></td>
   </tr>
   <tr>
-    <td><strong>Stability analytics</strong><br>Trace selection, density, RMS, MTIE, and contribution per hop.</td>
+    <td><strong>Stability analytics</strong><br>Raw trace selection, endpoint density, window RMS, frequency correction, and CSV export.</td>
     <td><strong>Repeatable experiments</strong><br>Step response, holdover, wander, and gain-sweep recipes.</td>
   </tr>
 </table>
@@ -195,10 +195,11 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory, standalone host, inventory agent, configuration staging, and
-guarded lifecycle controller are implemented. The next milestones are durable
-experiment storage, direct PMC datasets, automated MTIE/TDEV/Allan deviation,
-and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
+The Observatory, raw incremental LinuxPTP telemetry pipeline, standalone host,
+inventory agent, configuration staging, and guarded lifecycle controller are
+implemented. The next milestones are durable experiment storage, direct PMC and
+PPS comparison datasets, automated MTIE/TDEV/Allan deviation, and reusable
+topology presets. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 

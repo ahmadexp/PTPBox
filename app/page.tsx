@@ -37,7 +37,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Section = "Overview" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
-type ConnectionMode = "checking" | "live" | "simulation";
+type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
+type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "NO DATA" | "STALE";
 
 type ClockNode = {
   id: string;
@@ -46,16 +47,22 @@ type ClockNode = {
   offset: number;
   meanPathDelay: number;
   rms: number;
-  state: "LOCKED" | "TRACKING";
+  frequencyPpb: number;
+  state: ClockState;
   ingress: string;
   egress: string;
   phc: string;
   color: string;
+  measured: boolean;
+  sampleCount: number;
+  source: string;
+  lastSampleAt: number | null;
 };
 
 type HistoryPoint = {
   t: number;
   values: Record<string, number>;
+  key?: string;
 };
 
 type AgentStatus = {
@@ -65,6 +72,42 @@ type AgentStatus = {
   ptp_interfaces?: number;
   namespaces?: string[];
   running?: boolean;
+};
+
+type TelemetrySample = {
+  offset_ns: number;
+  frequency_ppb: number;
+  mean_path_delay_ns: number;
+  servo_state: string | null;
+  source_time: number | null;
+  observed_at: number;
+  sample_id: string;
+  source: string;
+  raw: true;
+};
+
+type TelemetryClock = {
+  id: string;
+  role: "grandmaster" | "boundary" | "ordinary";
+  ingress: string;
+  egress: string;
+  measurement: TelemetrySample | null;
+  samples: TelemetrySample[];
+  window_sample_count: number;
+  rms_ns: number | null;
+  logs: number;
+};
+
+type TelemetryPayload = {
+  timestamp: number;
+  clocks: TelemetryClock[];
+  measured_clocks: number;
+  fresh_clocks: number;
+  sample_count: number;
+  mode: "live" | "stale" | "waiting";
+  raw: true;
+  smoothing: "none";
+  history_seconds: number;
 };
 
 function agentBaseUrl() {
@@ -78,31 +121,30 @@ function agentBaseUrl() {
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
 
 const INITIAL_NODES: ClockNode[] = [
-  { id: "GM", label: "GM", role: "Grandmaster", offset: 0.4, meanPathDelay: 184, rms: 0.8, state: "LOCKED", ingress: "GNSS", egress: "enp25s0f0", phc: "ptp0", color: TRACE_COLORS[0] },
-  { id: "BC01", label: "BC–01", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, state: "LOCKED", ingress: "enp25s0f1", egress: "enp26s0f0", phc: "ptp1", color: TRACE_COLORS[1] },
-  { id: "BC02", label: "BC–02", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, state: "LOCKED", ingress: "enp26s0f1", egress: "enp27s0f0", phc: "ptp3", color: TRACE_COLORS[2] },
-  { id: "BC03", label: "BC–03", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, state: "LOCKED", ingress: "enp27s0f1", egress: "enp28s0f0", phc: "ptp5", color: TRACE_COLORS[3] },
-  { id: "BC04", label: "BC–04", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, state: "LOCKED", ingress: "enp28s0f1", egress: "enp103s0f0", phc: "ptp9", color: TRACE_COLORS[4] },
-  { id: "BC05", label: "BC–05", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, state: "LOCKED", ingress: "enp103s0f1", egress: "enp104s0f0", phc: "ptp11", color: TRACE_COLORS[5] },
-  { id: "BC06", label: "BC–06", role: "Boundary", offset: 91.2, meanPathDelay: 269, rms: 40.2, state: "TRACKING", ingress: "enp104s0f1", egress: "enp105s0f0", phc: "ptp13", color: TRACE_COLORS[6] },
-  { id: "OC", label: "OC", role: "Ordinary", offset: 118.4, meanPathDelay: 276, rms: 53.4, state: "LOCKED", ingress: "enp105s0f1", egress: "—", phc: "ptp14", color: TRACE_COLORS[7] },
+  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp2", color: TRACE_COLORS[0], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp1", color: TRACE_COLORS[1], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC7", label: "BC7", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC6", label: "BC6", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC3", label: "BC3", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp4", color: TRACE_COLORS[5], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC4", label: "BC4 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp5", color: TRACE_COLORS[6], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
 ];
 
 const INTERFACES = [
-  ["enp25s0f0np0", "BC–01 / OUT", "100 Gb/s", "ptp0", "UP"],
-  ["enp25s0f1np1", "BC–01 / IN", "50 Gb/s", "ptp2", "UP"],
-  ["enp26s0f0np0", "BC–02 / OUT", "50 Gb/s", "ptp1", "UP"],
-  ["enp26s0f1np1", "BC–02 / IN", "50 Gb/s", "ptp1", "UP"],
-  ["enp27s0f0np0", "BC–03 / OUT", "100 Gb/s", "ptp3", "UP"],
-  ["enp27s0f1np1", "BC–03 / IN", "100 Gb/s", "ptp4", "UP"],
-  ["enp28s0f0np0", "BC–04 / OUT", "100 Gb/s", "ptp5", "UP"],
-  ["enp28s0f1np1", "BC–04 / IN", "100 Gb/s", "ptp8", "UP"],
-  ["enp103s0f0np0", "BC–05 / OUT", "100 Gb/s", "ptp9", "UP"],
-  ["enp103s0f1np1", "BC–05 / IN", "100 Gb/s", "ptp10", "UP"],
-  ["enp104s0f0np0", "BC–06 / OUT", "100 Gb/s", "ptp11", "UP"],
-  ["enp104s0f1np1", "BC–06 / IN", "100 Gb/s", "ptp12", "UP"],
-  ["enp105s0f0np0", "OC / IN", "50 Gb/s", "ptp13", "UP"],
-  ["enp105s0f1np1", "OC / MON", "100 Gb/s", "ptp14", "UP"],
+  ["enp25s0f0np0", "BC1 / INACTIVE IN", "100 Gb/s", "ptp0", "UP"],
+  ["enp25s0f1np1", "BC1 / GM OUT", "50 Gb/s", "ptp2", "UP"],
+  ["enp26s0f0np0", "BC2 / IN", "50 Gb/s", "ptp1", "UP"],
+  ["enp26s0f1np1", "BC2 / OUT", "50 Gb/s", "ptp1", "UP"],
+  ["enp27s0f0np0", "BC3 / IN", "100 Gb/s", "ptp3", "UP"],
+  ["enp27s0f1np1", "BC3 / OUT", "100 Gb/s", "ptp4", "UP"],
+  ["enp28s0f0np0", "BC4 / OC IN", "100 Gb/s", "ptp5", "UP"],
+  ["enp28s0f1np1", "BC4 / INACTIVE OUT", "100 Gb/s", "ptp8", "UP"],
+  ["enp103s0f0np0", "BC5 / IN", "100 Gb/s", "ptp9", "UP"],
+  ["enp103s0f1np1", "BC5 / OUT", "100 Gb/s", "ptp10", "UP"],
+  ["enp104s0f0np0", "BC6 / IN", "100 Gb/s", "ptp11", "UP"],
+  ["enp104s0f1np1", "BC6 / OUT", "100 Gb/s", "ptp12", "UP"],
+  ["enp105s0f0np0", "BC7 / IN", "50 Gb/s", "ptp13", "UP"],
+  ["enp105s0f1np1", "BC7 / OUT", "100 Gb/s", "ptp14", "UP"],
   ["enp179s0f0", "MANAGEMENT", "1 Gb/s", "ptp6", "UP"],
   ["enp179s0f1", "SPARE", "—", "ptp7", "DOWN"],
 ];
@@ -133,19 +175,87 @@ function buildHistory(length = 120): HistoryPoint[] {
   }));
 }
 
-function formatOffset(value: number) {
+function formatOffset(value: number, measured = true) {
+  if (!measured || !Number.isFinite(value)) return "—";
   if (Math.abs(value) < 1) return `${value >= 0 ? "+" : ""}${value.toFixed(1)} ns`;
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)} ns`;
 }
 
-function LineChart({ data, selected, compact = false }: { data: HistoryPoint[]; selected: string[]; compact?: boolean }) {
+function rangeSeconds(range: string) {
+  return range === "30 s" ? 30 : range === "15 min" ? 900 : 120;
+}
+
+function stateFromMeasurement(sample: TelemetrySample | null, stale: boolean, role: TelemetryClock["role"]): ClockState {
+  if (role === "grandmaster") return "REFERENCE";
+  if (!sample) return "NO DATA";
+  if (stale) return "STALE";
+  if (sample.servo_state === "s2") return "LOCKED";
+  if (sample.servo_state === "s1") return "TRACKING";
+  return "UNLOCKED";
+}
+
+function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
+  return payload.clocks.map((clock, index) => {
+    const measurement = clock.measurement;
+    const stale = Boolean(measurement && payload.timestamp - measurement.observed_at > 5);
+    return {
+      id: clock.id,
+      label: `${clock.id}${clock.role === "grandmaster" ? " · GM" : clock.role === "ordinary" ? " · OC" : ""}`,
+      role: clock.role === "grandmaster" ? "Grandmaster" : clock.role === "ordinary" ? "Ordinary" : "Boundary",
+      offset: measurement?.offset_ns ?? 0,
+      meanPathDelay: measurement?.mean_path_delay_ns ?? 0,
+      rms: clock.rms_ns ?? 0,
+      frequencyPpb: measurement?.frequency_ppb ?? 0,
+      state: stateFromMeasurement(measurement, stale, clock.role),
+      ingress: clock.ingress,
+      egress: clock.egress,
+      phc: measurement?.source ?? "—",
+      color: TRACE_COLORS[index % TRACE_COLORS.length],
+      measured: Boolean(measurement),
+      sampleCount: clock.window_sample_count,
+      source: measurement?.source ?? "No LinuxPTP sample",
+      lastSampleAt: measurement?.observed_at ?? null,
+    };
+  });
+}
+
+function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
+  return payload.clocks
+    .flatMap((clock) => clock.samples.map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns }, key: `${clock.id}:${sample.sample_id}` })))
+    .sort((left, right) => left.t - right.t);
+}
+
+function waitingNodes(source: string): ClockNode[] {
+  return INITIAL_NODES.map((node) => ({
+    ...node,
+    offset: 0,
+    meanPathDelay: 0,
+    rms: 0,
+    frequencyPpb: 0,
+    measured: false,
+    sampleCount: 0,
+    source,
+    state: node.role === "Grandmaster" ? "REFERENCE" : "NO DATA",
+  }));
+}
+
+function mergeRawHistory(current: HistoryPoint[], incoming: HistoryPoint[], seconds: number) {
+  const cutoff = Date.now() / 1000 - seconds;
+  const unique = new Map<string, HistoryPoint>();
+  for (const point of [...current, ...incoming]) {
+    if (point.t >= cutoff) unique.set(point.key ?? `${point.t}:${Object.keys(point.values)[0]}`, point);
+  }
+  return [...unique.values()].sort((left, right) => left.t - right.t).slice(-30_000);
+}
+
+function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPoint[]; selected: string[]; nodes: ClockNode[]; compact?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
-    if (!canvas || !wrap || data.length < 2) return;
+    if (!canvas || !wrap) return;
     const bounds = wrap.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = bounds.width * dpr;
@@ -160,15 +270,26 @@ function LineChart({ data, selected, compact = false }: { data: HistoryPoint[]; 
     const pad = compact ? { l: 18, r: 12, t: 12, b: 20 } : { l: 52, r: 18, t: 18, b: 34 };
     const plotW = w - pad.l - pad.r;
     const plotH = h - pad.t - pad.b;
-    const allValues = data.flatMap((point) => selected.map((id) => point.values[id] ?? 0));
+    ctx.clearRect(0, 0, w, h);
+    const allValues = data.flatMap((point) => selected.map((id) => point.values[id]).filter((value): value is number => Number.isFinite(value)));
+    if (data.length < 2 || allValues.length < 2) {
+      ctx.fillStyle = "#69818a";
+      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Waiting for raw LinuxPTP samples", w / 2, h / 2);
+      return;
+    }
     const rawMax = Math.max(20, ...allValues.map((value) => Math.abs(value)));
     const yMax = Math.ceil(rawMax / 25) * 25;
     const yMin = -Math.max(25, Math.round(yMax * 0.18));
     const span = yMax - yMin;
-    const x = (index: number) => pad.l + (index / (data.length - 1)) * plotW;
+    const tMin = Math.min(...data.map((point) => point.t));
+    const tMax = Math.max(...data.map((point) => point.t));
+    const timeSpan = Math.max(1, tMax - tMin);
+    const x = (timestamp: number) => pad.l + ((timestamp - tMin) / timeSpan) * plotW;
     const y = (value: number) => pad.t + ((yMax - value) / span) * plotH;
 
-    ctx.clearRect(0, 0, w, h);
     ctx.lineWidth = 1;
     ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textAlign = "right";
@@ -195,7 +316,7 @@ function LineChart({ data, selected, compact = false }: { data: HistoryPoint[]; 
       ctx.lineTo(px, h - pad.b);
       ctx.stroke();
       if (!compact) {
-        const seconds = Math.round(-120 + i * 20);
+        const seconds = Math.round(-timeSpan + (i / 6) * timeSpan);
         ctx.fillStyle = "#69818a";
         ctx.textAlign = i === 0 ? "left" : i === 6 ? "right" : "center";
         ctx.fillText(i === 6 ? "now" : `${seconds}s`, px, h - 12);
@@ -203,16 +324,21 @@ function LineChart({ data, selected, compact = false }: { data: HistoryPoint[]; 
     }
 
     selected.forEach((id) => {
-      const nodeIndex = INITIAL_NODES.findIndex((node) => node.id === id);
+      const nodeIndex = nodes.findIndex((node) => node.id === id);
       if (nodeIndex < 0) return;
-      ctx.strokeStyle = TRACE_COLORS[nodeIndex];
+      const series = data.filter((point) => Number.isFinite(point.values[id]));
+      if (series.length < 2) return;
+      const deltas = series.slice(1).map((point, index) => point.t - series[index].t).filter((value) => value > 0).sort((left, right) => left - right);
+      const medianDelta = deltas[Math.floor(deltas.length / 2)] ?? 1;
+      const gapThreshold = Math.max(1, medianDelta * 4);
+      ctx.strokeStyle = nodes[nodeIndex].color;
       ctx.lineWidth = id === selected[selected.length - 1] ? 2.2 : 1.25;
       ctx.globalAlpha = id === selected[selected.length - 1] ? 1 : 0.54;
       ctx.beginPath();
-      data.forEach((point, index) => {
-        const px = x(index);
-        const py = y(point.values[id] ?? 0);
-        if (index === 0) ctx.moveTo(px, py);
+      series.forEach((point, index) => {
+        const px = x(point.t);
+        const py = y(point.values[id]);
+        if (index === 0 || point.t - series[index - 1].t > gapThreshold) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       });
       ctx.stroke();
@@ -221,14 +347,17 @@ function LineChart({ data, selected, compact = false }: { data: HistoryPoint[]; 
 
     const activeId = selected[selected.length - 1];
     if (activeId) {
-      const last = data[data.length - 1].values[activeId] ?? 0;
-      const nodeIndex = INITIAL_NODES.findIndex((node) => node.id === activeId);
-      ctx.fillStyle = TRACE_COLORS[nodeIndex];
+      const series = data.filter((point) => Number.isFinite(point.values[activeId]));
+      const lastPoint = series[series.length - 1];
+      const nodeIndex = nodes.findIndex((node) => node.id === activeId);
+      if (!lastPoint || nodeIndex < 0) return;
+      const last = lastPoint.values[activeId];
+      ctx.fillStyle = nodes[nodeIndex].color;
       ctx.beginPath();
-      ctx.arc(x(data.length - 1), y(last), 3.5, 0, Math.PI * 2);
+      ctx.arc(x(lastPoint.t), y(last), 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [compact, data, selected]);
+  }, [compact, data, nodes, selected]);
 
   useEffect(() => {
     draw();
@@ -255,14 +384,15 @@ function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolea
 export default function PTPBoxDashboard() {
   const [section, setSection] = useState<Section>("Overview");
   const [mobileNav, setMobileNav] = useState(false);
-  const [nodes, setNodes] = useState(INITIAL_NODES);
-  const [selectedNode, setSelectedNode] = useState("OC");
-  const [visibleTraces, setVisibleTraces] = useState(["GM", "BC03", "BC06", "OC"]);
-  const [history, setHistory] = useState(buildHistory);
+  const [nodes, setNodes] = useState(() => waitingNodes("Finding PTPBox agent"));
+  const [selectedNode, setSelectedNode] = useState("BC4");
+  const [visibleTraces, setVisibleTraces] = useState(["BC2", "BC6", "BC3", "BC4"]);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [paused, setPaused] = useState(false);
   const [time, setTime] = useState("");
   const [connection, setConnection] = useState<ConnectionMode>("checking");
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
   const [range, setRange] = useState("2 min");
   const [experimentRunning, setExperimentRunning] = useState(false);
   const [experimentProgress, setExperimentProgress] = useState(38);
@@ -275,9 +405,34 @@ export default function PTPBoxDashboard() {
   const [twoStep, setTwoStep] = useState(true);
   const [hardwareTs, setHardwareTs] = useState(true);
   const [sanity, setSanity] = useState(true);
-  const tickRef = useRef(120);
+  const [controlBusy, setControlBusy] = useState(false);
+  const tickRef = useRef(0);
+  const latestTelemetryAtRef = useRef(0);
 
   const activeNode = nodes.find((node) => node.id === selectedNode) ?? nodes[nodes.length - 1];
+  const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
+  const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
+  const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
+  const newestSampleAge = newestSampleAt && telemetryStatus ? Math.max(0, telemetryStatus.timestamp - newestSampleAt) : null;
+
+  const endpointDistribution = useMemo(() => {
+    const endpoint = nodes[nodes.length - 1];
+    const values = history.map((point) => point.values[endpoint?.id]).filter((value): value is number => Number.isFinite(value));
+    if (!values.length) return { bins: Array(15).fill(0) as number[], min: 0, max: 0, sigma: 0, p95: 0, skew: 0 };
+    const minimum = Math.min(...values);
+    const maximum = Math.max(...values);
+    const width = Math.max(1, maximum - minimum);
+    const counts = Array(15).fill(0) as number[];
+    values.forEach((value) => { counts[Math.min(14, Math.floor(((value - minimum) / width) * 15))] += 1; });
+    const highest = Math.max(...counts, 1);
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+    const sigma = Math.sqrt(variance);
+    const sorted = [...values].sort((left, right) => left - right);
+    const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    const skew = sigma ? values.reduce((sum, value) => sum + ((value - mean) / sigma) ** 3, 0) / values.length : 0;
+    return { bins: counts.map((count) => (count / highest) * 100), min: minimum, max: maximum, sigma, p95, skew };
+  }, [history, nodes]);
 
   useEffect(() => {
     const updateClock = () => setTime(new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZoneName: "short" }).format(new Date()));
@@ -296,9 +451,15 @@ export default function PTPBoxDashboard() {
       })
       .then((status: AgentStatus) => {
         setAgentStatus(status);
-        setConnection("live");
+        setConnection("waiting");
+        setHistory([]);
+        setNodes(waitingNodes("Waiting for LinuxPTP"));
       })
-      .catch(() => setConnection("simulation"))
+      .catch(() => {
+        setConnection("simulation");
+        setNodes(INITIAL_NODES);
+        setHistory(buildHistory());
+      })
       .finally(() => window.clearTimeout(timer));
     return () => {
       controller.abort();
@@ -307,7 +468,56 @@ export default function PTPBoxDashboard() {
   }, []);
 
   useEffect(() => {
-    if (paused) return;
+    if (!agentStatus || paused) return;
+    latestTelemetryAtRef.current = 0;
+    let disposed = false;
+    let polling = false;
+    const controller = new AbortController();
+    const seconds = rangeSeconds(range);
+
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const query = new URLSearchParams({ history: String(seconds), limit: "4096" });
+        if (latestTelemetryAtRef.current) query.set("since", String(latestTelemetryAtRef.current));
+        const response = await fetch(`${agentBaseUrl()}/api/telemetry?${query}`, { signal: controller.signal });
+        if (!response.ok) throw new Error("telemetry unavailable");
+        const payload = await response.json() as TelemetryPayload;
+        if (disposed) return;
+        const incoming = historyFromTelemetry(payload);
+        const newest = incoming.reduce((value, point) => Math.max(value, point.t), latestTelemetryAtRef.current);
+        latestTelemetryAtRef.current = newest;
+        setTelemetryStatus(payload);
+        setConnection(payload.mode);
+        setNodes(nodesFromTelemetry(payload));
+        setHistory((current) => mergeRawHistory(current, incoming, seconds));
+
+        const ids = payload.clocks.map((clock) => clock.id);
+        const measuredIds = payload.clocks.filter((clock) => clock.measurement && clock.role !== "grandmaster").map((clock) => clock.id);
+        setSelectedNode((current) => ids.includes(current) ? current : measuredIds[measuredIds.length - 1] ?? ids[ids.length - 1] ?? current);
+        setVisibleTraces((current) => {
+          const retained = current.filter((id) => measuredIds.includes(id));
+          return retained.length ? retained : measuredIds.slice(-4);
+        });
+      } catch {
+        if (!disposed) setConnection((current) => current === "live" ? "stale" : current);
+      } finally {
+        polling = false;
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1000);
+    return () => {
+      disposed = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [agentStatus, paused, range]);
+
+  useEffect(() => {
+    if (paused || connection !== "simulation") return;
     const timer = window.setInterval(() => {
       tickRef.current += 1;
       const tick = tickRef.current;
@@ -322,7 +532,7 @@ export default function PTPBoxDashboard() {
       if (experimentRunning) setExperimentProgress((value) => (value >= 100 ? 100 : value + 1));
     }, 900);
     return () => window.clearInterval(timer);
-  }, [experimentRunning, paused]);
+  }, [connection, experimentRunning, paused]);
 
   useEffect(() => {
     if (!toast) return;
@@ -332,18 +542,59 @@ export default function PTPBoxDashboard() {
 
   const stats = useMemo(() => {
     const final = nodes[nodes.length - 1];
-    const peak = Math.max(...history.slice(-60).flatMap((point) => Object.values(point.values).map(Math.abs)));
+    const values = history.flatMap((point) => Object.values(point.values)).filter(Number.isFinite);
+    const peak = values.length ? Math.max(...values.map(Math.abs)) : 0;
+    const receiverCount = nodes.filter((node) => node.role !== "Grandmaster").length;
+    const locked = nodes.filter((node) => node.role !== "Grandmaster" && node.state === "LOCKED").length;
+    if (connection !== "simulation") {
+      return [
+        { label: "Endpoint RMS", value: final.measured ? `${final.rms.toFixed(1)} ns` : "—", delta: "RAW", note: `${final.sampleCount} samples`, icon: Activity, good: final.measured },
+        { label: "Peak raw offset", value: values.length ? `${peak.toFixed(0)} ns` : "—", delta: "UNFILTERED", note: `${range} window`, icon: Zap, good: values.length > 0 },
+        { label: "Locked receivers", value: `${locked}/${receiverCount}`, delta: telemetryStatus?.mode.toUpperCase() ?? "WAITING", note: "LinuxPTP servo state", icon: ShieldCheck, good: locked === receiverCount && receiverCount > 0 },
+        { label: "Raw samples", value: history.length.toLocaleString(), delta: "NO SMOOTHING", note: "browser capture buffer", icon: TimerReset, good: history.length > 0 },
+      ];
+    }
     return [
-      { label: "Cascade RMS", value: `${final.rms.toFixed(1)} ns`, delta: "−8.2%", note: "vs. previous run", icon: Activity, good: true },
-      { label: "Peak offset", value: `${peak.toFixed(0)} ns`, delta: "+14 ns", note: "95th percentile", icon: Zap, good: false },
-      { label: "Locked clocks", value: `${nodes.filter((node) => node.state === "LOCKED").length}/${nodes.length}`, delta: "Stable", note: "for 18m 42s", icon: ShieldCheck, good: true },
-      { label: "MTIE · 300 s", value: "324 ns", delta: "Pass", note: "G.8273.2 mask", icon: TimerReset, good: true },
+      { label: "Modeled RMS", value: `${final.rms.toFixed(1)} ns`, delta: "SIM", note: "not a measurement", icon: Activity, good: false },
+      { label: "Modeled peak", value: `${peak.toFixed(0)} ns`, delta: "SIM", note: "not a measurement", icon: Zap, good: false },
+      { label: "Modeled locks", value: `${locked}/${receiverCount}`, delta: "SIM", note: "not hardware state", icon: ShieldCheck, good: false },
+      { label: "Generated samples", value: history.length.toLocaleString(), delta: "SIM", note: "deterministic fallback", icon: TimerReset, good: false },
     ];
-  }, [history, nodes]);
+  }, [connection, history, nodes, range, telemetryStatus]);
 
   const selectNode = (id: string) => {
     setSelectedNode(id);
     setVisibleTraces((current) => (current.includes(id) ? current : [...current.slice(-3), id]));
+  };
+
+  const downloadRawCsv = () => {
+    const rows = ["timestamp_utc,clock,offset_ns"];
+    history.forEach((point) => Object.entries(point.values).forEach(([clock, offset]) => rows.push(`${new Date(point.t * 1000).toISOString()},${clock},${offset}`)));
+    const url = URL.createObjectURL(new Blob([`${rows.join("\n")}\n`], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `ptpbox-raw-${new Date().toISOString().replaceAll(":", "-")}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const startCascade = async () => {
+    setControlBusy(true);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start" }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "cascade start failed");
+      setToast("Cascade started · waiting for the first raw LinuxPTP samples");
+      setConnection("waiting");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Cascade start is unavailable");
+    } finally {
+      setControlBusy(false);
+    }
   };
 
   const handleApply = async () => {
@@ -364,7 +615,7 @@ export default function PTPBoxDashboard() {
         sanity_freq_limit_ppb: sanity ? 200_000 : 0,
       },
     };
-    if (connection === "live") {
+    if (agentStatus) {
       try {
         const response = await fetch(`${agentBaseUrl()}/api/config/apply`, {
           method: "POST",
@@ -386,7 +637,7 @@ export default function PTPBoxDashboard() {
     const starting = !experimentRunning;
     setExperimentRunning(starting);
     if (starting && experimentProgress >= 100) setExperimentProgress(0);
-    if (starting && connection === "live") {
+    if (starting && agentStatus) {
       try {
         await fetch(`${agentBaseUrl()}/api/experiments/start`, {
           method: "POST",
@@ -431,10 +682,11 @@ export default function PTPBoxDashboard() {
         </nav>
         <div className="sidebar-bottom">
           <div className="host-card">
-            <div className="host-title"><span className={`status-orb ${connection}`} /> <strong>{connection === "live" ? "Hardware connected" : connection === "checking" ? "Finding host…" : "Hardware model"}</strong></div>
+            <div className="host-title"><span className={`status-orb ${connection}`} /> <strong>{hostStateLabel}</strong></div>
             <div className="host-row"><span>PTPBox</span><code>192.168.1.60</code></div>
             <div className="host-row"><span>LinuxPTP</span><code>{agentStatus?.linuxptp ?? "4.4"}</code></div>
             <div className="host-row"><span>PTP ports</span><code>{agentStatus?.ptp_interfaces ?? 16}</code></div>
+            <div className="host-row"><span>Cascade</span><code>{connection === "live" || agentStatus?.running ? "RUNNING" : "STOPPED"}</code></div>
           </div>
           <div className="user-row"><div className="avatar">AB</div><div><strong>Lab operator</strong><small>Administrator</small></div><Settings2 size={16} /></div>
         </div>
@@ -459,33 +711,41 @@ export default function PTPBoxDashboard() {
         <div className="content-shell">
           <div className="page-heading">
             <div>
-              <div className="eyebrow"><span className={`status-orb ${connection}`} /> {connection === "live" ? "LIVE HARDWARE" : "INTERACTIVE HARDWARE MODEL"} <b>·</b> SESSION 024</div>
+              <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
               <h1>{section === "Overview" ? "Cascade overview" : section}</h1>
-              <p>{section === "Overview" ? "See timing quality degrade hop by hop, then tune the system that creates it." : section === "Analytics" ? "Interrogate stability, noise, and accumulated time error across every clock." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <p>{section === "Overview" ? "See timing quality degrade hop by hop, then tune the system that creates it." : section === "Analytics" ? "Interrogate raw per-hop offset, noise, frequency correction, and path delay across every receiver." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
-              <button className={`live-control ${paused ? "paused" : ""}`} type="button" onClick={() => setPaused((value) => !value)}>{paused ? <Play size={14} /> : <Pause size={14} />} {paused ? "Resume" : "Streaming"}</button>
+              <button className={`live-control ${paused ? "paused" : ""}`} type="button" onClick={() => setPaused((value) => !value)}>{paused ? <Play size={14} /> : <Pause size={14} />} {paused ? "Resume" : connection === "simulation" ? "Simulating" : "Raw stream"}</button>
             </div>
+          </div>
+
+          <div className={`data-provenance ${connection}`}>
+            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "LINUXPTP LOG STREAM"}</span>
+            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "raw=true · smoothing=none"}</code>
+            <span>{history.length.toLocaleString()} samples buffered</span>
+            <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
+            {agentStatus && connection !== "live" && <button type="button" className="quiet-button" disabled={controlBusy} onClick={startCascade}><Play size={12} /> {controlBusy ? "Starting…" : "Start cascade"}</button>}
           </div>
 
           {section === "Overview" && (
             <div className="overview-layout">
               <section className="instrument-panel topology-panel">
                 <div className="panel-heading">
-                  <div><span className="section-kicker">LIVE TOPOLOGY</span><h2>Seven-hop clock cascade</h2></div>
-                  <div className="panel-tools"><span><Radio size={13} /> 8 clocks · 14 PTP links</span><button className="quiet-button" type="button"><RefreshCw size={14} /> Rediscover</button></div>
+                  <div><span className="section-kicker">PHYSICAL TOPOLOGY</span><h2>Seven-stage clock cascade</h2></div>
+                  <div className="panel-tools"><span><Radio size={13} /> {nodes.length} clocks · {Math.max(0, nodes.length - 1)} measured hops</span><button className="quiet-button" type="button"><RefreshCw size={14} /> Rediscover</button></div>
                 </div>
                 <div className="topology-scroll">
                   <div className="topology-track">
                     {nodes.map((node, index) => (
                       <div className="node-unit" key={node.id}>
-                        {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {node.meanPathDelay} ns</small></div>}
-                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""}`}>
+                        {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {node.measured ? `${node.meanPathDelay} ns` : "—"}</small></div>}
+                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
                           <div className="node-topline"><span>{node.role === "Boundary" ? "BC" : node.role === "Grandmaster" ? "GM" : "OC"}</span><i style={{ background: node.color }} /></div>
                           <div className="node-symbol"><Clock3 size={20} strokeWidth={1.4} /><span className="pulse-ring" /></div>
                           <strong>{node.label}</strong>
-                          <span className="node-offset">{formatOffset(node.offset)}</span>
+                          <span className="node-offset">{formatOffset(node.offset, node.measured)}</span>
                           <div className="node-state"><span /> {node.state}</div>
                           <div className="node-ports"><code>{node.ingress}</code><ArrowRight size={11} /><code>{node.egress}</code></div>
                         </button>
@@ -495,7 +755,7 @@ export default function PTPBoxDashboard() {
                 </div>
                 <div className="topology-footer">
                   <span><i className="legend-dot locked" /> Locked</span><span><i className="legend-dot tracking" /> Tracking</span><span><i className="legend-line" /> Measured hop</span>
-                  <p><Info size={13} /> Error growth is measured relative to the GM reference PHC.</p>
+                  <p><Info size={13} /> Values are raw per-hop master offsets emitted by ptp4l; no smoothing or interpolation.</p>
                 </div>
               </section>
 
@@ -512,18 +772,18 @@ export default function PTPBoxDashboard() {
               <div className="overview-grid">
                 <section className="instrument-panel chart-panel">
                   <div className="panel-heading chart-heading">
-                    <div><span className="section-kicker">TIME ERROR</span><h2>Cascade offset</h2></div>
+                    <div><span className="section-kicker">RAW TIME ERROR</span><h2>LinuxPTP master offset</h2></div>
                     <div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div>
                   </div>
                   <div className="chart-legend">
                     {visibleTraces.map((id) => {
-                      const node = nodes.find((item) => item.id === id)!;
-                      return <button type="button" key={id} onClick={() => selectNode(id)} className={selectedNode === id ? "active" : ""}><i style={{ background: node.color }} /> {node.label}<strong>{formatOffset(node.offset)}</strong></button>;
+                      const node = nodes.find((item) => item.id === id);
+                      return node ? <button type="button" key={id} onClick={() => selectNode(id)} className={selectedNode === id ? "active" : ""}><i style={{ background: node.color }} /> {node.label}<strong>{formatOffset(node.offset, node.measured)}</strong></button> : null;
                     })}
                     <span className="chart-unit">OFFSET · ns</span>
                   </div>
-                  <LineChart data={history} selected={visibleTraces} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Insight:</strong> BC–06 contributes 31% of total cascade variance. The trace recovers cleanly after the 13:41 step.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <LineChart data={history} selected={visibleTraces} nodes={nodes} />
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a ptp4l log sample. Missing samples remain gaps; the browser does not interpolate or filter.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">
@@ -532,14 +792,14 @@ export default function PTPBoxDashboard() {
                     <button className="more-button" type="button">•••</button>
                   </div>
                   <div className="selected-status">
-                    <div className="radial-score"><span>{Math.max(0, 100 - Math.round(activeNode.rms / 2))}</span><small>QUALITY</small></div>
-                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset)}</strong><small>current master offset</small></div>
+                    <div className="radial-score"><span>{activeNode.measured ? activeNode.sampleCount : 0}</span><small>SAMPLES</small></div>
+                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>latest raw master offset</small></div>
                   </div>
                   <div className="selected-metrics">
-                    <div><span>RMS offset</span><strong>{activeNode.rms.toFixed(1)} ns</strong></div>
-                    <div><span>Mean path delay</span><strong>{activeNode.meanPathDelay} ns</strong></div>
-                    <div><span>Frequency adj.</span><strong>−12.4 ppb</strong></div>
-                    <div><span>PHC device</span><strong>{activeNode.phc}</strong></div>
+                    <div><span>Window RMS</span><strong>{activeNode.measured ? `${activeNode.rms.toFixed(1)} ns` : "—"}</strong></div>
+                    <div><span>Mean path delay</span><strong>{activeNode.measured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
+                    <div><span>Frequency adj.</span><strong>{activeNode.measured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
+                    <div><span>Log source</span><strong>{activeNode.source}</strong></div>
                   </div>
                   <div className="servo-mini">
                     <div><span>PI SERVO</span><strong>K<sub>p</sub> {kp.toFixed(2)} · K<sub>i</sub> {ki.toFixed(2)}</strong></div>
@@ -555,28 +815,25 @@ export default function PTPBoxDashboard() {
             <div className="analytics-layout">
               <section className="instrument-panel analytics-chart-panel">
                 <div className="panel-heading">
-                  <div><span className="section-kicker">STABILITY EXPLORER</span><h2>Accumulated offset by clock</h2></div>
-                  <div className="panel-tools"><button className="quiet-button"><ListFilter size={14} /> Signals</button><button className="quiet-button"><Download size={14} /> CSV</button></div>
+                  <div><span className="section-kicker">STABILITY EXPLORER</span><h2>Raw receiver offset by clock</h2></div>
+                  <div className="panel-tools"><button className="quiet-button"><ListFilter size={14} /> Signals</button><button className="quiet-button" onClick={downloadRawCsv}><Download size={14} /> Raw CSV</button></div>
                 </div>
                 <div className="analytics-traces">
                   {nodes.map((node) => <button type="button" key={node.id} className={visibleTraces.includes(node.id) ? "active" : ""} onClick={() => setVisibleTraces((current) => current.includes(node.id) ? current.filter((item) => item !== node.id) : [...current, node.id])}><i style={{ background: node.color }} />{node.label}</button>)}
                 </div>
-                <LineChart data={history} selected={visibleTraces.length ? visibleTraces : ["OC"]} />
+                <LineChart data={history} selected={visibleTraces.length ? visibleTraces : nodes.length ? [nodes[nodes.length - 1].id] : []} nodes={nodes} />
               </section>
               <section className="instrument-panel distribution-panel">
-                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>OC offset density</h2></div><span className="quality-badge">NORMAL</span></div>
-                <div className="histogram" aria-label="Offset histogram">{[8, 14, 21, 33, 47, 68, 88, 100, 93, 74, 56, 38, 24, 13, 7].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <div className="hist-axis"><span>−50</span><span>0</span><span>+50</span><span>+100</span><span>+150 ns</span></div>
-                <div className="distribution-stats"><div><span>σ</span><strong>53.4 ns</strong></div><div><span>P95</span><strong>138 ns</strong></div><div><span>Skew</span><strong>0.18</strong></div></div>
+                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>Endpoint raw offset density</h2></div><span className="quality-badge">RAW</span></div>
+                <div className="histogram" aria-label="Raw endpoint offset histogram">{endpointDistribution.bins.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
+                <div className="hist-axis"><span>{endpointDistribution.min.toFixed(0)}</span><span>raw samples</span><span>{endpointDistribution.max.toFixed(0)} ns</span></div>
+                <div className="distribution-stats"><div><span>σ</span><strong>{endpointDistribution.sigma.toFixed(1)} ns</strong></div><div><span>P95</span><strong>{endpointDistribution.p95.toFixed(1)} ns</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
               </section>
               <section className="instrument-panel hop-table-panel">
-                <div className="panel-heading"><div><span className="section-kicker">ERROR BUDGET</span><h2>Per-hop contribution</h2></div><span className="panel-meta">120 s rolling window</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">RAW RECEIVER DATA</span><h2>Per-hop LinuxPTP measurements</h2></div><span className="panel-meta">{range} raw window</span></div>
                 <div className="data-table hop-table">
-                  <div className="table-header"><span>Clock</span><span>Offset</span><span>Hop Δ</span><span>RMS</span><span>MTIE · 300 s</span><span>Contribution</span><span>State</span></div>
-                  {nodes.slice(1).map((node, index) => {
-                    const contribution = Math.round((node.rms / nodes.slice(1).reduce((sum, item) => sum + item.rms, 0)) * 100);
-                    return <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset)}</strong><span>+{(node.offset - nodes[index].offset).toFixed(1)} ns</span><span>{node.rms.toFixed(1)} ns</span><span>{Math.round(node.rms * 5.8)} ns</span><span><i className="contribution-bar"><b style={{ width: `${contribution * 3}%` }} /></i>{contribution}%</span><em className={node.state === "LOCKED" ? "state-good" : "state-warn"}>{node.state}</em></button>;
-                  })}
+                  <div className="table-header"><span>Clock</span><span>Offset</span><span>Path delay</span><span>RMS</span><span>Frequency</span><span>Raw samples</span><span>State</span></div>
+                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{node.measured ? `${node.meanPathDelay.toFixed(1)} ns` : "—"}</span><span>{node.measured ? `${node.rms.toFixed(1)} ns` : "—"}</span><span>{node.measured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.sampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
                 </div>
               </section>
             </div>
@@ -622,15 +879,15 @@ export default function PTPBoxDashboard() {
             <div className="interfaces-layout">
               <div className="interface-summary">
                 <article><Cpu size={18} /><span>PTP-capable ports</span><strong>16</strong><small>14 cascade · 2 utility</small></article>
-                <article><Gauge size={18} /><span>Aggregate line rate</span><strong>1.2 Tb/s</strong><small>12 × 100G · 3 × 50G · 1 × 1G</small></article>
+                <article><Gauge size={18} /><span>Aggregate line rate</span><strong>1.2 Tb/s</strong><small>10 × 100G · 4 × 50G · 1 × 1G</small></article>
                 <article><Clock3 size={18} /><span>Hardware clocks</span><strong>15</strong><small>All precise IEEE 1588 quality</small></article>
                 <article><Network size={18} /><span>Drivers</span><strong>3</strong><small>mlx5_core · ice · ixgbe</small></article>
               </div>
               <section className="instrument-panel interface-table-panel">
                 <div className="panel-heading"><div><span className="section-kicker">LIVE INVENTORY</span><h2>Physical interfaces & PHCs</h2></div><div className="panel-tools"><span className="scan-time"><RefreshCw size={13} /> Discovered 8 s ago</span><button className="quiet-button">Rescan</button></div></div>
                 <div className="interface-map">
-                  <div className="interface-map-labels"><span>BC–01</span><span>BC–02</span><span>BC–03</span><span>BC–04</span><span>BC–05</span><span>BC–06</span><span>OC</span></div>
-                  <div className="interface-map-line">{Array.from({ length: 14 }).map((_, index) => <i key={index} className={index % 2 ? "in" : "out"} />)}</div>
+                  <div className="interface-map-labels">{nodes.map((node) => <span key={node.id}>{node.label}</span>)}</div>
+                  <div className="interface-map-line">{Array.from({ length: nodes.length * 2 }).map((_, index) => <i key={index} className={index % 2 ? "in" : "out"} />)}</div>
                 </div>
                 <div className="data-table interface-table">
                   <div className="table-header"><span>Interface</span><span>Assignment</span><span>Link</span><span>PHC</span><span>Timestamping</span><span>Driver</span><span>State</span></div>

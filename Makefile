@@ -17,6 +17,7 @@ lint:
 
 check: lint test standalone
 	python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py
+	python3 -m unittest discover -s tests -p 'test_*.py'
 	bash -n scripts/install-host.sh scripts/uninstall-host.sh
 
 install: standalone

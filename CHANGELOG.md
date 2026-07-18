@@ -18,6 +18,10 @@ All notable changes will be documented in this file.
 - systemd installer, narrow sudoers policy, and non-destructive uninstaller.
 - Product screenshots, architecture, installation, hardware, API, experiment,
   security, and contribution documentation.
+- Incremental raw LinuxPTP sample delivery with source timestamps, servo state,
+  freshness detection, window RMS, and explicit live/waiting/stale modes.
+- Unsmoothed live charts, endpoint distribution, raw CSV export, and visible
+  provenance that prevents simulation data from being mistaken for hardware.
 
 ### Modernized from the original prototype
 

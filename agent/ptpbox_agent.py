@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -30,13 +30,19 @@ STATE_DIR = Path(os.environ.get("PTPBOX_STATE_DIR", ROOT / "runtime"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", STATE_DIR / "config.json"))
 CONTROL = Path(os.environ.get("PTPBOX_CONTROL", "/usr/local/sbin/ptpboxctl"))
 WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "static"))
+LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
+TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", Path(__file__).with_name("topology.json")))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
+TELEMETRY_MAX_BYTES = 2_000_000
+TELEMETRY_MAX_SAMPLES = 4096
+TELEMETRY_STALE_AFTER_SECONDS = 5.0
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
-    r"(?:s\d+\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
+    r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
     r"path delay\s+(?P<delay>-?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+LOG_TIME_PATTERN = re.compile(r"\[(?P<seconds>\d+(?:\.\d+)?)\]")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "profile": "G.8275.1 Telecom",
@@ -166,6 +172,13 @@ def running_processes() -> list[dict[str, Any]]:
     return processes
 
 
+def load_json(path: Path, fallback: Any = None) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
 def load_config() -> dict[str, Any]:
     try:
         value = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -201,36 +214,145 @@ def save_config(value: dict[str, Any]) -> None:
     pending.replace(CONFIG_FILE)
 
 
-def last_log_measurement(path: Path) -> dict[str, Any] | None:
+def display_path(path: Path) -> str:
+    for base in (LOG_DIR, ROOT):
+        try:
+            return str(path.relative_to(base))
+        except ValueError:
+            continue
+    return str(path)
+
+
+def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> list[dict[str, Any]]:
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - 64_000))
+            start = max(0, size - TELEMETRY_MAX_BYTES)
+            handle.seek(start)
             text = handle.read().decode("utf-8", errors="replace")
+        stat = path.stat()
     except OSError:
-        return None
-    for line in reversed(text.splitlines()):
+        return []
+
+    lines = text.splitlines()
+    if start and lines:
+        lines = lines[1:]
+    parsed: list[dict[str, Any]] = []
+    for line in lines:
         match = LOG_PATTERN.search(line)
-        if match:
-            return {
+        if not match:
+            continue
+        source_time_match = LOG_TIME_PATTERN.search(line[: match.start()])
+        parsed.append(
+            {
                 "offset_ns": float(match.group("offset")),
                 "frequency_ppb": float(match.group("freq")),
                 "mean_path_delay_ns": float(match.group("delay")),
-                "source": str(path.relative_to(ROOT)),
-                "observed_at": path.stat().st_mtime,
+                "servo_state": (match.group("servo_state") or "").lower() or None,
+                "source_time": float(source_time_match.group("seconds")) if source_time_match else None,
+                "source": display_path(path),
+                "raw": True,
             }
-    return None
+        )
+
+    session_start = 0
+    for index in range(1, len(parsed)):
+        previous = parsed[index - 1]["source_time"]
+        current = parsed[index]["source_time"]
+        if previous is not None and current is not None and current + 1.0 < previous:
+            session_start = index
+    parsed = parsed[session_start:][-max(1, min(limit, TELEMETRY_MAX_SAMPLES)) :]
+    source_times = [sample["source_time"] for sample in parsed if sample["source_time"] is not None]
+    last_source_time = source_times[-1] if source_times else None
+    for index, sample in enumerate(parsed):
+        if last_source_time is not None and sample["source_time"] is not None:
+            sample["observed_at"] = stat.st_mtime - max(0.0, last_source_time - sample["source_time"])
+        else:
+            sample["observed_at"] = stat.st_mtime - (len(parsed) - index - 1) * 0.0625
+        sample["sample_id"] = f"{stat.st_ino}:{sample['source_time'] if sample['source_time'] is not None else index}"
+    return parsed
 
 
-def telemetry() -> dict[str, Any]:
+def topology_nodes() -> list[dict[str, str]]:
+    value = load_json(TOPOLOGY_FILE, {})
+    if isinstance(value, dict) and isinstance(value.get("nodes"), list):
+        nodes = [node for node in value["nodes"] if isinstance(node, dict)]
+        if all(all(isinstance(node.get(key), str) for key in ("name", "ingress", "egress")) for node in nodes):
+            return nodes
+    return [
+        {"name": path.name, "ingress": "", "egress": ""}
+        for path in sorted(ROOT.glob("BC[0-9]*"), key=lambda item: int(re.sub(r"\D", "", item.name) or 0))
+    ]
+
+
+def clock_log_candidates(name: str) -> list[Path]:
+    preferred = [LOG_DIR / f"{name}-OC.log"]
+    if name == "BC1":
+        preferred.append(LOG_DIR / f"{name}-GM.log")
+    legacy_dir = ROOT / name
+    legacy = sorted(legacy_dir.glob("*OC*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
+    fallback = sorted(legacy_dir.glob("*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
+    unique: list[Path] = []
+    for path in [*preferred, *legacy, *fallback]:
+        if path.is_file() and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def telemetry(history_seconds: float = 120.0, since: float | None = None, limit: int = TELEMETRY_MAX_SAMPLES) -> dict[str, Any]:
+    now = time.time()
     clocks: list[dict[str, Any]] = []
-    for node_dir in sorted(ROOT.glob("BC[0-9]*")):
-        candidates = sorted(node_dir.glob("*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
-        measurement = next((value for path in candidates if (value := last_log_measurement(path))), None)
-        clocks.append({"id": node_dir.name, "measurement": measurement, "logs": len(candidates)})
+    nodes = topology_nodes()
+    cutoff = now - max(5.0, min(history_seconds, 900.0))
+    for index, node in enumerate(nodes):
+        candidates = clock_log_candidates(node["name"])
+        all_samples: list[dict[str, Any]] = []
+        for path in candidates:
+            samples = parse_log_measurements(path, limit)
+            if samples:
+                all_samples = samples
+                break
+        measurement = all_samples[-1] if all_samples else None
+        window_samples = [sample for sample in all_samples if sample["observed_at"] >= cutoff]
+        samples = window_samples
+        if since is not None:
+            samples = [sample for sample in samples if sample["observed_at"] > since]
+        role = "grandmaster" if index == 0 else "ordinary" if index == len(nodes) - 1 else "boundary"
+        clocks.append(
+            {
+                "id": node["name"],
+                "role": role,
+                "ingress": node["ingress"],
+                "egress": node["egress"],
+                "measurement": measurement,
+                "samples": samples,
+                "window_sample_count": len(window_samples),
+                "rms_ns": (
+                    sum(float(sample["offset_ns"]) ** 2 for sample in window_samples) / len(window_samples)
+                ) ** 0.5 if window_samples else None,
+                "logs": len(candidates),
+            }
+        )
     measured = sum(1 for clock in clocks if clock["measurement"])
-    return {"timestamp": time.time(), "clocks": clocks, "measured_clocks": measured, "mode": "live" if measured else "observer"}
+    fresh = sum(
+        1
+        for clock in clocks
+        if clock["measurement"] and now - float(clock["measurement"]["observed_at"]) <= TELEMETRY_STALE_AFTER_SECONDS
+    )
+    sample_count = sum(len(clock["samples"]) for clock in clocks)
+    mode = "live" if fresh else "stale" if measured else "waiting"
+    return {
+        "timestamp": now,
+        "clocks": clocks,
+        "measured_clocks": measured,
+        "fresh_clocks": fresh,
+        "sample_count": sample_count,
+        "mode": mode,
+        "raw": True,
+        "smoothing": "none",
+        "history_seconds": history_seconds,
+    }
 
 
 def status() -> dict[str, Any]:
@@ -246,7 +368,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.0.0",
+        "agent_version": "1.1.0",
         "timestamp": time.time(),
     }
 
@@ -325,14 +447,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        route = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        route = parsed.path
+        query = parse_qs(parsed.query)
         try:
             if route == "/api/status":
                 self.send_json(status())
             elif route == "/api/interfaces":
                 self.send_json({"interfaces": [asdict(item) for item in interfaces()], "timestamp": time.time()})
             elif route == "/api/telemetry":
-                self.send_json(telemetry())
+                try:
+                    history_seconds = float(query.get("history", ["120"])[0])
+                    since = float(query["since"][0]) if "since" in query else None
+                    limit = int(query.get("limit", [str(TELEMETRY_MAX_SAMPLES)])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history, since, and limit must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(telemetry(history_seconds, since, limit))
             elif route == "/api/config":
                 self.send_json(load_config())
             elif route == "/healthz":

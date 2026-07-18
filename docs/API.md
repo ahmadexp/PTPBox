@@ -64,29 +64,53 @@ and whether privileged lifecycle control is installed.
 
 ### `GET /api/telemetry`
 
-The agent scans `PTPBOX_ROOT/BC*/**.log`, reads only the tail of each file, and
-extracts LinuxPTP offset, frequency adjustment, and mean path delay.
+The agent reads raw client-side LinuxPTP logs from `PTPBOX_LOG_DIR` (normally
+`/var/log/ptpbox`) with a legacy fallback to `PTPBOX_ROOT/BC*`. It extracts
+every offset, frequency adjustment, mean path delay, servo state, and LinuxPTP
+source timestamp without smoothing or interpolation.
+
+Query parameters:
+
+- `history`: requested window in seconds, clamped to 5–900;
+- `since`: return only samples newer than this Unix timestamp;
+- `limit`: maximum raw samples per clock, capped at 4096.
 
 ```json
 {
   "timestamp": 1784327816.64,
   "mode": "live",
   "measured_clocks": 1,
+  "fresh_clocks": 1,
+  "raw": true,
+  "smoothing": "none",
   "clocks": [
     {
       "id": "BC2",
+      "role": "boundary",
+      "ingress": "enp26s0f0np0",
+      "egress": "enp26s0f1np1",
       "logs": 2,
+      "window_sample_count": 1920,
+      "rms_ns": 18.7,
       "measurement": {
         "offset_ns": 42,
         "frequency_ppb": -12.4,
         "mean_path_delay_ns": 241,
-        "source": "BC2/BC2-OC-1.log",
-        "observed_at": 1784327800.0
-      }
+        "servo_state": "s2",
+        "source": "BC2-OC.log",
+        "observed_at": 1784327800.0,
+        "raw": true
+      },
+      "samples": []
     }
   ]
 }
 ```
+
+`mode` is `live` only when at least one measurement is less than five seconds
+old. It becomes `stale` for old measurements and `waiting` when no parsable
+LinuxPTP sample exists. `samples` can be empty on an incremental request even
+while `measurement` and window statistics remain populated.
 
 ## Configuration
 

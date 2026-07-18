@@ -9,6 +9,8 @@ User=@PTPBOX_USER@
 Group=@PTPBOX_GROUP@
 Environment=PTPBOX_ROOT=@PTPBOX_ROOT@
 Environment=PTPBOX_STATE_DIR=@PTPBOX_ROOT@/runtime
+Environment=PTPBOX_LOG_DIR=/var/log/ptpbox
+Environment=PTPBOX_TOPOLOGY=/etc/ptpbox/topology.json
 Environment=PTPBOX_BIND=0.0.0.0
 Environment=PTPBOX_PORT=8090
 Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static
