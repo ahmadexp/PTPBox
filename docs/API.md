@@ -33,7 +33,7 @@ and whether privileged lifecycle control is installed.
   "processes": [],
   "running": false,
   "observer_only": false,
-  "agent_version": "1.3.0"
+  "agent_version": "1.4.0"
 }
 ```
 

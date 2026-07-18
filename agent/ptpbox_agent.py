@@ -50,6 +50,7 @@ LOG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LOG_TIME_PATTERN = re.compile(r"\[(?P<seconds>\d+(?:\.\d+)?)\]")
+LOG_SESSION_PATTERN = re.compile(r"selected /dev/ptp\d+ as PTP clock", re.IGNORECASE)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "profile": "G.8275.1 Telecom",
@@ -414,6 +415,13 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
     except OSError:
         return []
 
+    # Logs are intentionally append-only across daemon restarts. If the newest
+    # process has not emitted an offset yet, never let the previous process's
+    # last sample masquerade as fresh merely because the file mtime advanced.
+    session_markers = list(LOG_SESSION_PATTERN.finditer(text))
+    if session_markers:
+        text = text[session_markers[-1].start() :]
+
     lines = text.splitlines()
     if start and lines:
         lines = lines[1:]
@@ -470,14 +478,19 @@ def topology_nodes() -> list[dict[str, str]]:
 
 
 def clock_log_candidates(name: str) -> list[Path]:
-    preferred = [LOG_DIR / f"{name}-OC.log"]
+    preferred = [LOG_DIR / f"{name}-BC.log", LOG_DIR / f"{name}-OC.log"]
     if name == "BC1":
         preferred.append(LOG_DIR / f"{name}-GM.log")
+    managed = [path for path in preferred if path.is_file()]
+    if managed:
+        # A current boundary-clock log with no offset means "waiting", not
+        # permission to resurrect samples from an older OC/GM process file.
+        return [max(managed, key=lambda item: item.stat().st_mtime)]
     legacy_dir = ROOT / name
     legacy = sorted(legacy_dir.glob("*OC*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
     fallback = sorted(legacy_dir.glob("*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
     unique: list[Path] = []
-    for path in [*preferred, *legacy, *fallback]:
+    for path in [*legacy, *fallback]:
         if path.is_file() and path not in unique:
             unique.append(path)
     return unique
@@ -575,7 +588,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.3.0",
+        "agent_version": "1.4.0",
         "timestamp": time.time(),
     }
 

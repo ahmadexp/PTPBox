@@ -1,0 +1,6 @@
+# PTPBox runs multi-PHC boundary clocks inside dedicated network namespaces.
+# Ubuntu's stock ptp4l profile does not cover the JBOD PHC-switch notification
+# socket or PTPBox's per-process management sockets and inherited log files.
+capability sys_admin,
+@{run}/ptpbox/ptp4l-* rw,
+/var/log/ptpbox/** rw,

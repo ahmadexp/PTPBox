@@ -34,6 +34,21 @@ install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_a
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
 
+# Ubuntu confines ptp4l with AppArmor. Multi-PHC boundary clocks need the
+# JBOD clock-switch notification socket, while one host-wide filesystem needs
+# a distinct management socket for every namespace. Keep the distribution
+# profile intact and add a narrowly scoped local include when AppArmor exists.
+if [[ -f /etc/apparmor.d/usr.sbin.ptp4l && -d /etc/apparmor.d/local ]]; then
+  install -m 0644 "$SOURCE_DIR/agent/apparmor-ptpbox-ptp4l" /etc/apparmor.d/local/ptpbox-ptp4l
+  touch /etc/apparmor.d/local/usr.sbin.ptp4l
+  if ! grep -Fq 'include if exists <local/ptpbox-ptp4l>' /etc/apparmor.d/local/usr.sbin.ptp4l; then
+    printf '\ninclude if exists <local/ptpbox-ptp4l>\n' >> /etc/apparmor.d/local/usr.sbin.ptp4l
+  fi
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r /etc/apparmor.d/usr.sbin.ptp4l
+  fi
+fi
+
 if [[ -d "$SOURCE_DIR/dist-standalone" ]]; then
   cp -R "$SOURCE_DIR/dist-standalone/." "$INSTALL_DIR/static/"
 else

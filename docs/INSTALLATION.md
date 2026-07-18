@@ -74,8 +74,8 @@ interface and that it is not part of the timing chain.
 Edit [`agent/topology.json`](../agent/topology.json). Each node represents one
 dual-port NIC/card in its own namespace and needs an ingress and egress
 interface. The first node runs the grandmaster-facing process, the last node
-runs the ordinary-clock endpoint, and intermediate NICs run directional OC and
-GM `ptp4l` processes. No local PHC synchronization loop is added.
+runs the ordinary-clock endpoint, and every intermediate NIC runs one two-port
+`ptp4l` boundary clock. No local PHC synchronization loop is added.
 
 ```json
 {
@@ -112,7 +112,9 @@ The installer:
 5. creates a systemd unit running as the operator account;
 6. validates a sudoers policy for `start`, `stop`, `restart`, and `status` only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
-8. starts the web service on port 8090.
+8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
+   per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
+9. starts the web service on port 8090.
 
 ### 4. Verify the control plane
 
@@ -144,10 +146,12 @@ state and does not require another password prompt.
 Logs are written under `/var/log/ptpbox`. Runtime process state and generated
 LinuxPTP configuration are stored under `/run/ptpbox` and `/etc/linuxptp`
 respectively. `/etc/linuxptp` is required by Ubuntu's packaged AppArmor policy.
-Every intermediate namespace runs a directional upstream OC and downstream GM,
-as in the original PTPBox. The controller records each port's timestamp provider
-in `/run/ptpbox/phcs.json`. The agent reads the selected NIC PHCs through the
-`clock` group and compares them to BC1 without modifying them.
+Every intermediate namespace runs one `ptp4l` process with its ingress and
+egress ports. LinuxPTP selects the upstream port as the client and serves time
+from the downstream port as a true boundary clock. The controller records each
+port's timestamp provider in `/run/ptpbox/phcs.json`. The agent reads the
+selected NIC PHCs through the `clock` group and compares them to BC1 without
+modifying them.
 
 ## Stop and restore
 

@@ -118,12 +118,37 @@ def setup() -> dict[str, Any]:
     return {"ok": True, "configured_namespaces": configured, "interfaces": len(assigned), "phcs": phcs}
 
 
-def render_ptp_config(role: str, path: Path, boundary_jbod: bool = False) -> None:
+def render_ptp_config(
+    role: str,
+    path: Path,
+    boundary_jbod: bool = False,
+    ingress: str | None = None,
+    egress: str | None = None,
+    uds_label: str | None = None,
+) -> None:
     values = config()
     servo = values["servo"]
     transport = {"L2": "L2", "UDPv4": "UDPv4", "UDPv6": "UDPv6"}[values["transport"]]
-    role_line = "serverOnly 1" if role == "server" else "clientOnly 1" if role == "client" else ""
+    if role == "boundary" and (not ingress or not egress):
+        raise ValueError("a boundary clock requires ingress and egress interfaces")
+    # The physical chain has deliberate direction. Static port roles prevent a
+    # downstream free-running clock from being selected in reverse while an
+    # upstream link is starting or faulted.
+    role_line = (
+        "serverOnly 1\npriority1 1"
+        if role == "server"
+        else "clientOnly 1"
+        if role == "client"
+        else "BMCA noop\nclientOnly 1"
+    )
     jbod_line = "boundary_clock_jbod 1" if boundary_jbod else ""
+    port_sections = f"\n[{ingress}]\n\n[{egress}]\nserverOnly 1\n" if role == "boundary" else ""
+    uds_lines = (
+        f"uds_address /run/ptpbox/ptp4l-{uds_label}\n"
+        f"uds_ro_address /run/ptpbox/ptp4l-{uds_label}-ro"
+        if uds_label
+        else ""
+    )
     text = f"""[global]
 domainNumber {int(values['domain'])}
 network_transport {transport}
@@ -142,8 +167,10 @@ sanity_freq_limit {int(servo['sanity_freq_limit_ppb'])}
 logging_level 6
 use_syslog 0
 verbose 1
+{uds_lines}
 {role_line}
 {jbod_line}
+{port_sections}
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -223,36 +250,42 @@ def start() -> dict[str, Any]:
     current = status()
     if current["running"]:
         return {"ok": True, "message": "cascade is already running", **current}
-    setup()
+    setup_result = setup()
     prioritize_timestamp_workers()
     topo = topology()
+    phcs_by_id = {item["id"]: item for item in setup_result.get("phcs", [])}
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # Ubuntu's packaged AppArmor profile permits ptp4l configuration below
-    # /etc/linuxptp, but intentionally rejects arbitrary files below /run.
-    server_config = LINUXPTP_CONFIG_DIR / "ptpbox-server.conf"
-    client_config = LINUXPTP_CONFIG_DIR / "ptpbox-client.conf"
-    render_ptp_config("server", server_config)
-    render_ptp_config("client", client_config)
     processes: list[dict[str, Any]] = []
     try:
-        first = topo["nodes"][0]
-        spawn("BC1-GM", ["ip", "netns", "exec", first["name"], "ptp4l", "-f", str(server_config), "-i", first["egress"], "-m", "-q"], processes)
-        for node in topo["nodes"][1:-1]:
-            # Match the original real-time PTPBox model exactly: ptp4l
-            # disciplines each NIC over the wire. PHCs are observed, never
-            # synchronized by a local phc2sys control loop.
-            spawn(
-                f"{node['name']}-OC",
-                ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(client_config), "-i", node["ingress"], "-m", "-q"],
-                processes,
+        for index, node in enumerate(topo["nodes"]):
+            first = index == 0
+            last = index == len(topo["nodes"]) - 1
+            role = "server" if first else "client" if last else "boundary"
+            label = f"{node['name']}-{'GM' if first else 'OC' if last else 'BC'}"
+            node_config = LINUXPTP_CONFIG_DIR / f"ptpbox-{node['name'].lower()}.conf"
+            inventory = phcs_by_id.get(node["name"], {})
+            # LinuxPTP requires this flag when two interface names expose
+            # different provider indices. On the reference Mellanox cards the
+            # providers are hardware-synchronized; no host-side clock loop is
+            # started or required for their operation.
+            boundary_jbod = not first and not last and not bool(inventory.get("shared_phc"))
+            render_ptp_config(
+                role,
+                node_config,
+                boundary_jbod=boundary_jbod,
+                ingress=node["ingress"] if role == "boundary" else None,
+                egress=node["egress"] if role == "boundary" else None,
+                uds_label=node["name"].lower(),
             )
-            spawn(
-                f"{node['name']}-GM",
-                ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(server_config), "-i", node["egress"], "-m", "-q"],
-                processes,
-            )
-        last = topo["nodes"][-1]
-        spawn(f"{last['name']}-OC", ["ip", "netns", "exec", last["name"], "ptp4l", "-f", str(client_config), "-i", last["ingress"], "-m", "-q"], processes)
+            interfaces = [node["egress"]] if first else [node["ingress"]] if last else [node["ingress"], node["egress"]]
+            args = ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(node_config)]
+            # Intermediate ports are declared in their config so the egress can
+            # carry the static server role. Endpoints use the simpler CLI form.
+            if role != "boundary":
+                for interface in interfaces:
+                    args.extend(["-i", interface])
+            args.extend(["-m", "-q"])
+            spawn(label, args, processes)
     except Exception:
         for item in reversed(processes):
             try:

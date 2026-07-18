@@ -24,17 +24,28 @@ class ControllerConfigTests(unittest.TestCase):
         CONTROLLER.CONFIG_FILE = self.original_config
         self.temporary.cleanup()
 
-    def test_boundary_config_has_no_forced_port_role(self) -> None:
+    def test_boundary_config_has_directional_static_roles(self) -> None:
         path = Path(self.temporary.name) / "ptpbox-bc.conf"
-        CONTROLLER.render_ptp_config("boundary", path, boundary_jbod=True)
+        CONTROLLER.render_ptp_config(
+            "boundary",
+            path,
+            boundary_jbod=True,
+            ingress="p1",
+            egress="p2",
+            uds_label="bc2",
+        )
         text = path.read_text(encoding="utf-8")
 
         self.assertIn("boundary_clock_jbod 1", text)
+        self.assertIn("BMCA noop", text)
+        self.assertIn("clientOnly 1", text)
+        self.assertIn("[p1]", text)
+        self.assertIn("[p2]\nserverOnly 1", text)
+        self.assertIn("uds_address /run/ptpbox/ptp4l-bc2", text)
+        self.assertIn("uds_ro_address /run/ptpbox/ptp4l-bc2-ro", text)
         self.assertIn("summary_interval 0", text)
         self.assertIn("tx_timestamp_timeout 100", text)
         self.assertIn("step_threshold 0.000000000", text)
-        self.assertNotIn("serverOnly", text)
-        self.assertNotIn("clientOnly", text)
 
     def test_endpoint_configs_force_their_roles(self) -> None:
         server = Path(self.temporary.name) / "server.conf"
@@ -43,9 +54,10 @@ class ControllerConfigTests(unittest.TestCase):
         CONTROLLER.render_ptp_config("client", client)
 
         self.assertIn("serverOnly 1", server.read_text(encoding="utf-8"))
+        self.assertIn("priority1 1", server.read_text(encoding="utf-8"))
         self.assertIn("clientOnly 1", client.read_text(encoding="utf-8"))
 
-    def test_real_time_cascade_uses_ptp4l_only(self) -> None:
+    def test_real_time_cascade_uses_one_ptp4l_per_nic(self) -> None:
         topology = {
             "nodes": [
                 {"name": "BC1", "ingress": "p1", "egress": "p2"},
@@ -65,7 +77,18 @@ class ControllerConfigTests(unittest.TestCase):
             patch.object(CONTROLLER, "PIDS_FILE", pids_file),
             patch.object(CONTROLLER, "require_root"),
             patch.object(CONTROLLER, "status", return_value={"running": False}),
-            patch.object(CONTROLLER, "setup", return_value={"ok": True}),
+            patch.object(
+                CONTROLLER,
+                "setup",
+                return_value={
+                    "ok": True,
+                    "phcs": [
+                        {"id": "BC1", "shared_phc": False},
+                        {"id": "BC2", "shared_phc": True},
+                        {"id": "BC4", "shared_phc": False},
+                    ],
+                },
+            ),
             patch.object(CONTROLLER, "prioritize_timestamp_workers", return_value=[]),
             patch.object(CONTROLLER, "topology", return_value=topology),
             patch.object(CONTROLLER, "render_ptp_config"),
@@ -74,9 +97,11 @@ class ControllerConfigTests(unittest.TestCase):
             result = CONTROLLER.start()
 
         self.assertTrue(result["running"])
-        self.assertEqual(["BC1-GM", "BC2-OC", "BC2-GM", "BC4-OC"], [label for label, _args in processes])
+        self.assertEqual(["BC1-GM", "BC2-BC", "BC4-OC"], [label for label, _args in processes])
         self.assertTrue(all("ptp4l" in args for _label, args in processes))
         self.assertTrue(all("phc2sys" not in args for _label, args in processes))
+        boundary_args = processes[1][1]
+        self.assertEqual(0, boundary_args.count("-i"))
 
 
 if __name__ == "__main__":

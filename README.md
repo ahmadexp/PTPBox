@@ -121,7 +121,7 @@ flowchart LR
     PHCs["/dev/ptp*\nread-only comparisons"]
     Helper["ptpboxctl\nfixed privileged verbs"]
     NS["BC1 … BC7\nnetwork namespaces"]
-    PTP["ptp4l\nhardware clocks"]
+    PTP["one ptp4l per NIC\nhardware boundary clocks"]
 
     Browser <-->|"HTTP · :8090"| Agent
     Agent --> Inventory

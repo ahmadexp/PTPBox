@@ -58,17 +58,24 @@ interpolation, or synthetic fill is applied in live mode.
 - move/restore interfaces;
 - start/stop LinuxPTP processes;
 - generate role-specific `ptp4l` configuration;
-- run directional OC and GM processes for every intermediate stage, matching
-  the original PTPBox cascade;
+- run one two-port boundary-clock process for every intermediate NIC;
 - write the authoritative PHC measurement map for the unprivileged agent;
 - never run a local PHC discipline loop—the NICs synchronize only through
   `ptp4l` over the physical chain;
 - track child processes and logs.
 
+Every daemon receives a unique management socket below `/run/ptpbox`; network
+namespaces do not isolate Unix-domain socket paths. On AppArmor-enabled Ubuntu
+hosts, the installer adds a local profile include for those sockets, inherited
+PTPBox logs, and the multi-PHC JBOD clock-switch notification path.
+
 The reference host uses end-to-end delay, as did the original PTPBox. The
 generated LinuxPTP configuration matches `summary_interval` to the Sync
 interval. LinuxPTP therefore emits one signed master-offset sample per update
 instead of aggregating multiple updates into unsigned RMS summaries.
+BC1 has an explicit BMCA priority advantage. Intermediate ingress and egress
+ports also have static client/server roles, so a downstream free-running clock
+cannot be elected in reverse while an upstream link starts or faults.
 On Intel ICE hardware, the controller applies LinuxPTP's documented real-time
 priority 30 to the driver's timestamp workers. The reference cascade uses the
 original project's one Sync per second cadence to avoid overdriving a shared
@@ -96,8 +103,9 @@ by default, so the data-plane interfaces do not require IP addressing.
 
 For intermediate nodes:
 
-1. a client-only `ptp4l` instance disciplines the ingress PHC;
-2. a server-only `ptp4l` instance serves the next hop from the card's egress;
+1. one `ptp4l` instance owns both the ingress and egress ports;
+2. LinuxPTP selects the upstream port as client and the downstream port as
+   server, propagating the grandmaster dataset through a real boundary clock;
 3. the observation agent reads the NIC's measurement PHC and compares it to
    BC1 without adjusting either clock.
 

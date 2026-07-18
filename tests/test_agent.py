@@ -98,6 +98,45 @@ class TelemetryTests(unittest.TestCase):
         samples = AGENT.parse_log_measurements(path)
         self.assertEqual([8.0, 3.0], [sample["offset_ns"] for sample in samples])
 
+    def test_restart_marker_invalidates_previous_session_without_new_sample(self) -> None:
+        path = self.log_dir / "BC7-BC.log"
+        path.write_text(
+            "ptp4l[100.000]: master offset 9 s2 freq 1 path delay 250\n"
+            "ptp4l[200.000]: selected /dev/ptp13 as PTP clock\n"
+            "ptp4l[200.010]: port 1: INITIALIZING to SLAVE on INIT_COMPLETE\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual([], AGENT.parse_log_measurements(path))
+
+    def test_restart_marker_keeps_only_new_session_samples(self) -> None:
+        path = self.log_dir / "BC7-BC.log"
+        path.write_text(
+            "ptp4l[100.000]: master offset 9 s2 freq 1 path delay 250\n"
+            "ptp4l[200.000]: selected /dev/ptp13 as PTP clock\n"
+            "ptp4l[201.000]: master offset -4 s1 freq 2 path delay 252\n",
+            encoding="utf-8",
+        )
+
+        samples = AGENT.parse_log_measurements(path)
+        self.assertEqual([-4.0], [sample["offset_ns"] for sample in samples])
+
+    def test_current_boundary_log_does_not_fall_back_to_stale_oc_log(self) -> None:
+        stale = self.write_log("BC7")
+        current = self.log_dir / "BC7-BC.log"
+        current.write_text(
+            "ptp4l[200.000]: selected /dev/ptp13 as PTP clock\n",
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(stale, (now - 60, now - 60))
+        os.utime(current, (now, now))
+
+        self.assertEqual([current], AGENT.clock_log_candidates("BC7"))
+        payload = AGENT.telemetry(history_seconds=120)
+        bc7 = next(clock for clock in payload["clocks"] if clock["id"] == "BC7")
+        self.assertIsNone(bc7["measurement"])
+
     def test_flags_impossible_hardware_path_delay_without_changing_raw_value(self) -> None:
         path = self.log_dir / "BC7-OC.log"
         path.write_text(
