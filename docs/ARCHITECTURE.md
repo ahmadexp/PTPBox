@@ -58,12 +58,15 @@ additional arguments. `setup` and `teardown` remain manual root operations.
 
 ## Data plane
 
-The default seven-node sequence is:
+The reference host's physically verified seven-node sequence is:
 
 ```text
-BC1              BC2 … BC6                         BC7
-GM/east ───────> OC/west → PHC discipline → GM/east ───────> OC/west
+BC1 → BC2 → BC7 → BC6 → BC5 → BC3 → BC4
+GM       boundary clocks                    OC
 ```
+
+The final BC4-to-BC1 cable closes the physical ring but carries no PTP process;
+it is the deliberate logical break that prevents a timing loop.
 
 Each node receives two physical ports. PTP is transported directly over Layer 2
 by default, so the data-plane interfaces do not require IP addressing.

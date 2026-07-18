@@ -28,32 +28,36 @@ The current reference machine exposes sixteen physical ports across NVIDIA,
 Intel E810, and Intel ixgbe drivers. Fourteen ports form the timing lab; two are
 reserved for management and spare use.
 
-| Stage | Ingress | Egress | Driver | PHC behavior |
-| --- | --- | --- | --- | --- |
-| BC1 | `enp25s0f0np0` | `enp25s0f1np1` | `mlx5_core` | distinct PHCs |
-| BC2 | `enp26s0f0np0` | `enp26s0f1np1` | `ice` | shared provider `ptp1` |
-| BC3 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct PHCs |
-| BC4 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct PHCs |
-| BC5 | `enp103s0f0np0` | `enp103s0f1np1` | `mlx5_core` | distinct PHCs |
-| BC6 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct PHCs |
-| BC7 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct PHCs |
-| Management | `enp179s0f0` | — | `ixgbe` | excluded |
-| Spare | `enp179s0f1` | — | `ixgbe` | excluded |
+| Cascade stage | Physical clock | Ingress | Egress | Driver | PHC behavior |
+| --- | --- | --- | --- | --- | --- |
+| 1 | BC1 | `enp25s0f0np0` | `enp25s0f1np1` | `mlx5_core` | distinct PHCs |
+| 2 | BC2 | `enp26s0f0np0` | `enp26s0f1np1` | `ice` | shared provider `ptp1` |
+| 3 | BC7 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct PHCs |
+| 4 | BC6 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct PHCs |
+| 5 | BC5 | `enp103s0f0np0` | `enp103s0f1np1` | `mlx5_core` | distinct PHCs |
+| 6 | BC3 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct PHCs |
+| 7 | BC4 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct PHCs |
+| — | Management | `enp179s0f0` | — | `ixgbe` | excluded |
+| — | Spare | `enp179s0f1` | — | `ixgbe` | excluded |
 
 Interface names are examples, not portable defaults. PCI enumeration can change
 after firmware, BIOS, or hardware changes.
 
 ## Physical cabling
 
-The expected chain connects each node's egress to the next node's ingress:
+The reference machine is physically wired as a ring. A broadcast/counter probe
+verified every peer on 17 July 2026. The controller follows six links as a
+cascade and leaves the return link inactive, avoiding a PTP timing loop:
 
 ```text
-reference → BC1 egress ─ cable ─ BC2 ingress
-             BC2 egress ─ cable ─ BC3 ingress
-             BC3 egress ─ cable ─ BC4 ingress
-             BC4 egress ─ cable ─ BC5 ingress
-             BC5 egress ─ cable ─ BC6 ingress
-             BC6 egress ─ cable ─ BC7 ingress → endpoint
+GM: BC1 egress ──50G──> BC2 ingress
+    BC2 egress ──50G──> BC7 ingress
+    BC7 egress ─100G──> BC6 ingress
+    BC6 egress ─100G──> BC5 ingress
+    BC5 egress ─100G──> BC3 ingress
+    BC3 egress ─100G──> BC4 ingress :OC
+
+inactive return: BC4 egress ──100G──> BC1 ingress
 ```
 
 Use direct attach or optics supported consistently by each pair. Mixed 50G and
