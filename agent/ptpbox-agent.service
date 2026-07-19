@@ -1,7 +1,6 @@
 [Unit]
 Description=PTPBox observation API
-After=network-online.target
-Wants=network-online.target
+After=network.target systemd-tmpfiles-setup.service
 
 [Service]
 Type=simple

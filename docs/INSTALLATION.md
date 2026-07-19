@@ -11,6 +11,7 @@ that can create namespaces and run LinuxPTP processes.
 - Python 3.11 or newer
 - LinuxPTP 4.x (`ptp4l` and optionally `pmc`)
 - `iproute2`, `ethtool`, `systemd`, and `sudo`
+- `mstflint` when ConnectX firmware clock mode must be inspected or changed
 - Two timing-capable ports per boundary-clock stage
 - A separate management interface that is never assigned to a PTP namespace
 
@@ -69,6 +70,12 @@ done
 Record the management interface first. Verify that the SSH session uses that
 interface and that it is not part of the timing chain.
 
+After changing ConnectX hardware, also verify `REAL_TIME_CLOCK_ENABLE=1` and
+perform the supported firmware reset described in the
+[hardware guide](HARDWARE.md#connectx-6-dx-real-time-clock-mode). A normal
+LinuxPTP lock does not prove that two independently exposed port PHCs share a
+continuous hardware time domain.
+
 ### 2. Define the topology
 
 Edit [`agent/topology.json`](../agent/topology.json). Each node represents one
@@ -114,7 +121,13 @@ The installer:
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
 8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
-9. starts the web service on port 8090.
+9. installs a systemd-tmpfiles rule so `/run/netns` and `/run/ptpbox` are
+   recreated after every reboot, before the sandboxed agent starts;
+10. starts the web service on port 8090.
+
+The service starts after `network.target`, not `network-online.target`.
+Timing interfaces intentionally have no IP configuration, so waiting for every
+NetworkManager connection to become routable would deadlock host startup.
 
 ### 4. Verify the control plane
 

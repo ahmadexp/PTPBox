@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -188,6 +189,39 @@ def timestamp_provider(namespace: str, interface: str) -> int | None:
     return None
 
 
+def namespace_interface_details(namespace: str, interface: str, phc: str | None) -> dict[str, Any]:
+    """Capture interface metadata while the timing port lives in its namespace."""
+    link_result = command(["ip", "netns", "exec", namespace, "ip", "-j", "link", "show", "dev", interface], check=False)
+    try:
+        link_items = json.loads(link_result.stdout)
+        link = link_items[0] if isinstance(link_items, list) and link_items else {}
+    except json.JSONDecodeError:
+        link = {}
+
+    ethtool_result = command(["ip", "netns", "exec", namespace, "ethtool", interface], check=False)
+    speed_match = re.search(r"^\s*Speed:\s*(\d+)\s*Mb/s", ethtool_result.stdout, re.MULTILINE)
+    driver_result = command(["ip", "netns", "exec", namespace, "ethtool", "-i", interface], check=False)
+    driver_fields = {
+        key.strip(): value.strip()
+        for line in driver_result.stdout.splitlines()
+        if ":" in line
+        for key, value in [line.split(":", 1)]
+    }
+    flags = link.get("flags", []) if isinstance(link, dict) else []
+    return {
+        "name": interface,
+        "namespace": namespace,
+        "state": str(link.get("operstate", "UNKNOWN")).upper(),
+        "carrier": isinstance(flags, list) and "LOWER_UP" in flags,
+        "speed_mbps": int(speed_match.group(1)) if speed_match else None,
+        "mac": str(link.get("address", "")),
+        "driver": driver_fields.get("driver"),
+        "bus": driver_fields.get("bus-info"),
+        "phc": phc,
+        "hardware_timestamping": phc is not None,
+    }
+
+
 def write_phc_inventory(topo: dict[str, Any]) -> list[dict[str, Any]]:
     """Persist the read-only PHC measurement map for the observation agent."""
     inventory: list[dict[str, Any]] = []
@@ -204,6 +238,8 @@ def write_phc_inventory(topo: dict[str, Any]) -> list[dict[str, Any]]:
                 "egress": node["egress"],
                 "ingress_phc": ingress_phc,
                 "egress_phc": egress_phc,
+                "ingress_interface": namespace_interface_details(node["name"], node["ingress"], ingress_phc),
+                "egress_interface": namespace_interface_details(node["name"], node["egress"], egress_phc),
                 # The first card supplies time on its egress. Every following
                 # card is measured at the ingress PHC disciplined by ptp4l.
                 "measurement_phc": egress_phc if index == 0 else ingress_phc,
@@ -356,6 +392,7 @@ def teardown() -> dict[str, Any]:
                 command(["ip", "link", "set", "dev", interface, "up"], check=False)
                 restored.append(interface)
         command(["ip", "netns", "del", name])
+    PHC_MAP_FILE.unlink(missing_ok=True)
     return {"ok": True, "restored_interfaces": restored}
 
 

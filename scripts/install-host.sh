@@ -33,6 +33,8 @@ install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /etc/li
 install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_agent.py"
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" /etc/tmpfiles.d/ptpbox.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/ptpbox.conf
 
 # Ubuntu confines ptp4l with AppArmor. Multi-PHC boundary clocks need the
 # JBOD clock-switch notification socket, while one host-wide filesystem needs

@@ -103,6 +103,34 @@ class ControllerConfigTests(unittest.TestCase):
         boundary_args = processes[1][1]
         self.assertEqual(0, boundary_args.count("-i"))
 
+    def test_captures_interface_metadata_inside_namespace(self) -> None:
+        def fake_command(args, check=True):
+            class Result:
+                returncode = 0
+                stderr = ""
+
+                def __init__(self, stdout):
+                    self.stdout = stdout
+
+            if args[-4:-1] == ["ip", "-j", "link"]:
+                return Result("[]")
+            if args[-3:] == ["link", "show", "dev"]:
+                return Result("[]")
+            if "-j" in args:
+                return Result('[{"ifname":"p1","flags":["UP","LOWER_UP"],"operstate":"UP","address":"00:11:22:33:44:55"}]')
+            if "-i" in args:
+                return Result("driver: mlx5_core\nbus-info: 0000:19:00.0\n")
+            return Result("Speed: 100000Mb/s\nLink detected: yes\n")
+
+        with patch.object(CONTROLLER, "command", side_effect=fake_command):
+            details = CONTROLLER.namespace_interface_details("BC1", "p1", "ptp0")
+
+        self.assertEqual("BC1", details["namespace"])
+        self.assertEqual("mlx5_core", details["driver"])
+        self.assertEqual("0000:19:00.0", details["bus"])
+        self.assertEqual(100000, details["speed_mbps"])
+        self.assertTrue(details["carrier"])
+
 
 if __name__ == "__main__":
     unittest.main()

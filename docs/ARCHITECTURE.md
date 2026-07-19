@@ -31,11 +31,12 @@ The same component has two build targets:
 `agent/ptpbox_agent.py` uses only the Python standard library. It runs as the
 operator account and reads:
 
-- `/sys/class/net` for link, driver, bus, MAC, speed, and PHC data;
+- `/sys/class/net` for host-namespace link, driver, bus, MAC, speed, and PHC data;
 - `ethtool -T` when sysfs does not expose a distinct PHC;
 - `ip netns list` for namespace state;
 - `ps` for active `ptp4l` processes;
-- `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map;
+- `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map and the
+  timing-interface metadata captured inside each namespace;
 - mapped `/dev/ptp*` clocks for one-hertz, read-only midpoint comparisons;
 - raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
   `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo

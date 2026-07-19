@@ -93,6 +93,8 @@ class Interface:
     bus: str | None
     phc: str | None
     hardware_timestamping: bool
+    namespace: str | None = None
+    assignment: str | None = None
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -146,8 +148,14 @@ def timestamp_info(name: str, discovered_phc: str | None) -> tuple[str | None, b
 
 
 def interfaces() -> list[Interface]:
-    found: list[Interface] = []
-    for interface in sorted(Path("/sys/class/net").iterdir(), key=lambda item: item.name):
+    host_interfaces: list[Interface] = []
+    topology_value = load_json(TOPOLOGY_FILE, {})
+    management = topology_value.get("management_interfaces", []) if isinstance(topology_value, dict) else []
+    try:
+        host_paths = sorted(Path("/sys/class/net").iterdir(), key=lambda item: item.name)
+    except OSError:
+        host_paths = []
+    for interface in host_paths:
         if interface.name == "lo":
             continue
         speed_raw = read_text(interface / "speed")
@@ -158,7 +166,10 @@ def interfaces() -> list[Interface]:
         except ValueError:
             speed = None
         phc, hardware_timestamping = timestamp_info(interface.name, phc_for(interface))
-        found.append(
+        assignment = None
+        if interface.name in management:
+            assignment = "MANAGEMENT" if management.index(interface.name) == 0 else "SPARE"
+        host_interfaces.append(
             Interface(
                 name=interface.name,
                 state=read_text(interface / "operstate", "unknown").upper(),
@@ -169,9 +180,51 @@ def interfaces() -> list[Interface]:
                 bus=bus_for(interface),
                 phc=phc,
                 hardware_timestamping=hardware_timestamping,
+                assignment=assignment,
             )
         )
-    return found
+
+    mapped_value = load_json(PHC_MAP_FILE, [])
+    if not isinstance(mapped_value, list):
+        return host_interfaces
+    mapped_interfaces: list[Interface] = []
+    mapped_names: set[str] = set()
+    for index, item in enumerate(mapped_value):
+        if not isinstance(item, dict):
+            continue
+        node_id = item.get("id")
+        namespace = item.get("namespace")
+        for direction in ("ingress", "egress"):
+            name = item.get(direction)
+            phc = item.get(f"{direction}_phc")
+            details = item.get(f"{direction}_interface", {})
+            if not isinstance(name, str) or not name or name in mapped_names:
+                continue
+            if not isinstance(details, dict):
+                details = {}
+            role = "IN" if direction == "ingress" else "OUT"
+            if index == 0:
+                role = "INACTIVE IN" if direction == "ingress" else "GM OUT"
+            elif index == len(mapped_value) - 1:
+                role = "OC IN" if direction == "ingress" else "INACTIVE OUT"
+            speed_value = details.get("speed_mbps")
+            mapped_interfaces.append(
+                Interface(
+                    name=name,
+                    state=str(details.get("state", "NAMESPACE")).upper(),
+                    carrier=bool(details.get("carrier", False)),
+                    speed_mbps=int(speed_value) if isinstance(speed_value, (int, float)) else None,
+                    mac=str(details.get("mac", "")),
+                    driver=str(details["driver"]) if details.get("driver") else None,
+                    bus=str(details["bus"]) if details.get("bus") else None,
+                    phc=phc if isinstance(phc, str) else None,
+                    hardware_timestamping=bool(details.get("hardware_timestamping", phc)),
+                    namespace=namespace if isinstance(namespace, str) else None,
+                    assignment=f"{node_id} / {role}" if isinstance(node_id, str) else role,
+                )
+            )
+            mapped_names.add(name)
+    return mapped_interfaces + [item for item in host_interfaces if item.name not in mapped_names]
 
 
 def namespaces() -> list[str]:
@@ -588,7 +641,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.4.0",
+        "agent_version": "1.5.0",
         "timestamp": time.time(),
     }
 

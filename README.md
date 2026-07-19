@@ -35,7 +35,7 @@ configuration, and an explicit simulation fallback for demos.
 
 ## See timing error grow, hop by hop
 
-<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing an eight-clock cascade and accumulated offset traces" width="100%">
+<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing a seven-clock cascade and accumulated offset traces" width="100%">
 
 The first viewport is the experiment: GM to OC, measured one hardware clock at
 a time. Select any node to isolate its direct PHC difference from BC1, per-hop
@@ -154,11 +154,16 @@ UI switches to its deterministic hardware-model mode.
 
 ## Hardware
 
-The reference host uses seven dual-port timing-capable adapters for the cascade
-plus separate management ports. Each adapter is isolated in its own namespace.
+The current reference host uses seven dual-port ConnectX-6 Dx adapters with all
+fourteen timing links at 100G, plus a separate Intel X550 management adapter.
+Each timing adapter is isolated in its own namespace.
 PTPBox never hides a split-clock card with a local synchronization loop: if its
 ports do not share or hardware-synchronize a PHC, the direct comparison exposes
 that difference as part of the experiment.
+
+ConnectX cards must have device-wide real-time clock mode enabled and loaded by
+a supported firmware reset. The [hardware guide](docs/HARDWARE.md) includes the
+verified setting, reset sequence, current PCI/PHC map, and cable-probe workflow.
 
 <table>
   <tr>

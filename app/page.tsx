@@ -77,6 +77,20 @@ type AgentStatus = {
   running?: boolean;
 };
 
+type HostInterface = {
+  name: string;
+  state: string;
+  carrier: boolean;
+  speed_mbps: number | null;
+  mac: string;
+  driver: string | null;
+  bus: string | null;
+  phc: string | null;
+  hardware_timestamping: boolean;
+  namespace: string | null;
+  assignment: string | null;
+};
+
 type TelemetrySample = {
   offset_ns: number;
   frequency_ppb: number;
@@ -154,33 +168,45 @@ function agentBaseUrl() {
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
 
 const INITIAL_NODES: ClockNode[] = [
-  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp2", color: TRACE_COLORS[0], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp1", color: TRACE_COLORS[1], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp1", color: TRACE_COLORS[0], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp2", color: TRACE_COLORS[1], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
   { id: "BC7", label: "BC7", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
   { id: "BC6", label: "BC6", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
   { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC3", label: "BC3", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp4", color: TRACE_COLORS[5], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC4", label: "BC4 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp5", color: TRACE_COLORS[6], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC3", label: "BC3", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp6", color: TRACE_COLORS[5], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC4", label: "BC4 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp8", color: TRACE_COLORS[6], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
 ];
 
-const INTERFACES = [
-  ["enp25s0f0np0", "BC1 / INACTIVE IN", "100 Gb/s", "ptp0", "UP"],
-  ["enp25s0f1np1", "BC1 / GM OUT", "50 Gb/s", "ptp2", "UP"],
-  ["enp26s0f0np0", "BC2 / IN", "50 Gb/s", "ptp1", "UP"],
-  ["enp26s0f1np1", "BC2 / OUT", "50 Gb/s", "ptp1", "UP"],
-  ["enp27s0f0np0", "BC3 / IN", "100 Gb/s", "ptp3", "UP"],
-  ["enp27s0f1np1", "BC3 / OUT", "100 Gb/s", "ptp4", "UP"],
-  ["enp28s0f0np0", "BC4 / OC IN", "100 Gb/s", "ptp5", "UP"],
-  ["enp28s0f1np1", "BC4 / INACTIVE OUT", "100 Gb/s", "ptp8", "UP"],
-  ["enp103s0f0np0", "BC5 / IN", "100 Gb/s", "ptp9", "UP"],
-  ["enp103s0f1np1", "BC5 / OUT", "100 Gb/s", "ptp10", "UP"],
-  ["enp104s0f0np0", "BC6 / IN", "100 Gb/s", "ptp11", "UP"],
-  ["enp104s0f1np1", "BC6 / OUT", "100 Gb/s", "ptp12", "UP"],
-  ["enp105s0f0np0", "BC7 / IN", "50 Gb/s", "ptp13", "UP"],
-  ["enp105s0f1np1", "BC7 / OUT", "100 Gb/s", "ptp14", "UP"],
-  ["enp179s0f0", "MANAGEMENT", "1 Gb/s", "ptp6", "UP"],
-  ["enp179s0f1", "SPARE", "—", "ptp7", "DOWN"],
-];
+const FALLBACK_INTERFACES: HostInterface[] = [
+  ["enp25s0f0np0", "BC1 / INACTIVE IN", 100000, "ptp0", "0000:19:00.0", "mlx5_core", "BC1"],
+  ["enp25s0f1np1", "BC1 / GM OUT", 100000, "ptp1", "0000:19:00.1", "mlx5_core", "BC1"],
+  ["enp26s0f0np0", "BC2 / IN", 100000, "ptp2", "0000:1a:00.0", "mlx5_core", "BC2"],
+  ["enp26s0f1np1", "BC2 / OUT", 100000, "ptp3", "0000:1a:00.1", "mlx5_core", "BC2"],
+  ["enp105s0f0np0", "BC7 / IN", 100000, "ptp14", "0000:69:00.0", "mlx5_core", "BC7"],
+  ["enp105s0f1np1", "BC7 / OUT", 100000, "ptp15", "0000:69:00.1", "mlx5_core", "BC7"],
+  ["enp104s0f0np0", "BC6 / IN", 100000, "ptp12", "0000:68:00.0", "mlx5_core", "BC6"],
+  ["enp104s0f1np1", "BC6 / OUT", 100000, "ptp13", "0000:68:00.1", "mlx5_core", "BC6"],
+  ["enp103s0f0np0", "BC5 / IN", 100000, "ptp10", "0000:67:00.0", "mlx5_core", "BC5"],
+  ["enp103s0f1np1", "BC5 / OUT", 100000, "ptp11", "0000:67:00.1", "mlx5_core", "BC5"],
+  ["enp27s0f0np0", "BC3 / IN", 100000, "ptp6", "0000:1b:00.0", "mlx5_core", "BC3"],
+  ["enp27s0f1np1", "BC3 / OUT", 100000, "ptp7", "0000:1b:00.1", "mlx5_core", "BC3"],
+  ["enp28s0f0np0", "BC4 / OC IN", 100000, "ptp8", "0000:1c:00.0", "mlx5_core", "BC4"],
+  ["enp28s0f1np1", "BC4 / INACTIVE OUT", 100000, "ptp9", "0000:1c:00.1", "mlx5_core", "BC4"],
+  ["enp179s0f0", "MANAGEMENT", 1000, "ptp4", "0000:b3:00.0", "ixgbe", null],
+  ["enp179s0f1", "SPARE", null, "ptp5", "0000:b3:00.1", "ixgbe", null],
+].map(([name, assignment, speed, phc, bus, driver, namespace]) => ({
+  name: name as string,
+  assignment: assignment as string,
+  speed_mbps: speed as number | null,
+  phc: phc as string,
+  bus: bus as string,
+  driver: driver as string,
+  namespace: namespace as string | null,
+  state: speed ? "UP" : "DOWN",
+  carrier: Boolean(speed),
+  mac: "",
+  hardware_timestamping: true,
+}));
 
 const EVENTS = [
   ["13:42:18.420", "INFO", "BC–06", "SERVO_LOCKED_STABLE", "Offset settled within ±100 ns"],
@@ -224,6 +250,13 @@ function formatNanoseconds(value: number, signed = false) {
 function formatOffset(value: number, measured = true) {
   if (!measured || !Number.isFinite(value)) return "—";
   return formatNanoseconds(value, true);
+}
+
+function formatLineRate(speedMbps: number | null) {
+  if (!speedMbps) return "—";
+  if (speedMbps >= 1_000_000) return `${(speedMbps / 1_000_000).toFixed(2)} Tb/s`;
+  if (speedMbps >= 1_000) return `${speedMbps / 1_000} Gb/s`;
+  return `${speedMbps} Mb/s`;
 }
 
 function rangeSeconds(range: string) {
@@ -444,6 +477,8 @@ export default function PTPBoxDashboard() {
   const [time, setTime] = useState("");
   const [connection, setConnection] = useState<ConnectionMode>("checking");
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const [interfaceInventory, setInterfaceInventory] = useState<HostInterface[]>(FALLBACK_INTERFACES);
+  const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
   const [range, setRange] = useState("2 min");
   const [experimentRunning, setExperimentRunning] = useState(false);
@@ -461,12 +496,34 @@ export default function PTPBoxDashboard() {
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
 
+  const refreshInterfaces = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 1800);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/interfaces`, { signal: controller.signal });
+      if (!response.ok) throw new Error("interface inventory unavailable");
+      const payload = await response.json() as { interfaces?: HostInterface[]; timestamp?: number };
+      if (Array.isArray(payload.interfaces) && payload.interfaces.length) {
+        setInterfaceInventory(payload.interfaces);
+        setInterfaceUpdatedAt(payload.timestamp ?? Date.now() / 1000);
+      }
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
   const activeNode = nodes.find((node) => node.id === selectedNode) ?? nodes[nodes.length - 1];
   const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
   const newestSampleAge = newestSampleAt && telemetryStatus ? Math.max(0, telemetryStatus.timestamp - newestSampleAt) : null;
   const invalidWindowSamples = telemetryStatus?.clocks.reduce((total, clock) => total + clock.window_invalid_sample_count, 0) ?? 0;
+  const timingInterfaces = interfaceInventory.filter((item) => item.namespace);
+  const ptpCapableInterfaces = interfaceInventory.filter((item) => item.hardware_timestamping);
+  const activeLineRateMbps = interfaceInventory.reduce((total, item) => total + (item.carrier ? item.speed_mbps ?? 0 : 0), 0);
+  const hardwareClocks = new Set(interfaceInventory.map((item) => item.phc).filter(Boolean)).size;
+  const interfaceDrivers = [...new Set(interfaceInventory.map((item) => item.driver).filter((item): item is string => Boolean(item)))];
+  const hundredGigTimingPorts = timingInterfaces.filter((item) => item.speed_mbps === 100000).length;
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -493,6 +550,12 @@ export default function PTPBoxDashboard() {
     const timer = window.setInterval(updateClock, 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    void refreshInterfaces().catch(() => undefined);
+    const timer = window.setInterval(() => void refreshInterfaces().catch(() => undefined), 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshInterfaces]);
 
   useEffect(() => {
     let disposed = false;
@@ -958,20 +1021,20 @@ export default function PTPBoxDashboard() {
           {section === "Interfaces" && (
             <div className="interfaces-layout">
               <div className="interface-summary">
-                <article><Cpu size={18} /><span>PTP-capable ports</span><strong>16</strong><small>14 cascade · 2 utility</small></article>
-                <article><Gauge size={18} /><span>Aggregate line rate</span><strong>1.2 Tb/s</strong><small>10 × 100G · 4 × 50G · 1 × 1G</small></article>
-                <article><Clock3 size={18} /><span>Hardware clocks</span><strong>15</strong><small>All precise IEEE 1588 quality</small></article>
-                <article><Network size={18} /><span>Drivers</span><strong>3</strong><small>mlx5_core · ice · ixgbe</small></article>
+                <article><Cpu size={18} /><span>PTP-capable ports</span><strong>{ptpCapableInterfaces.length}</strong><small>{timingInterfaces.length} cascade · {interfaceInventory.length - timingInterfaces.length} host</small></article>
+                <article><Gauge size={18} /><span>Active line rate</span><strong>{formatLineRate(activeLineRateMbps)}</strong><small>{hundredGigTimingPorts} × 100G timing · management separate</small></article>
+                <article><Clock3 size={18} /><span>Hardware clocks</span><strong>{hardwareClocks}</strong><small>Distinct PHC device providers</small></article>
+                <article><Network size={18} /><span>Drivers</span><strong>{interfaceDrivers.length}</strong><small>{interfaceDrivers.join(" · ") || "Awaiting inventory"}</small></article>
               </div>
               <section className="instrument-panel interface-table-panel">
-                <div className="panel-heading"><div><span className="section-kicker">LIVE INVENTORY</span><h2>Physical interfaces & PHCs</h2></div><div className="panel-tools"><span className="scan-time"><RefreshCw size={13} /> Discovered 8 s ago</span><button className="quiet-button">Rescan</button></div></div>
+                <div className="panel-heading"><div><span className="section-kicker">LIVE INVENTORY</span><h2>Physical interfaces & PHCs</h2></div><div className="panel-tools"><span className="scan-time"><RefreshCw size={13} /> {interfaceUpdatedAt === null ? "Hardware model" : "Live host snapshot"}</span><button className="quiet-button" type="button" onClick={() => void refreshInterfaces().catch(() => setToast("Live interface rescan unavailable"))}>Rescan</button></div></div>
                 <div className="interface-map">
                   <div className="interface-map-labels">{nodes.map((node) => <span key={node.id}>{node.label}</span>)}</div>
                   <div className="interface-map-line">{Array.from({ length: nodes.length * 2 }).map((_, index) => <i key={index} className={index % 2 ? "in" : "out"} />)}</div>
                 </div>
                 <div className="data-table interface-table">
                   <div className="table-header"><span>Interface</span><span>Assignment</span><span>Link</span><span>PHC</span><span>Timestamping</span><span>Driver</span><span>State</span></div>
-                  {INTERFACES.map((item, index) => <div className="table-row" key={item[0]}><span><i className={`port-icon ${item[4] === "UP" ? "up" : "down"}`} /> <strong>{item[0]}</strong><small>0000:{index < 2 ? "19" : index < 4 ? "1a" : index < 6 ? "1b" : index < 8 ? "1c" : `${67 + Math.floor((index - 8) / 2)}`}:00.{index % 2}</small></span><span>{item[1]}</span><strong>{item[2]}</strong><code>/dev/{item[3]}</code><span><ShieldCheck size={13} /> HW TX/RX</span><span>{index === 2 || index === 3 ? "ice" : index > 13 ? "ixgbe" : "mlx5_core"}</span><em className={item[4] === "UP" ? "state-good" : "state-off"}>{item[4]}</em></div>)}
+                  {interfaceInventory.map((item) => <div className="table-row" key={item.name}><span><i className={`port-icon ${item.carrier ? "up" : "down"}`} /> <strong>{item.name}</strong><small>{item.bus ?? item.namespace ?? "host"}</small></span><span>{item.assignment ?? item.namespace ?? "UNASSIGNED"}</span><strong>{formatLineRate(item.speed_mbps)}</strong><code>{item.phc ? `/dev/${item.phc}` : "—"}</code><span>{item.hardware_timestamping ? <><ShieldCheck size={13} /> HW TX/RX</> : "—"}</span><span>{item.driver ?? "—"}</span><em className={item.carrier ? "state-good" : "state-off"}>{item.carrier ? "LINK" : item.state === "DOWN" ? "DOWN" : "NO LINK"}</em></div>)}
                 </div>
               </section>
             </div>
@@ -1042,7 +1105,7 @@ export default function PTPBoxDashboard() {
           <button className="modal-backdrop" onClick={() => setApplyOpen(false)} aria-label="Close review" />
           <section className="apply-drawer">
             <div className="drawer-heading"><div><span className="section-kicker">SAFE APPLY</span><h2 id="apply-title">Review configuration</h2></div><button className="icon-button" onClick={() => setApplyOpen(false)} aria-label="Close"><X size={18} /></button></div>
-            <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>16 interfaces available · 8 clocks responsive · rollback ready</span></div></div>
+            <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>{interfaceInventory.length} interfaces available · {hardwareClocks} clocks responsive · rollback ready</span></div></div>
             <div className="change-list">
               <div><span>Target</span><strong>BC–01 through BC–06</strong></div>
               <div><span>Proportional constant</span><p><del>0.50</del><ArrowRight size={13} /><ins>{kp.toFixed(2)}</ins></p></div>

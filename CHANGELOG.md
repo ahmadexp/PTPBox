@@ -4,6 +4,16 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Updated the reference profile to seven ConnectX-6 Dx timing cards with all
+  fourteen cascade ports at 100G, including the replacement BC2 adapter.
+- Added namespace-aware live interface inventory and removed stale hard-coded
+  E810, 50G, PHC, PCI, line-rate, and driver values from the Observatory.
+- Added an experimental-EtherType cable peer probe for safely remapping a
+  changed lab, plus ConnectX real-time-clock firmware setup and reset guidance.
+- Made volatile namespace/controller paths boot-persistent through
+  `systemd-tmpfiles` and avoided `network-online.target` deadlock on intentionally
+  unnumbered timing ports.
+
 - Added a live Start/Stop cascade control backed by the narrowly scoped sudo
   policy, periodic process-state refresh, and AppArmor-compatible LinuxPTP
   configuration paths on Ubuntu hosts.

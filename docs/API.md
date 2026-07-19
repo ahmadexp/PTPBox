@@ -53,12 +53,19 @@ and whether privileged lifecycle control is installed.
       "driver": "mlx5_core",
       "bus": "0000:19:00.0",
       "phc": "ptp0",
-      "hardware_timestamping": true
+      "hardware_timestamping": true,
+      "namespace": "BC1",
+      "assignment": "BC1 / INACTIVE IN"
     }
   ],
   "timestamp": 1784327816.62
 }
 ```
+
+The lifecycle controller records timing-port metadata after moving each adapter
+into its namespace. The unprivileged agent merges that snapshot with the live
+host-namespace management ports, so the response and status counts still cover
+all physical interfaces while the cascade is running.
 
 ## Telemetry
 

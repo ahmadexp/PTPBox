@@ -172,6 +172,53 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(120.0, payload["clocks"][2]["measurement"]["previous_hop_offset_ns"])
         self.assertTrue(all(clock["measurement"]["raw"] for clock in payload["clocks"]))
 
+    def test_merges_controller_inventory_for_namespaced_timing_ports(self) -> None:
+        self.phc_map.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "BC1",
+                        "namespace": "BC1",
+                        "ingress": "timing0",
+                        "egress": "timing1",
+                        "ingress_phc": "ptp20",
+                        "egress_phc": "ptp21",
+                        "measurement_phc": "ptp21",
+                        "ingress_interface": {
+                            "state": "UP",
+                            "carrier": True,
+                            "speed_mbps": 100000,
+                            "mac": "00:11:22:33:44:55",
+                            "driver": "mlx5_core",
+                            "bus": "0000:19:00.0",
+                            "hardware_timestamping": True,
+                        },
+                        "egress_interface": {
+                            "state": "UP",
+                            "carrier": True,
+                            "speed_mbps": 100000,
+                            "mac": "00:11:22:33:44:56",
+                            "driver": "mlx5_core",
+                            "bus": "0000:19:00.1",
+                            "hardware_timestamping": True,
+                        },
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        ports = AGENT.interfaces()
+        timing0 = next(port for port in ports if port.name == "timing0")
+        timing1 = next(port for port in ports if port.name == "timing1")
+
+        self.assertEqual("BC1", timing0.namespace)
+        self.assertEqual("BC1 / INACTIVE IN", timing0.assignment)
+        self.assertEqual("BC1 / GM OUT", timing1.assignment)
+        self.assertEqual(100000, timing1.speed_mbps)
+        self.assertEqual("ptp21", timing1.phc)
+        self.assertTrue(timing1.carrier)
+
 
 if __name__ == "__main__":
     unittest.main()
