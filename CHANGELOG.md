@@ -4,11 +4,18 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Replaced sequential PHC midpoint reads with Linux kernel cross timestamps:
+  prefer `PTP_SYS_OFFSET_PRECISE`, otherwise select the shortest of nine
+  `PTP_SYS_OFFSET_EXTENDED` brackets against `CLOCK_MONOTONIC_RAW` and
+  interpolate BC1 to each target epoch. The live ConnectX host reduced its
+  measurement transaction from roughly 20 microseconds to 0.7 microseconds.
+- Added the per-sample cross-timestamp method and conservative comparison-error
+  bound to the API and Observatory provenance surfaces.
 - Renumbered cascade stages in physical order (`BC1` through `BC7`) while
   preserving the verified port sequence and cabling.
 - Corrected Observatory RMS surfaces to use raw LinuxPTP servo offsets, which
   are hardware-timestamped nanosecond measurements, instead of cross-device PHC
-  read dispersion; the PHC sampling aperture is now shown separately.
+  comparison dispersion; the measurement error bound is now shown separately.
 - Reused read-only PHC descriptors to reduce userspace midpoint-read latency.
 
 - Updated the reference profile to seven ConnectX-6 Dx timing cards with all

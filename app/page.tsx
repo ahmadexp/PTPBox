@@ -60,6 +60,8 @@ type ClockNode = {
   sampleCount: number;
   servoSampleCount: number;
   phcReadSpan: number | null;
+  phcUncertainty?: number | null;
+  phcMethod?: string | null;
   source: string;
   lastSampleAt: number | null;
 };
@@ -111,6 +113,8 @@ type PhcSample = {
   offset_ns: number | null;
   previous_hop_offset_ns: number | null;
   read_span_ns: number | null;
+  comparison_uncertainty_ns: number | null;
+  cross_timestamp_method: string | null;
   observed_at: number;
   sample_id: string;
   phc: string;
@@ -154,7 +158,7 @@ type TelemetryPayload = {
   phc_reference_device: string | null;
   phc_fresh_clocks: number;
   phc_method: string;
-  measurement_source: "direct PHC comparison";
+  measurement_source: string;
   raw: true;
   smoothing: "none";
   history_seconds: number;
@@ -300,6 +304,8 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       sampleCount: clock.phc_window_sample_count,
       servoSampleCount: clock.window_locked_sample_count,
       phcReadSpan: phcMeasurement?.read_span_ns ?? null,
+      phcUncertainty: phcMeasurement?.comparison_uncertainty_ns ?? null,
+      phcMethod: phcMeasurement?.cross_timestamp_method ?? null,
       source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
       lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
@@ -861,8 +867,8 @@ export default function PTPBoxDashboard() {
           </div>
 
           <div className={`data-provenance ${connection}`}>
-            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "DIRECT PHC COMPARISON"}</span>
-            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "read-only · raw=true · smoothing=none"}</code>
+            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "CROSS-TIMESTAMPED PHC COMPARISON"}</span>
+            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : activeNode.phcMethod ?? "read-only kernel cross timestamps"}</code>
             <span>{history.length.toLocaleString()} PHC samples buffered</span>
             {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} ptp4l samples rejected</span>}
             <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
@@ -933,7 +939,7 @@ export default function PTPBoxDashboard() {
                     <span className="chart-unit">PHC Δ VS BC1 · AUTO-SCALED</span>
                   </div>
                   <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a direct, read-only PHC comparison. No phc2sys loop, smoothing, or interpolation is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch; BC1 is interpolated only between its two bracketing reads. No phc2sys loop or time-series smoothing is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">
@@ -950,7 +956,7 @@ export default function PTPBoxDashboard() {
                     <div><span>Previous-hop PHC Δ</span><strong>{formatOffset(activeNode.hopOffset ?? 0, activeNode.measured)}</strong></div>
                     <div><span>PTP path delay</span><strong>{activeNode.ptpMeasured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
                     <div><span>PTP frequency adj.</span><strong>{activeNode.ptpMeasured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
-                    <div><span>PHC sampling aperture</span><strong>{activeNode.phcReadSpan === null ? "—" : formatNanoseconds(activeNode.phcReadSpan)}</strong></div>
+                    <div><span>Comparison error bound</span><strong>{activeNode.phcUncertainty == null ? "—" : `≤ ${formatNanoseconds(activeNode.phcUncertainty)}`}</strong></div>
                     <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
                   </div>
                   <div className="servo-mini">
@@ -976,10 +982,10 @@ export default function PTPBoxDashboard() {
                 <LineChart data={history} selected={visibleTraces.length ? visibleTraces : nodes.length ? [nodes[nodes.length - 1].id] : []} nodes={nodes} />
               </section>
               <section className="instrument-panel distribution-panel">
-                <div className="panel-heading"><div><span className="section-kicker">USERSPACE OBSERVATION</span><h2>Endpoint PHC read dispersion</h2></div><span className="quality-badge">READ APERTURE</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">KERNEL CROSS TIMESTAMPS</span><h2>Endpoint PHC difference distribution</h2></div><span className="quality-badge">COMMON EPOCH</span></div>
                 <div className="histogram" aria-label="Raw endpoint offset histogram">{endpointDistribution.bins.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>direct PHC reads · not servo RMS</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
-                <div className="distribution-stats"><div><span>PHC read σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>Read P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
+                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>common-epoch PHC comparisons · not servo RMS</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
+                <div className="distribution-stats"><div><span>PHC Δ σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>PHC Δ P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
               </section>
               <section className="instrument-panel hop-table-panel">
                 <div className="panel-heading"><div><span className="section-kicker">PHC + SERVO DATA</span><h2>Read-only clock comparisons</h2></div><span className="panel-meta">{range} raw window</span></div>

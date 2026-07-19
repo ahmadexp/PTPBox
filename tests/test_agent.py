@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "agent" / "ptpbox_agent.py"
@@ -36,7 +37,14 @@ class TelemetryTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.phc_map = root / "phcs.json"
-        self.originals = (AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE, AGENT.PHC_MAP_FILE, AGENT.read_phc_ns)
+        self.originals = (
+            AGENT.ROOT,
+            AGENT.LOG_DIR,
+            AGENT.TOPOLOGY_FILE,
+            AGENT.PHC_MAP_FILE,
+            AGENT.read_phc_ns,
+            AGENT.read_phc_cross_timestamp,
+        )
         AGENT.ROOT = root
         AGENT.LOG_DIR = self.log_dir
         AGENT.TOPOLOGY_FILE = self.topology
@@ -45,7 +53,14 @@ class TelemetryTests(unittest.TestCase):
             AGENT.PHC_HISTORY.clear()
 
     def tearDown(self) -> None:
-        AGENT.ROOT, AGENT.LOG_DIR, AGENT.TOPOLOGY_FILE, AGENT.PHC_MAP_FILE, AGENT.read_phc_ns = self.originals
+        (
+            AGENT.ROOT,
+            AGENT.LOG_DIR,
+            AGENT.TOPOLOGY_FILE,
+            AGENT.PHC_MAP_FILE,
+            AGENT.read_phc_ns,
+            AGENT.read_phc_cross_timestamp,
+        ) = self.originals
         with AGENT.PHC_HISTORY_LOCK:
             AGENT.PHC_HISTORY.clear()
         self.temporary.cleanup()
@@ -163,17 +178,46 @@ class TelemetryTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        reads = iter([1_000, 2_000, 2_110, 2_020, 3_000, 3_240, 3_040])
-        AGENT.read_phc_ns = lambda _device: next(reads)
+        reads = iter(
+            [
+                AGENT.PhcCrossTimestamp(1_000, 500, 40, "extended"),
+                AGENT.PhcCrossTimestamp(1_100, 600, 30, "extended"),
+                AGENT.PhcCrossTimestamp(1_200, 720, 20, "extended"),
+                AGENT.PhcCrossTimestamp(1_300, 500, 40, "extended"),
+            ]
+        )
+        AGENT.read_phc_cross_timestamp = lambda _device: next(reads)
 
         sample = AGENT.record_phc_sample()
         self.assertIsNotNone(sample)
         payload = AGENT.phc_telemetry(history_seconds=120)
 
-        self.assertEqual("sequential PHC midpoint reads", payload["method"])
+        self.assertEqual("common-system cross timestamps with interpolated BC1 reference", payload["method"])
         self.assertEqual([0.0, 100.0, 220.0], [clock["measurement"]["offset_ns"] for clock in payload["clocks"]])
         self.assertEqual(120.0, payload["clocks"][2]["measurement"]["previous_hop_offset_ns"])
+        self.assertEqual(35.0, payload["clocks"][1]["measurement"]["comparison_uncertainty_ns"])
+        self.assertEqual("extended", payload["clocks"][1]["measurement"]["cross_timestamp_method"])
         self.assertTrue(all(clock["measurement"]["raw"] for clock in payload["clocks"]))
+
+    def test_extended_cross_timestamp_selects_shortest_kernel_bracket(self) -> None:
+        def fill_ioctl(_fd: int, request: int, buffer: bytearray, _mutate: bool) -> int:
+            self.assertEqual(AGENT.PTP_SYS_OFFSET_EXTENDED, request)
+            value = AGENT.PtpSysOffsetExtended.from_buffer(buffer)
+            for index in range(AGENT.PHC_CROSS_TIMESTAMP_SAMPLES):
+                before = 10_000 + index * 1_000
+                delay = 900 - index * 50
+                midpoint = before + delay // 2
+                value.ts[index][0].nsec = before
+                value.ts[index][1].nsec = midpoint + 37
+                value.ts[index][2].nsec = before + delay
+            return 0
+
+        with mock.patch.object(AGENT.fcntl, "ioctl", side_effect=fill_ioctl):
+            result = AGENT.extended_cross_timestamp(9, AGENT.CLOCK_MONOTONIC_RAW)
+
+        self.assertEqual(500, result.delay_ns)
+        self.assertEqual(37, result.phc_minus_system_ns)
+        self.assertIn("best of 9", result.method)
 
     def test_merges_controller_inventory_for_namespaced_timing_ports(self) -> None:
         self.phc_map.write_text(

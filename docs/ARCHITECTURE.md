@@ -37,7 +37,8 @@ operator account and reads:
 - `ps` for active `ptp4l` processes;
 - `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map and the
   timing-interface metadata captured inside each namespace;
-- mapped `/dev/ptp*` clocks for one-hertz, read-only midpoint comparisons;
+- mapped `/dev/ptp*` clocks for one-hertz, read-only kernel cross-timestamp
+  comparisons;
 - raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
   `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo
   state.
@@ -48,7 +49,7 @@ It also serves the standalone application and stages JSON configuration under
 The browser requests an initial raw window and then polls incrementally with a
 `since` cursor. Direct PHC comparisons and LinuxPTP diagnostics retain their
 native timestamps. Missing samples are rendered as gaps; no moving average,
-interpolation, or synthetic fill is applied in live mode.
+time-series interpolation, or synthetic fill is applied in live mode.
 
 ### Lifecycle helper
 
@@ -115,17 +116,20 @@ hardware-synchronizes its port clocks naturally propagates time. If a card
 exposes genuinely independent PHCs, their divergence remains visible instead
 of being concealed by a host-side control loop.
 
-The PHC sampler opens each mapped `/dev/ptp*` read-only. For every target it
-reads BC1, the target, then BC1 again, and compares the target with the midpoint
-of the two BC1 reads. It reports both cumulative difference from BC1 and the
-difference from the previous NIC. This is measurement only: no adjustment,
-frequency command, or phase step is issued.
+The PHC sampler opens each mapped `/dev/ptp*` read-only and uses the Linux
+`PTP_SYS_OFFSET_EXTENDED` ioctl. Each call requests nine kernel-bracketed
+PHC/system pairs and keeps the pair with the shortest pre/post interval, the
+same estimator used by LinuxPTP. `CLOCK_MONOTONIC_RAW` supplies a common,
+step-free system reference. BC1 is sampled before and after the targets; its
+PHC-to-system offset is interpolated to each target's exact measurement epoch
+before the large integer clock offsets are subtracted. This removes read-order
+latency without disciplining any clock.
 
-The sampler reuses its read-only PHC descriptors to minimize the bracket span,
-but sequential cross-device reads still have a measurable userspace sampling
-aperture. The UI reports that aperture explicitly. Stability RMS is therefore
-computed from LinuxPTP's raw hardware-timestamped master offsets, not from the
-cross-device PHC observation dispersion.
+If available, the agent prefers `PTP_SYS_OFFSET_PRECISE`; older kernels fall
+back through extended `CLOCK_REALTIME` measurements to a userspace midpoint.
+The API identifies the selected method, shortest kernel bracket, and a
+conservative comparison-error bound for every sample. The UI keeps PHC
+comparison dispersion separate from LinuxPTP servo RMS.
 
 ## Control flow
 

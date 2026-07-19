@@ -139,8 +139,10 @@ and [Security](SECURITY.md).
 
 ## What gets measured
 
-- Direct PHC difference for each NIC relative to BC1
-- Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC read aperture
+- Common-epoch PHC difference for each NIC relative to BC1, using the best of
+  nine kernel cross timestamps and an interpolated BC1 reference
+- Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC comparison
+  dispersion and its reported error bound
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
 - Lock/tracking state and recovery events

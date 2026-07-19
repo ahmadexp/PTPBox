@@ -72,16 +72,17 @@ all physical interfaces while the cascade is running.
 ### `GET /api/phc`
 
 Returns one-hertz, read-only PHC comparisons. The first mapped NIC is the
-reference. Every target is bracketed by two reference reads and compared with
-their midpoint. `offset_ns` is cumulative difference from BC1;
-`previous_hop_offset_ns` is the delta from the preceding NIC. The sampler never
-sets, steps, or adjusts a clock.
+reference. Every PHC is cross timestamped against `CLOCK_MONOTONIC_RAW` using
+the shortest of nine kernel-bracketed samples. BC1 is measured before and after
+the targets and interpolated to each target's measurement epoch. `offset_ns` is
+the cumulative difference from BC1; `previous_hop_offset_ns` is the delta from
+the preceding NIC. The sampler never sets, steps, or adjusts a clock.
 
 ```json
 {
   "reference": "BC1",
   "reference_phc": "ptp2",
-  "method": "sequential PHC midpoint reads",
+  "method": "common-system cross timestamps with interpolated BC1 reference",
   "raw": true,
   "smoothing": "none",
   "clocks": [
@@ -89,9 +90,11 @@ sets, steps, or adjusts a clock.
       "id": "BC2",
       "phc": "ptp1",
       "measurement": {
-        "offset_ns": 42,
-        "previous_hop_offset_ns": 42,
-        "read_span_ns": 2100,
+        "offset_ns": 31.4,
+        "previous_hop_offset_ns": 31.4,
+        "read_span_ns": 710,
+        "comparison_uncertainty_ns": 715,
+        "cross_timestamp_method": "PTP_SYS_OFFSET_EXTENDED(CLOCK_MONOTONIC_RAW), best of 9",
         "observed_at": 1784327800.0,
         "raw": true,
         "valid": true,
@@ -122,7 +125,7 @@ Query parameters:
   "timestamp": 1784327816.64,
   "mode": "live",
   "phc_mode": "live",
-  "measurement_source": "direct PHC comparison",
+  "measurement_source": "kernel cross-timestamped PHC comparison",
   "measured_clocks": 1,
   "fresh_clocks": 1,
   "raw": true,

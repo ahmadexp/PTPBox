@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
+import fcntl
 import json
 import mimetypes
 import os
@@ -43,6 +45,7 @@ TELEMETRY_STALE_AFTER_SECONDS = 5.0
 TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 PHC_HISTORY_MAX_SAMPLES = 900
 PHC_STALE_AFTER_SECONDS = 3.0
+PHC_CROSS_TIMESTAMP_SAMPLES = 9
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
     r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
@@ -75,6 +78,39 @@ class Timespec(ctypes.Structure):
     _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
 
 
+class PtpClockTime(ctypes.Structure):
+    _fields_ = [("sec", ctypes.c_int64), ("nsec", ctypes.c_uint32), ("reserved", ctypes.c_uint32)]
+
+
+class PtpSysOffsetPrecise(ctypes.Structure):
+    _fields_ = [
+        ("device", PtpClockTime),
+        ("sys_realtime", PtpClockTime),
+        ("sys_monoraw", PtpClockTime),
+        ("reserved", ctypes.c_uint32 * 4),
+    ]
+
+
+class PtpSysOffsetExtended(ctypes.Structure):
+    _fields_ = [
+        ("n_samples", ctypes.c_uint32),
+        ("clockid", ctypes.c_int32),
+        ("reserved", ctypes.c_uint32 * 2),
+        ("ts", (PtpClockTime * 3) * 25),
+    ]
+
+
+def linux_iowr(type_: str, number: int, structure: type[ctypes.Structure]) -> int:
+    """Build a Linux _IOWR request number without a compiled extension."""
+    return (3 << 30) | (ctypes.sizeof(structure) << 16) | (ord(type_) << 8) | number
+
+
+PTP_SYS_OFFSET_PRECISE = linux_iowr("=", 8, PtpSysOffsetPrecise)
+PTP_SYS_OFFSET_EXTENDED = linux_iowr("=", 9, PtpSysOffsetExtended)
+CLOCK_REALTIME = 0
+CLOCK_MONOTONIC_RAW = 4
+
+
 LIBC = ctypes.CDLL(None, use_errno=True)
 LIBC.clock_gettime.argtypes = [ctypes.c_int, ctypes.POINTER(Timespec)]
 LIBC.clock_gettime.restype = ctypes.c_int
@@ -82,6 +118,7 @@ PHC_HISTORY: deque[dict[str, Any]] = deque(maxlen=PHC_HISTORY_MAX_SAMPLES)
 PHC_HISTORY_LOCK = threading.Lock()
 PHC_FDS: dict[str, int] = {}
 PHC_FDS_LOCK = threading.Lock()
+PHC_CROSS_TIMESTAMP_METHODS: dict[str, str] = {}
 
 
 @dataclass
@@ -97,6 +134,14 @@ class Interface:
     hardware_timestamping: bool
     namespace: str | None = None
     assignment: str | None = None
+
+
+@dataclass(frozen=True)
+class PhcCrossTimestamp:
+    system_ns: int
+    phc_minus_system_ns: int
+    delay_ns: int
+    method: str
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -253,22 +298,125 @@ def load_json(path: Path, fallback: Any = None) -> Any:
         return fallback
 
 
-def read_phc_ns(device: str) -> int:
-    """Read a Linux PHC without changing its time or frequency."""
+def phc_fd(device: str) -> int:
     with PHC_FDS_LOCK:
         fd = PHC_FDS.get(device)
         if fd is None:
             fd = os.open(device, os.O_RDONLY)
             PHC_FDS[device] = fd
+        return fd
+
+
+def discard_phc_fd(device: str, fd: int) -> None:
+    with PHC_FDS_LOCK:
+        if PHC_FDS.get(device) == fd:
+            PHC_FDS.pop(device, None)
+            PHC_CROSS_TIMESTAMP_METHODS.pop(device, None)
+            os.close(fd)
+
+
+def read_phc_ns(device: str) -> int:
+    """Read a Linux PHC without changing its time or frequency."""
+    fd = phc_fd(device)
+    try:
         # Linux's FD_TO_CLOCKID macro for dynamic POSIX clocks.
         clock_id = ((~fd) << 3) | 3
         value = Timespec()
         if LIBC.clock_gettime(clock_id, ctypes.byref(value)) != 0:
             error = ctypes.get_errno()
-            PHC_FDS.pop(device, None)
-            os.close(fd)
             raise OSError(error, os.strerror(error), device)
         return int(value.tv_sec) * 1_000_000_000 + int(value.tv_nsec)
+    except OSError:
+        discard_phc_fd(device, fd)
+        raise
+
+
+def ptp_time_ns(value: PtpClockTime) -> int:
+    return int(value.sec) * 1_000_000_000 + int(value.nsec)
+
+
+def precise_cross_timestamp(fd: int) -> PhcCrossTimestamp:
+    buffer = bytearray(ctypes.sizeof(PtpSysOffsetPrecise))
+    value = PtpSysOffsetPrecise.from_buffer(buffer)
+    fcntl.ioctl(fd, PTP_SYS_OFFSET_PRECISE, buffer, True)
+    system_ns = ptp_time_ns(value.sys_monoraw)
+    return PhcCrossTimestamp(
+        system_ns=system_ns,
+        phc_minus_system_ns=ptp_time_ns(value.device) - system_ns,
+        delay_ns=0,
+        method="PTP_SYS_OFFSET_PRECISE",
+    )
+
+
+def extended_cross_timestamp(fd: int, clock_id: int) -> PhcCrossTimestamp:
+    buffer = bytearray(ctypes.sizeof(PtpSysOffsetExtended))
+    value = PtpSysOffsetExtended.from_buffer(buffer)
+    value.n_samples = PHC_CROSS_TIMESTAMP_SAMPLES
+    value.clockid = clock_id
+    fcntl.ioctl(fd, PTP_SYS_OFFSET_EXTENDED, buffer, True)
+    candidates: list[tuple[int, int, int]] = []
+    for index in range(PHC_CROSS_TIMESTAMP_SAMPLES):
+        before_ns = ptp_time_ns(value.ts[index][0])
+        device_ns = ptp_time_ns(value.ts[index][1])
+        after_ns = ptp_time_ns(value.ts[index][2])
+        delay_ns = after_ns - before_ns
+        if delay_ns >= 0:
+            system_ns = (before_ns + after_ns) // 2
+            candidates.append((delay_ns, system_ns, device_ns - system_ns))
+    if not candidates:
+        raise OSError(errno.EIO, "kernel returned no valid PHC cross timestamps")
+    delay_ns, system_ns, offset_ns = min(candidates)
+    clock_name = "CLOCK_MONOTONIC_RAW" if clock_id == CLOCK_MONOTONIC_RAW else "CLOCK_REALTIME"
+    return PhcCrossTimestamp(
+        system_ns=system_ns,
+        phc_minus_system_ns=offset_ns,
+        delay_ns=delay_ns,
+        method=f"PTP_SYS_OFFSET_EXTENDED({clock_name}), best of {PHC_CROSS_TIMESTAMP_SAMPLES}",
+    )
+
+
+def midpoint_cross_timestamp(device: str) -> PhcCrossTimestamp:
+    before_ns = time.clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+    device_ns = read_phc_ns(device)
+    after_ns = time.clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+    system_ns = (before_ns + after_ns) // 2
+    return PhcCrossTimestamp(
+        system_ns=system_ns,
+        phc_minus_system_ns=device_ns - system_ns,
+        delay_ns=after_ns - before_ns,
+        method="userspace CLOCK_MONOTONIC_RAW midpoint fallback",
+    )
+
+
+def read_phc_cross_timestamp(device: str) -> PhcCrossTimestamp:
+    """Cross timestamp a PHC to a common system clock, without disciplining it."""
+    fd = phc_fd(device)
+    methods = ["precise", "extended-monoraw", "extended-realtime", "midpoint"]
+    cached = PHC_CROSS_TIMESTAMP_METHODS.get(device)
+    if cached in methods:
+        methods.remove(cached)
+        methods.insert(0, cached)
+    unsupported = {errno.EINVAL, errno.ENOTTY, errno.EOPNOTSUPP, errno.ENOSYS}
+    for method in methods:
+        try:
+            if method == "precise":
+                result = precise_cross_timestamp(fd)
+            elif method == "extended-monoraw":
+                result = extended_cross_timestamp(fd, CLOCK_MONOTONIC_RAW)
+            elif method == "extended-realtime":
+                result = extended_cross_timestamp(fd, CLOCK_REALTIME)
+            else:
+                result = midpoint_cross_timestamp(device)
+            PHC_CROSS_TIMESTAMP_METHODS[device] = method
+            return result
+        except OSError as exc:
+            if method == cached:
+                PHC_CROSS_TIMESTAMP_METHODS.pop(device, None)
+            if exc.errno not in unsupported:
+                if exc.errno in {errno.EBADF, errno.ENODEV, errno.ENXIO}:
+                    discard_phc_fd(device, fd)
+                raise
+    raise OSError(errno.EOPNOTSUPP, "no PHC cross-timestamp method is available", device)
 
 
 def phc_inventory() -> list[dict[str, Any]]:
@@ -285,7 +433,7 @@ def phc_inventory() -> list[dict[str, Any]]:
 
 
 def take_phc_sample() -> dict[str, Any] | None:
-    """Compare every measured NIC PHC to BC1 using midpoint reads."""
+    """Compare PHCs at a common epoch using kernel cross timestamps."""
     inventory = phc_inventory()
     if not inventory:
         return None
@@ -294,20 +442,52 @@ def take_phc_sample() -> dict[str, Any] | None:
     observed_at = time.time()
     sample_id = f"phc:{time.time_ns()}"
     clocks: list[dict[str, Any]] = []
-    previous_offset: int | None = None
+    previous_offset: float | None = None
+    target_measurements: dict[str, PhcCrossTimestamp | OSError] = {}
+    try:
+        reference_before = read_phc_cross_timestamp(reference_device)
+        for item in inventory[1:]:
+            device = f"/dev/{item['measurement_phc']}"
+            try:
+                target_measurements[item["id"]] = read_phc_cross_timestamp(device)
+            except OSError as exc:
+                target_measurements[item["id"]] = exc
+        reference_after = read_phc_cross_timestamp(reference_device)
+    except OSError as exc:
+        reference_before = exc
+        reference_after = exc
+
     for index, item in enumerate(inventory):
-        device = f"/dev/{item['measurement_phc']}"
         try:
+            if isinstance(reference_before, OSError) or isinstance(reference_after, OSError):
+                raise reference_before if isinstance(reference_before, OSError) else reference_after
             if index == 0:
-                read_phc_ns(reference_device)
-                offset = 0
-                read_span = 0
+                measurement = reference_after
+                offset = 0.0
+                uncertainty = measurement.delay_ns / 2
             else:
-                reference_before = read_phc_ns(reference_device)
-                target = read_phc_ns(device)
-                reference_after = read_phc_ns(reference_device)
-                offset = target - ((reference_before + reference_after) // 2)
-                read_span = reference_after - reference_before
+                measurement = target_measurements[item["id"]]
+                if isinstance(measurement, OSError):
+                    raise measurement
+                reference_interval = reference_after.system_ns - reference_before.system_ns
+                if reference_interval:
+                    position = (measurement.system_ns - reference_before.system_ns) / reference_interval
+                    # Cancel the Unix-epoch-sized offsets as integers first.
+                    # Converting either absolute value to float would quantize
+                    # the result to roughly 256 ns at today's epoch.
+                    offset = float(measurement.phc_minus_system_ns - reference_before.phc_minus_system_ns) - position * (
+                        reference_after.phc_minus_system_ns - reference_before.phc_minus_system_ns
+                    )
+                    reference_delay = reference_before.delay_ns + position * (
+                        reference_after.delay_ns - reference_before.delay_ns
+                    )
+                else:
+                    offset = float(
+                        measurement.phc_minus_system_ns
+                        - (reference_before.phc_minus_system_ns + reference_after.phc_minus_system_ns) // 2
+                    )
+                    reference_delay = max(reference_before.delay_ns, reference_after.delay_ns)
+                uncertainty = (measurement.delay_ns + max(0.0, reference_delay)) / 2
             hop_offset = None if previous_offset is None else offset - previous_offset
             clocks.append(
                 {
@@ -315,7 +495,9 @@ def take_phc_sample() -> dict[str, Any] | None:
                     "phc": item["measurement_phc"],
                     "offset_ns": float(offset),
                     "previous_hop_offset_ns": float(hop_offset) if hop_offset is not None else None,
-                    "read_span_ns": float(read_span),
+                    "read_span_ns": float(measurement.delay_ns),
+                    "comparison_uncertainty_ns": float(uncertainty),
+                    "cross_timestamp_method": measurement.method,
                     "observed_at": observed_at,
                     "sample_id": f"{sample_id}:{item['id']}",
                     "raw": True,
@@ -332,6 +514,8 @@ def take_phc_sample() -> dict[str, Any] | None:
                     "offset_ns": None,
                     "previous_hop_offset_ns": None,
                     "read_span_ns": None,
+                    "comparison_uncertainty_ns": None,
+                    "cross_timestamp_method": None,
                     "observed_at": observed_at,
                     "sample_id": f"{sample_id}:{item['id']}",
                     "raw": True,
@@ -347,7 +531,7 @@ def take_phc_sample() -> dict[str, Any] | None:
         "reference_phc": reference["measurement_phc"],
         "clocks": clocks,
         "raw": True,
-        "method": "sequential PHC midpoint reads",
+        "method": "common-system cross timestamps with interpolated BC1 reference",
     }
 
 
@@ -406,7 +590,7 @@ def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) ->
         "mode": mode,
         "raw": True,
         "smoothing": "none",
-        "method": "sequential PHC midpoint reads",
+        "method": "common-system cross timestamps with interpolated BC1 reference",
     }
 
 
@@ -630,7 +814,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         "phc_method": phc_payload["method"],
         "raw": True,
         "smoothing": "none",
-        "measurement_source": "direct PHC comparison",
+        "measurement_source": "kernel cross-timestamped PHC comparison",
         "history_seconds": history_seconds,
     }
 
@@ -648,7 +832,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.5.1",
+        "agent_version": "1.5.2",
         "timestamp": time.time(),
     }
 
