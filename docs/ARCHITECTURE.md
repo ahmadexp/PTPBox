@@ -92,11 +92,11 @@ web agent does not terminate the separately tracked timing processes.
 The reference host's physically verified seven-node sequence is:
 
 ```text
-BC1 → BC2 → BC7 → BC6 → BC5 → BC3 → BC4
+BC1 → BC2 → BC3 → BC4 → BC5 → BC6 → BC7
 GM       boundary clocks                    OC
 ```
 
-The final BC4-to-BC1 cable closes the physical ring but carries no PTP process;
+The final BC7-to-BC1 cable closes the physical ring but carries no PTP process;
 it is the deliberate logical break that prevents a timing loop.
 
 Each node receives two physical ports. PTP is transported directly over Layer 2
@@ -120,6 +120,12 @@ reads BC1, the target, then BC1 again, and compares the target with the midpoint
 of the two BC1 reads. It reports both cumulative difference from BC1 and the
 difference from the previous NIC. This is measurement only: no adjustment,
 frequency command, or phase step is issued.
+
+The sampler reuses its read-only PHC descriptors to minimize the bracket span,
+but sequential cross-device reads still have a measurable userspace sampling
+aperture. The UI reports that aperture explicitly. Stability RMS is therefore
+computed from LinuxPTP's raw hardware-timestamped master offsets, not from the
+cross-device PHC observation dispersion.
 
 ## Control flow
 

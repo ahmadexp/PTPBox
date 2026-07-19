@@ -80,6 +80,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual("live", payload["mode"])
         self.assertEqual("none", payload["smoothing"])
         self.assertEqual(4, payload["sample_count"])
+        bc7 = next(clock for clock in payload["clocks"] if clock["id"] == "BC7")
+        self.assertEqual(1, bc7["window_locked_sample_count"])
+        self.assertEqual(7.0, bc7["rms_ns"])
 
         latest = max(sample["observed_at"] for clock in payload["clocks"] for sample in clock["samples"])
         incremental = AGENT.telemetry(history_seconds=120, since=latest)

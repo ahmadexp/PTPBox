@@ -35,11 +35,11 @@ and spare use.
 | --- | --- | --- | --- | --- | --- |
 | 1 | BC1 | `enp25s0f0np0` | `enp25s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
 | 2 | BC2 | `enp26s0f0np0` | `enp26s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
-| 3 | BC7 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
-| 4 | BC6 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 3 | BC3 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 4 | BC4 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
 | 5 | BC5 | `enp103s0f0np0` | `enp103s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
-| 6 | BC3 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
-| 7 | BC4 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 6 | BC6 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 7 | BC7 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
 | — | Management | `enp179s0f0` | — | `ixgbe` | excluded |
 | — | Spare | `enp179s0f1` | — | `ixgbe` | excluded |
 
@@ -77,13 +77,13 @@ cascade and leaves the return link inactive, avoiding a PTP timing loop:
 
 ```text
 GM: BC1 egress ─100G──> BC2 ingress
-    BC2 egress ─100G──> BC7 ingress
-    BC7 egress ─100G──> BC6 ingress
-    BC6 egress ─100G──> BC5 ingress
-    BC5 egress ─100G──> BC3 ingress
-    BC3 egress ─100G──> BC4 ingress :OC
+    BC2 egress ─100G──> BC3 ingress
+    BC3 egress ─100G──> BC4 ingress
+    BC4 egress ─100G──> BC5 ingress
+    BC5 egress ─100G──> BC6 ingress
+    BC6 egress ─100G──> BC7 ingress :OC
 
-inactive return: BC4 egress ──100G──> BC1 ingress
+inactive return: BC7 egress ──100G──> BC1 ingress
 ```
 
 Use direct attach or optics supported consistently by each pair. Every timing

@@ -135,6 +135,7 @@ Query parameters:
       "egress": "enp26s0f1np1",
       "logs": 2,
       "window_sample_count": 1920,
+      "window_locked_sample_count": 1912,
       "rms_ns": 18.7,
       "measurement_phc": "ptp1",
       "phc_rms_ns": 45.1,
@@ -173,6 +174,8 @@ The raw payload preserves invalid samples but marks them `valid: false`. For
 this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
 driver timestamp failure. Such samples are counted separately and excluded
 from RMS and charts; their original values remain available through the API.
+Servo `rms_ns` uses only valid locked (`s2`) samples. Acquisition samples remain
+in `samples` but cannot inflate the steady-state stability metric.
 
 ## Configuration
 
@@ -216,7 +219,7 @@ Stages experiment metadata under `PTPBOX_STATE_DIR/experiment.json`.
 ```json
 {
   "type": "step",
-  "target": "BC4",
+  "target": "BC7",
   "amplitude_ns": 1000,
   "duration_s": 120,
   "servo": { "kp": 0.7, "ki": 0.3, "step_threshold_ns": 0 }

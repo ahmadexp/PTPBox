@@ -80,6 +80,8 @@ LIBC.clock_gettime.argtypes = [ctypes.c_int, ctypes.POINTER(Timespec)]
 LIBC.clock_gettime.restype = ctypes.c_int
 PHC_HISTORY: deque[dict[str, Any]] = deque(maxlen=PHC_HISTORY_MAX_SAMPLES)
 PHC_HISTORY_LOCK = threading.Lock()
+PHC_FDS: dict[str, int] = {}
+PHC_FDS_LOCK = threading.Lock()
 
 
 @dataclass
@@ -253,17 +255,20 @@ def load_json(path: Path, fallback: Any = None) -> Any:
 
 def read_phc_ns(device: str) -> int:
     """Read a Linux PHC without changing its time or frequency."""
-    fd = os.open(device, os.O_RDONLY)
-    try:
+    with PHC_FDS_LOCK:
+        fd = PHC_FDS.get(device)
+        if fd is None:
+            fd = os.open(device, os.O_RDONLY)
+            PHC_FDS[device] = fd
         # Linux's FD_TO_CLOCKID macro for dynamic POSIX clocks.
         clock_id = ((~fd) << 3) | 3
         value = Timespec()
         if LIBC.clock_gettime(clock_id, ctypes.byref(value)) != 0:
             error = ctypes.get_errno()
+            PHC_FDS.pop(device, None)
+            os.close(fd)
             raise OSError(error, os.strerror(error), device)
         return int(value.tv_sec) * 1_000_000_000 + int(value.tv_nsec)
-    finally:
-        os.close(fd)
 
 
 def phc_inventory() -> list[dict[str, Any]]:
@@ -567,6 +572,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         measurement = all_samples[-1] if all_samples else None
         window_samples = [sample for sample in all_samples if sample["observed_at"] >= cutoff]
         valid_window_samples = [sample for sample in window_samples if sample["valid"]]
+        locked_window_samples = [sample for sample in valid_window_samples if sample["servo_state"] == "s2"]
         samples = window_samples
         if since is not None:
             samples = [sample for sample in samples if sample["observed_at"] > since]
@@ -582,10 +588,11 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
                 "samples": samples,
                 "window_sample_count": len(window_samples),
                 "window_valid_sample_count": len(valid_window_samples),
+                "window_locked_sample_count": len(locked_window_samples),
                 "window_invalid_sample_count": len(window_samples) - len(valid_window_samples),
                 "rms_ns": (
-                    sum(float(sample["offset_ns"]) ** 2 for sample in valid_window_samples) / len(valid_window_samples)
-                ) ** 0.5 if valid_window_samples else None,
+                    sum(float(sample["offset_ns"]) ** 2 for sample in locked_window_samples) / len(locked_window_samples)
+                ) ** 0.5 if locked_window_samples else None,
                 "logs": len(candidates),
                 "measurement_phc": phc_clock.get("phc"),
                 "phc_measurement": phc_clock.get("measurement"),
@@ -641,7 +648,7 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.5.0",
+        "agent_version": "1.5.1",
         "timestamp": time.time(),
     }
 

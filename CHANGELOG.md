@@ -4,6 +4,13 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Renumbered cascade stages in physical order (`BC1` through `BC7`) while
+  preserving the verified port sequence and cabling.
+- Corrected Observatory RMS surfaces to use raw LinuxPTP servo offsets, which
+  are hardware-timestamped nanosecond measurements, instead of cross-device PHC
+  read dispersion; the PHC sampling aperture is now shown separately.
+- Reused read-only PHC descriptors to reduce userspace midpoint-read latency.
+
 - Updated the reference profile to seven ConnectX-6 Dx timing cards with all
   fourteen cascade ports at 100G, including the replacement BC2 adapter.
 - Added namespace-aware live interface inventory and removed stale hard-coded

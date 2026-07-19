@@ -58,6 +58,8 @@ type ClockNode = {
   measured: boolean;
   ptpMeasured?: boolean;
   sampleCount: number;
+  servoSampleCount: number;
+  phcReadSpan: number | null;
   source: string;
   lastSampleAt: number | null;
 };
@@ -126,6 +128,7 @@ type TelemetryClock = {
   samples: TelemetrySample[];
   window_sample_count: number;
   window_valid_sample_count: number;
+  window_locked_sample_count: number;
   window_invalid_sample_count: number;
   rms_ns: number | null;
   logs: number;
@@ -168,13 +171,13 @@ function agentBaseUrl() {
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
 
 const INITIAL_NODES: ClockNode[] = [
-  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp1", color: TRACE_COLORS[0], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp2", color: TRACE_COLORS[1], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC7", label: "BC7", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC6", label: "BC6", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC3", label: "BC3", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp6", color: TRACE_COLORS[5], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC4", label: "BC4 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp8", color: TRACE_COLORS[6], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp1", color: TRACE_COLORS[0], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 0, source: "simulation", lastSampleAt: null },
+  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp2", color: TRACE_COLORS[1], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC3", label: "BC3", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC4", label: "BC4", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC6", label: "BC6", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp6", color: TRACE_COLORS[5], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC7", label: "BC7 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp8", color: TRACE_COLORS[6], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
 ];
 
 const FALLBACK_INTERFACES: HostInterface[] = [
@@ -182,16 +185,16 @@ const FALLBACK_INTERFACES: HostInterface[] = [
   ["enp25s0f1np1", "BC1 / GM OUT", 100000, "ptp1", "0000:19:00.1", "mlx5_core", "BC1"],
   ["enp26s0f0np0", "BC2 / IN", 100000, "ptp2", "0000:1a:00.0", "mlx5_core", "BC2"],
   ["enp26s0f1np1", "BC2 / OUT", 100000, "ptp3", "0000:1a:00.1", "mlx5_core", "BC2"],
-  ["enp105s0f0np0", "BC7 / IN", 100000, "ptp14", "0000:69:00.0", "mlx5_core", "BC7"],
-  ["enp105s0f1np1", "BC7 / OUT", 100000, "ptp15", "0000:69:00.1", "mlx5_core", "BC7"],
-  ["enp104s0f0np0", "BC6 / IN", 100000, "ptp12", "0000:68:00.0", "mlx5_core", "BC6"],
-  ["enp104s0f1np1", "BC6 / OUT", 100000, "ptp13", "0000:68:00.1", "mlx5_core", "BC6"],
+  ["enp105s0f0np0", "BC3 / IN", 100000, "ptp14", "0000:69:00.0", "mlx5_core", "BC3"],
+  ["enp105s0f1np1", "BC3 / OUT", 100000, "ptp15", "0000:69:00.1", "mlx5_core", "BC3"],
+  ["enp104s0f0np0", "BC4 / IN", 100000, "ptp12", "0000:68:00.0", "mlx5_core", "BC4"],
+  ["enp104s0f1np1", "BC4 / OUT", 100000, "ptp13", "0000:68:00.1", "mlx5_core", "BC4"],
   ["enp103s0f0np0", "BC5 / IN", 100000, "ptp10", "0000:67:00.0", "mlx5_core", "BC5"],
   ["enp103s0f1np1", "BC5 / OUT", 100000, "ptp11", "0000:67:00.1", "mlx5_core", "BC5"],
-  ["enp27s0f0np0", "BC3 / IN", 100000, "ptp6", "0000:1b:00.0", "mlx5_core", "BC3"],
-  ["enp27s0f1np1", "BC3 / OUT", 100000, "ptp7", "0000:1b:00.1", "mlx5_core", "BC3"],
-  ["enp28s0f0np0", "BC4 / OC IN", 100000, "ptp8", "0000:1c:00.0", "mlx5_core", "BC4"],
-  ["enp28s0f1np1", "BC4 / INACTIVE OUT", 100000, "ptp9", "0000:1c:00.1", "mlx5_core", "BC4"],
+  ["enp27s0f0np0", "BC6 / IN", 100000, "ptp6", "0000:1b:00.0", "mlx5_core", "BC6"],
+  ["enp27s0f1np1", "BC6 / OUT", 100000, "ptp7", "0000:1b:00.1", "mlx5_core", "BC6"],
+  ["enp28s0f0np0", "BC7 / OC IN", 100000, "ptp8", "0000:1c:00.0", "mlx5_core", "BC7"],
+  ["enp28s0f1np1", "BC7 / INACTIVE OUT", 100000, "ptp9", "0000:1c:00.1", "mlx5_core", "BC7"],
   ["enp179s0f0", "MANAGEMENT", 1000, "ptp4", "0000:b3:00.0", "ixgbe", null],
   ["enp179s0f1", "SPARE", null, "ptp5", "0000:b3:00.1", "ixgbe", null],
 ].map(([name, assignment, speed, phc, bus, driver, namespace]) => ({
@@ -285,7 +288,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       offset: phcMeasurement?.offset_ns ?? 0,
       hopOffset: phcMeasurement?.previous_hop_offset_ns ?? 0,
       meanPathDelay: ptpMeasurement?.mean_path_delay_ns ?? 0,
-      rms: clock.phc_rms_ns ?? 0,
+      rms: clock.rms_ns ?? 0,
       frequencyPpb: ptpMeasurement?.frequency_ppb ?? 0,
       state: stateFromMeasurement(ptpMeasurement, stale, clock.role),
       ingress: clock.ingress,
@@ -295,6 +298,8 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       measured: Boolean(phcMeasurement?.valid && phcMeasurement.offset_ns !== null),
       ptpMeasured: Boolean(ptpMeasurement?.valid),
       sampleCount: clock.phc_window_sample_count,
+      servoSampleCount: clock.window_locked_sample_count,
+      phcReadSpan: phcMeasurement?.read_span_ns ?? null,
       source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
       lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
@@ -316,6 +321,8 @@ function waitingNodes(source: string): ClockNode[] {
     frequencyPpb: 0,
     measured: false,
     sampleCount: 0,
+    servoSampleCount: 0,
+    phcReadSpan: null,
     source,
     state: node.role === "Grandmaster" ? "REFERENCE" : "NO DATA",
   }));
@@ -470,8 +477,8 @@ export default function PTPBoxDashboard() {
   const [section, setSection] = useState<Section>("Overview");
   const [mobileNav, setMobileNav] = useState(false);
   const [nodes, setNodes] = useState(() => waitingNodes("Finding PTPBox agent"));
-  const [selectedNode, setSelectedNode] = useState("BC4");
-  const [visibleTraces, setVisibleTraces] = useState(["BC2", "BC6", "BC3", "BC4"]);
+  const [selectedNode, setSelectedNode] = useState("BC7");
+  const [visibleTraces, setVisibleTraces] = useState(["BC4", "BC5", "BC6", "BC7"]);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [paused, setPaused] = useState(false);
   const [time, setTime] = useState("");
@@ -674,7 +681,7 @@ export default function PTPBoxDashboard() {
     const locked = nodes.filter((node) => node.role !== "Grandmaster" && node.state === "LOCKED").length;
     if (connection !== "simulation") {
       return [
-        { label: "Endpoint PHC RMS", value: final.measured ? formatNanoseconds(final.rms) : "—", delta: "DIRECT", note: `${final.sampleCount} PHC reads`, icon: Activity, good: final.measured },
+        { label: "Endpoint servo RMS", value: final.ptpMeasured ? formatNanoseconds(final.rms) : "—", delta: "PTP RAW", note: `${final.servoSampleCount} valid offset samples`, icon: Activity, good: final.ptpMeasured },
         { label: "Peak PHC difference", value: values.length ? formatNanoseconds(peak) : "—", delta: "UNFILTERED", note: `${range} vs BC1`, icon: Zap, good: values.length > 0 },
         { label: "Locked receivers", value: `${locked}/${receiverCount}`, delta: telemetryStatus?.mode.toUpperCase() ?? "WAITING", note: "LinuxPTP servo state", icon: ShieldCheck, good: locked === receiverCount && receiverCount > 0 },
         { label: "PHC comparisons", value: history.length.toLocaleString(), delta: "NO CONTROL", note: "read-only browser buffer", icon: TimerReset, good: history.length > 0 },
@@ -774,7 +781,7 @@ export default function PTPBoxDashboard() {
         await fetch(`${agentBaseUrl()}/api/experiments/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "step", target: "BC4", amplitude_ns: 1000, duration_s: 120, servo: { kp, ki, step_threshold_ns: stepThreshold } }),
+          body: JSON.stringify({ type: "step", target: "BC7", amplitude_ns: 1000, duration_s: 120, servo: { kp, ki, step_threshold_ns: stepThreshold } }),
         });
       } catch {
         setToast("Experiment is running locally; host capture could not be staged");
@@ -935,14 +942,16 @@ export default function PTPBoxDashboard() {
                     <button className="more-button" type="button">•••</button>
                   </div>
                   <div className="selected-status">
-                    <div className="radial-score"><span>{activeNode.measured ? activeNode.sampleCount : 0}</span><small>SAMPLES</small></div>
+                    <div className="radial-score"><span>{activeNode.ptpMeasured ? activeNode.servoSampleCount : 0}</span><small>PTP SAMPLES</small></div>
                     <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
                   </div>
                   <div className="selected-metrics">
-                    <div><span>PHC window RMS</span><strong>{activeNode.measured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
+                    <div><span>Servo offset RMS</span><strong>{activeNode.ptpMeasured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
                     <div><span>Previous-hop PHC Δ</span><strong>{formatOffset(activeNode.hopOffset ?? 0, activeNode.measured)}</strong></div>
                     <div><span>PTP path delay</span><strong>{activeNode.ptpMeasured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
                     <div><span>PTP frequency adj.</span><strong>{activeNode.ptpMeasured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
+                    <div><span>PHC sampling aperture</span><strong>{activeNode.phcReadSpan === null ? "—" : formatNanoseconds(activeNode.phcReadSpan)}</strong></div>
+                    <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
                   </div>
                   <div className="servo-mini">
                     <div><span>PI SERVO</span><strong>K<sub>p</sub> {kp.toFixed(2)} · K<sub>i</sub> {ki.toFixed(2)}</strong></div>
@@ -967,16 +976,16 @@ export default function PTPBoxDashboard() {
                 <LineChart data={history} selected={visibleTraces.length ? visibleTraces : nodes.length ? [nodes[nodes.length - 1].id] : []} nodes={nodes} />
               </section>
               <section className="instrument-panel distribution-panel">
-                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>Endpoint PHC difference density</h2></div><span className="quality-badge">RAW</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">USERSPACE OBSERVATION</span><h2>Endpoint PHC read dispersion</h2></div><span className="quality-badge">READ APERTURE</span></div>
                 <div className="histogram" aria-label="Raw endpoint offset histogram">{endpointDistribution.bins.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>raw samples</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
-                <div className="distribution-stats"><div><span>σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
+                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>direct PHC reads · not servo RMS</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
+                <div className="distribution-stats"><div><span>PHC read σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>Read P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
               </section>
               <section className="instrument-panel hop-table-panel">
                 <div className="panel-heading"><div><span className="section-kicker">PHC + SERVO DATA</span><h2>Read-only clock comparisons</h2></div><span className="panel-meta">{range} raw window</span></div>
                 <div className="data-table hop-table">
-                  <div className="table-header"><span>Clock / PHC</span><span>Δ vs BC1</span><span>Hop Δ</span><span>PHC RMS</span><span>PTP frequency</span><span>PHC reads</span><span>PTP state</span></div>
-                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{formatOffset(node.hopOffset ?? 0, node.measured)}</span><span>{node.measured ? formatNanoseconds(node.rms) : "—"}</span><span>{node.ptpMeasured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.sampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
+                  <div className="table-header"><span>Clock / PHC</span><span>Δ vs BC1</span><span>Hop Δ</span><span>Servo RMS</span><span>PTP frequency</span><span>PTP samples</span><span>PTP state</span></div>
+                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{formatOffset(node.hopOffset ?? 0, node.measured)}</span><span>{node.ptpMeasured ? formatNanoseconds(node.rms) : "—"}</span><span>{node.ptpMeasured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.servoSampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
                 </div>
               </section>
             </div>
