@@ -48,6 +48,9 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /\/api\/servo\/control/);
   assert.match(page, /Linear regression/);
   assert.match(page, /Enter holdover/);
+  assert.match(page, /Notification center/);
+  assert.match(page, /Mark all read/);
+  assert.match(page, /Open full event log/);
   assert.match(layout, /PTPBox — Precision Time Lab/);
   assert.match(agent, /\/api\/telemetry/);
   assert.match(agent, /\/api\/config\/apply/);

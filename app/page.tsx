@@ -52,6 +52,18 @@ type ServoNodeControl = {
 
 type ServoControlState = { updated_at: number | null; nodes: Record<string, ServoNodeControl> };
 
+type ObservatoryNotification = {
+  id: string;
+  level: "good" | "info" | "warn";
+  title: string;
+  detail: string;
+  meta: string;
+  section: Section;
+  nodeId?: string;
+  servoTarget?: string;
+  icon: typeof Bell;
+};
+
 type ClockNode = {
   id: string;
   label: string;
@@ -529,9 +541,12 @@ export default function PTPBoxDashboard() {
   const [servoType, setServoType] = useState<ServoType>("pi");
   const [servoTarget, setServoTarget] = useState("BC7");
   const [servoBusy, setServoBusy] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
   const servoSelectionHydratedRef = useRef(false);
+  const notificationCenterRef = useRef<HTMLDivElement>(null);
 
   const refreshInterfaces = useCallback(async () => {
     const controller = new AbortController();
@@ -731,6 +746,70 @@ export default function PTPBoxDashboard() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!notificationsOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (notificationCenterRef.current && !notificationCenterRef.current.contains(event.target as Node)) setNotificationsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNotificationsOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [notificationsOpen]);
+
+  const notifications = useMemo<ObservatoryNotification[]>(() => {
+    const items: ObservatoryNotification[] = [];
+    const receivers = nodes.filter((node) => node.role !== "Grandmaster");
+    const holdover = receivers.filter((node) => node.state === "HOLDOVER");
+    const unhealthy = receivers.filter((node) => ["FAULTY", "STALE", "NO DATA", "UNLOCKED"].includes(node.state));
+
+    if (holdover.length) {
+      const names = holdover.map((node) => node.id).join(", ");
+      items.push({ id: `holdover-${names}`, level: "warn", title: `Holdover active on ${names}`, detail: "PHC adjustment is frozen; raw offset and drift measurement continue.", meta: "SERVO", section: "Overview", nodeId: holdover[0].id, icon: Pause });
+    }
+    if (unhealthy.length && connection !== "checking") {
+      const names = unhealthy.map((node) => node.id).join(", ");
+      items.push({ id: `clock-state-${unhealthy.map((node) => `${node.id}-${node.state}`).join("-")}`, level: "warn", title: `${unhealthy.length} receiver${unhealthy.length === 1 ? "" : "s"} need attention`, detail: `${names} · ${unhealthy.map((node) => node.state).join(" / ")}`, meta: "CLOCK STATE", section: "Overview", nodeId: unhealthy[0].id, icon: Zap });
+    }
+    if (invalidWindowSamples > 0) {
+      items.push({ id: `invalid-samples-${invalidWindowSamples}`, level: "warn", title: `${invalidWindowSamples} raw sample${invalidWindowSamples === 1 ? "" : "s"} rejected`, detail: "The original LinuxPTP values remain in the API but are excluded from RMS and charts.", meta: "MEASUREMENT", section: "Analytics", icon: Activity });
+    }
+
+    if (agentStatus?.running && connection === "live") {
+      const fresh = telemetryStatus?.phc_fresh_clocks ?? nodes.filter((node) => node.measured).length;
+      items.push({ id: "phc-stream-live", level: "info", title: "Raw PHC monitoring is live", detail: `${fresh}/${nodes.length} hardware clocks fresh · no smoothing or clock control`, meta: newestSampleAge == null ? "LIVE" : `${newestSampleAge.toFixed(1)} s AGO`, section: "Analytics", icon: Radio });
+    } else if (agentStatus?.running) {
+      items.push({ id: `stream-${connection}`, level: "warn", title: connection === "waiting" ? "Waiting for timing samples" : "Raw measurement stream is not live", detail: "The agent is running; check PTP process state and the latest LinuxPTP logs.", meta: connection.toUpperCase(), section: "Overview", icon: Activity });
+    } else if (agentStatus) {
+      items.push({ id: "cascade-stopped", level: "warn", title: "Timing cascade is stopped", detail: "Observation remains available, but no managed LinuxPTP processes are running.", meta: "SYSTEM", section: "Overview", icon: Square });
+    }
+
+    const locked = receivers.filter((node) => node.state === "LOCKED").length;
+    if (receivers.length && locked === receivers.length) {
+      items.push({ id: "all-receivers-locked", level: "good", title: "All downstream clocks are locked", detail: `${locked}/${receivers.length} receivers report LinuxPTP servo state s2.`, meta: "HEALTH", section: "Overview", icon: ShieldCheck });
+    }
+
+    const servoCounts = receivers.reduce<Record<string, number>>((counts, node) => {
+      const type = node.servoType?.toUpperCase();
+      if (type && node.servoEnabled !== false) counts[type] = (counts[type] ?? 0) + 1;
+      return counts;
+    }, {});
+    const servoSummary = Object.entries(servoCounts).map(([type, count]) => `${count} ${type}`).join(" · ");
+    if (servoSummary) {
+      const signature = Object.entries(servoCounts).map(([type, count]) => `${type}-${count}`).join("-");
+      items.push({ id: `servo-profile-${signature}`, level: "info", title: "Servo profile active", detail: servoSummary, meta: "CONFIGURATION", section: "Configuration", servoTarget: "all", icon: SlidersHorizontal });
+    }
+
+    return items.slice(0, 6);
+  }, [agentStatus, connection, invalidWindowSamples, newestSampleAge, nodes, telemetryStatus?.phc_fresh_clocks]);
+
+  const unreadNotificationCount = notifications.filter((item) => item.level === "warn" && !readNotificationIds.includes(item.id)).length;
+
   const stats = useMemo(() => {
     const final = nodes[nodes.length - 1];
     const values = history.flatMap((point) => Object.values(point.values)).filter(Number.isFinite);
@@ -763,6 +842,20 @@ export default function PTPBoxDashboard() {
     const targets = target === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === target);
     const types = [...new Set(targets.map((node) => node.servoType).filter((value): value is ServoType => Boolean(value)))];
     if (types.length === 1) setServoType(types[0]);
+  };
+
+  const openNotification = (item: ObservatoryNotification) => {
+    setReadNotificationIds((current) => current.includes(item.id) ? current : [...current, item.id]);
+    setNotificationsOpen(false);
+    setSection(item.section);
+    if (item.nodeId) selectNode(item.nodeId);
+    if (item.servoTarget) selectServoTarget(item.servoTarget);
+  };
+
+  const openEventLog = () => {
+    setReadNotificationIds((current) => [...new Set([...current, ...notifications.map((item) => item.id)])]);
+    setNotificationsOpen(false);
+    setSection("Event log");
   };
 
   const downloadRawCsv = () => {
@@ -880,7 +973,7 @@ export default function PTPBoxDashboard() {
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
     { label: "Configuration", icon: SlidersHorizontal },
-    { label: "Event log", icon: Terminal, badge: "6" },
+    { label: "Event log", icon: Terminal, badge: unreadNotificationCount ? String(unreadNotificationCount) : undefined },
   ];
 
   return (
@@ -927,8 +1020,34 @@ export default function PTPBoxDashboard() {
           <div className="topbar-actions">
             <button className="search-box" type="button"><Search size={15} /><span>Search or jump to…</span><kbd>⌘ K</kbd></button>
             <span className="utc-clock"><Clock3 size={14} /> {time || "--:--:--"}</span>
-            <button className="icon-button notification" type="button" aria-label="Notifications"><Bell size={17} /><i /></button>
-            <button className="primary-action" type="button" onClick={() => setApplyOpen(true)}><SlidersHorizontal size={15} /> Apply settings</button>
+            <div className="notification-center" ref={notificationCenterRef}>
+              <button className={`icon-button notification ${notificationsOpen ? "open" : ""}`} type="button" aria-label={`Notifications, ${unreadNotificationCount} unread`} aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => setNotificationsOpen((value) => !value)}>
+                <Bell size={17} />
+                {unreadNotificationCount > 0 && <span className="notification-count warning">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
+              </button>
+              {notificationsOpen && (
+                <section className="notification-panel" id="notification-panel" aria-label="Notification center">
+                  <header className="notification-panel-header">
+                    <div><span className="section-kicker">LIVE OBSERVATORY</span><strong>Notifications</strong></div>
+                    <div>
+                      <button type="button" className="notification-mark-read" disabled={!unreadNotificationCount} onClick={() => setReadNotificationIds((current) => [...new Set([...current, ...notifications.map((item) => item.id)])])}>Mark all read</button>
+                      <button type="button" className="notification-close" aria-label="Close notifications" onClick={() => setNotificationsOpen(false)}><X size={15} /></button>
+                    </div>
+                  </header>
+                  <div className="notification-list">
+                    {notifications.map((item) => (
+                      <button type="button" className={`notification-item ${item.level} ${item.level === "warn" ? readNotificationIds.includes(item.id) ? "read" : "unread" : "status"}`} key={item.id} onClick={() => openNotification(item)}>
+                        <span className="notification-symbol"><item.icon size={15} /></span>
+                        <span className="notification-copy"><span>{item.meta}</span><strong>{item.title}</strong><small>{item.detail}</small></span>
+                        <ArrowRight size={14} />
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" className="notification-footer" onClick={openEventLog}><Terminal size={14} /> Open full event log <ArrowRight size={13} /></button>
+                </section>
+              )}
+            </div>
+            <button className="primary-action" type="button" onClick={() => { setNotificationsOpen(false); setApplyOpen(true); }}><SlidersHorizontal size={15} /> Apply settings</button>
           </div>
         </header>
 

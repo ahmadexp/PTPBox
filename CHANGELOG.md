@@ -4,6 +4,9 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Turned the top-bar bell into an accessible live notification center with
+  unread state, current clock/servo/measurement health, direct navigation,
+  mark-all-read, outside-click dismissal, and Escape-key support.
 - Added per-clock and all-downstream live servo selection for LinuxPTP PI,
   adaptive linear-regression, and null-frequency implementations.
 - Added measured holdover control using LinuxPTP `free_running`: PTP offset logs
