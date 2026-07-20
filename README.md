@@ -4,9 +4,9 @@
 
 # PTPBox
 
-### Precision Time Lab
+### Precision Observatory
 
-**Build an entire PTP cascade inside one multi-NIC Linux host. Observe every hop. Measure accumulated error. Tune the servo. Repeat.**
+**Build a real PTP cascade inside one multi-NIC Linux host. Observe every hop. Compare every PHC. Change servos live. Measure holdover. Repeat.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ahmadexp/PTPBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/ahmadexp/PTPBox/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-77e2b3?style=flat-square)](LICENSE)
@@ -14,18 +14,24 @@
 [![Node](https://img.shields.io/badge/Node-%E2%89%A522.13-61dce3?style=flat-square)](package.json)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-61dce3?style=flat-square)](agent/ptpbox_agent.py)
 
-[Live demo](https://ptpbox-precision-lab.turbalance-3786.chatgpt.site) · [Install](docs/INSTALLATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware guide](docs/HARDWARE.md) · [API](docs/API.md)
+[Hosted demo](https://ptpbox-precision-lab.turbalance-3786.chatgpt.site) · [Install](docs/INSTALLATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware guide](docs/HARDWARE.md) · [Experiments](docs/EXPERIMENTS.md) · [API](docs/API.md)
 
 </div>
 
 ---
 
-PTPBox is a modern revival of the original namespace-based PTPBox experiment.
-It uses physical NICs, Linux network namespaces, LinuxPTP, and hardware PHCs to
-turn one server into a chain of isolated clocks. The Precision Observatory adds
-the control room the project always deserved: live topology, offset traces,
-per-hop error budgets, repeatable experiments, hardware inventory, guarded
-configuration, and an explicit simulation fallback for demos.
+PTPBox is a modern revival of the original namespace-based timing experiment.
+It turns one Linux server into a physical chain of isolated PTP clocks using
+real NICs, one network namespace per card, one `ptp4l` boundary clock per stage,
+and a separate read-only PHC comparison pipeline. The Precision Observatory is
+the control room: live topology, raw timing traces, per-hop error, selectable
+servos, measured holdover, experiments, hardware inventory, notifications, and
+guarded start/stop control.
+
+The reference system is not a simulation: seven NVIDIA ConnectX-6 Dx adapters
+provide fourteen 100G timing ports, with a separate Intel X550 management link.
+The same application can still run in an explicitly labeled hardware-model mode
+when a live agent is unavailable.
 
 > [!IMPORTANT]
 > The web UI is safe to explore immediately. Starting the physical cascade moves
@@ -37,9 +43,15 @@ configuration, and an explicit simulation fallback for demos.
 
 <img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing a seven-clock cascade and accumulated offset traces" width="100%">
 
-The first viewport is the experiment: GM to OC, measured one hardware clock at
-a time. Select any node to isolate its direct PHC difference from BC1, per-hop
-PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
+The first viewport is the experiment: BC1 grandmaster to BC7 ordinary clock,
+with five boundary clocks in between. Select a node to inspect its direct PHC
+difference from BC1, previous-hop delta, raw LinuxPTP servo RMS, path delay,
+frequency adjustment, comparison error bound, servo type, and holdover drift.
+
+> [!NOTE]
+> Every control-room screenshot in this README was captured from the running
+> seven-card reference host. Values are live and will change from sample to
+> sample. The traces are not cosmetically smoothed.
 
 ## What you can do
 
@@ -49,8 +61,9 @@ PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
+| **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
-| **Event stream** | Follow clock-state transitions, measurement windows, threshold events, and operator actions. |
+| **Notifications & event stream** | Follow measurement health, lock state, active servo mix, threshold events, and operator actions. |
 | **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
 
 ## Product tour
@@ -66,7 +79,22 @@ PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
   </tr>
 </table>
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/configuration.jpg" alt="PTPBox live servo selection and holdover controls"></td>
+    <td width="50%"><img src="docs/images/notifications.jpg" alt="PTPBox live notification center over the cascade overview"></td>
+  </tr>
+  <tr>
+    <td><strong>Servo and holdover control</strong><br>Choose PI, linear regression, or null-frequency operation for one stage or the downstream chain. Enter holdover while raw monitoring continues.</td>
+    <td><strong>Live notification center</strong><br>See PHC freshness, receiver lock health, and the active servo mix, then jump directly to the relevant control-room surface.</td>
+  </tr>
+</table>
+
 <img src="docs/images/interfaces.jpg" alt="PTPBox live NIC and PHC inventory" width="100%">
+
+The inventory above is read from the host: sixteen PTP-capable ports, fourteen
+active 100G timing links, PHC device providers, PCI functions, drivers, and
+hardware timestamp capability.
 
 ## Two ways to run it
 
@@ -104,6 +132,9 @@ sudo PTPBOX_USER="$(id -un)" PTPBOX_ROOT="$PWD" bash scripts/install-host.sh
 # 3. Validate before moving any NIC.
 sudo ptpboxctl discover
 sudo ptpboxctl status
+
+# 4. Start from the CLI, or use Start cascade in the Observatory.
+sudo ptpboxctl start
 ```
 
 The UI is then available at `http://<ptpbox-host>:8090`. See the complete
@@ -133,9 +164,9 @@ flowchart LR
 ```
 
 The agent runs as the operator, not root. Observation stays unprivileged.
-Lifecycle control crosses a narrow sudo boundary that accepts five fixed
-commands and no arbitrary arguments. See [Architecture](docs/ARCHITECTURE.md)
-and [Security](SECURITY.md).
+Lifecycle and servo control cross a narrow sudo boundary that accepts five
+fixed operations and no arbitrary command line. See
+[Architecture](docs/ARCHITECTURE.md) and [Security](SECURITY.md).
 
 ## What gets measured
 
@@ -155,6 +186,20 @@ and [Security](SECURITY.md).
 The live agent reads mapped PHCs without changing them and separately parses
 native LinuxPTP output. Missing data is never silently presented as live; the
 UI switches to its deterministic hardware-model mode.
+
+## What “raw” means
+
+When the Observatory says **LIVE · RAW · UNSMOOTHED**, the plotted points come
+from the installed machine. Each PHC comparison uses Linux
+`PTP_SYS_OFFSET_EXTENDED` cross timestamps and selects the lowest-error reading
+from a nine-sample measurement burst. That improves the error bound of one
+measurement; it does not average or smooth the time series.
+
+Servo RMS is calculated separately from native LinuxPTP master-offset samples
+reported by `ptp4l`. The UI never substitutes PHC-comparison dispersion for
+servo RMS. During holdover, observation continues while only the selected clock
+discipline is disabled, so drift remains measurable. If either raw source is
+missing or stale, the interface says so instead of manufacturing a live value.
 
 ## Hardware
 
@@ -208,12 +253,12 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory, selectable live servos, measured holdover, direct incremental
-PHC comparison pipeline, raw LinuxPTP servo telemetry, standalone host,
-inventory agent, configuration staging, and guarded lifecycle controller are
-implemented. The next milestones are durable
-experiment storage, PPS comparison datasets, automated MTIE/TDEV/Allan
-deviation, and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
+The Observatory is running on the reference hardware with selectable live
+servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
+notifications, a standalone host bundle, live inventory, configuration staging,
+and guarded lifecycle control. The next milestones are durable experiment
+storage, PPS comparison datasets, automated MTIE/TDEV/Allan deviation, and
+reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 
