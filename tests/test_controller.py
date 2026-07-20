@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -17,11 +18,14 @@ SPEC.loader.exec_module(CONTROLLER)
 class ControllerConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.original_config = CONTROLLER.CONFIG_FILE
-        CONTROLLER.CONFIG_FILE = Path(self.temporary.name) / "missing-config.json"
+        self.originals = (CONTROLLER.CONFIG_FILE, CONTROLLER.SERVO_STATE_FILE, CONTROLLER.SERVO_REQUEST_FILE)
+        temporary = Path(self.temporary.name)
+        CONTROLLER.CONFIG_FILE = temporary / "missing-config.json"
+        CONTROLLER.SERVO_STATE_FILE = temporary / "servo-state.json"
+        CONTROLLER.SERVO_REQUEST_FILE = temporary / "servo-request.json"
 
     def tearDown(self) -> None:
-        CONTROLLER.CONFIG_FILE = self.original_config
+        CONTROLLER.CONFIG_FILE, CONTROLLER.SERVO_STATE_FILE, CONTROLLER.SERVO_REQUEST_FILE = self.originals
         self.temporary.cleanup()
 
     def test_boundary_config_has_directional_static_roles(self) -> None:
@@ -46,6 +50,15 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("summary_interval 0", text)
         self.assertIn("tx_timestamp_timeout 100", text)
         self.assertIn("step_threshold 0.000000000", text)
+        self.assertIn("free_running 0", text)
+
+    def test_holdover_config_keeps_measurement_running_without_adjustment(self) -> None:
+        path = Path(self.temporary.name) / "ptpbox-holdover.conf"
+        CONTROLLER.render_ptp_config("client", path, servo_override={"type": "linreg"}, free_running=True)
+        text = path.read_text(encoding="utf-8")
+
+        self.assertIn("clock_servo linreg", text)
+        self.assertIn("free_running 1", text)
 
     def test_endpoint_configs_force_their_roles(self) -> None:
         server = Path(self.temporary.name) / "server.conf"
@@ -102,6 +115,52 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertTrue(all("phc2sys" not in args for _label, args in processes))
         boundary_args = processes[1][1]
         self.assertEqual(0, boundary_args.count("-i"))
+
+    def test_servo_request_enters_holdover_and_restarts_only_target(self) -> None:
+        topology = {
+            "nodes": [
+                {"name": "BC1", "ingress": "p1", "egress": "p2"},
+                {"name": "BC2", "ingress": "p3", "egress": "p4"},
+                {"name": "BC3", "ingress": "p5", "egress": "p6"},
+            ]
+        }
+        temporary = Path(self.temporary.name)
+        pids_file = temporary / "processes.json"
+        phc_map_file = temporary / "phcs.json"
+        CONTROLLER.SERVO_REQUEST_FILE.write_text(json.dumps({"target": "BC3", "enabled": False, "type": "linreg"}), encoding="utf-8")
+        pids_file.write_text(
+            json.dumps(
+                [
+                    {"label": "BC1-GM", "node": "BC1", "pid": 11, "command": ["ptp4l", "bc1"]},
+                    {"label": "BC2-BC", "node": "BC2", "pid": 12, "command": ["ptp4l", "bc2"]},
+                    {"label": "BC3-OC", "node": "BC3", "pid": 13, "command": ["ptp4l", "bc3"]},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        phc_map_file.write_text(json.dumps([{"id": "BC3", "shared_phc": True}]), encoding="utf-8")
+
+        def fake_spawn(label, args, spawned):
+            spawned.append({"label": label, "pid": 99, "command": args})
+
+        with (
+            patch.object(CONTROLLER, "STATE_DIR", temporary),
+            patch.object(CONTROLLER, "PIDS_FILE", pids_file),
+            patch.object(CONTROLLER, "PHC_MAP_FILE", phc_map_file),
+            patch.object(CONTROLLER, "require_root"),
+            patch.object(CONTROLLER, "topology", return_value=topology),
+            patch.object(CONTROLLER, "stop_process") as stop_process,
+            patch.object(CONTROLLER, "render_ptp_config") as render,
+            patch.object(CONTROLLER, "spawn", side_effect=fake_spawn),
+        ):
+            result = CONTROLLER.servo_apply()
+
+        self.assertEqual(["BC3"], result["changed"])
+        self.assertFalse(result["servo"]["nodes"]["BC3"]["enabled"])
+        self.assertEqual("linreg", result["servo"]["nodes"]["BC3"]["type"])
+        stop_process.assert_called_once()
+        self.assertTrue(render.call_args.kwargs["free_running"])
+        self.assertEqual({"type": "linreg"}, render.call_args.kwargs["servo_override"])
 
     def test_captures_interface_metadata_inside_namespace(self) -> None:
         def fake_command(args, check=True):

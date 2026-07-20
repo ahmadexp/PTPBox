@@ -48,7 +48,7 @@ PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
-| **Servo tuning** | Adjust PI gains and thresholds, preview behavior, validate, stage, and roll changes through the chain. |
+| **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Event stream** | Follow clock-state transitions, measurement windows, threshold events, and operator actions. |
 | **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
@@ -127,13 +127,13 @@ flowchart LR
     Agent --> Inventory
     Agent --> Logs
     Agent --> PHCs
-    Agent -. "sudo: start / stop / restart / status only" .-> Helper
+    Agent -. "sudo: fixed lifecycle + servo verbs" .-> Helper
     Helper --> NS
     NS --> PTP
 ```
 
 The agent runs as the operator, not root. Observation stays unprivileged.
-Lifecycle control crosses a narrow sudo boundary that accepts four fixed
+Lifecycle control crosses a narrow sudo boundary that accepts five fixed
 commands and no arbitrary arguments. See [Architecture](docs/ARCHITECTURE.md)
 and [Security](SECURITY.md).
 
@@ -146,6 +146,7 @@ and [Security](SECURITY.md).
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
 - Lock/tracking state and recovery events
+- Holdover elapsed time and frequency drift from the continuing raw PHC trace
 - MTIE windows and mask verdicts
 - Offset distribution, P95, skew, and contribution share
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
@@ -207,9 +208,10 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory, direct incremental PHC comparison pipeline, raw LinuxPTP servo
-telemetry, standalone host, inventory agent, configuration staging, and guarded
-lifecycle controller are implemented. The next milestones are durable
+The Observatory, selectable live servos, measured holdover, direct incremental
+PHC comparison pipeline, raw LinuxPTP servo telemetry, standalone host,
+inventory agent, configuration staging, and guarded lifecycle controller are
+implemented. The next milestones are durable
 experiment storage, PPS comparison datasets, automated MTIE/TDEV/Allan
 deviation, and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
 

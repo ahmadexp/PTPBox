@@ -22,6 +22,9 @@ TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", "/etc/ptpbox/topology.jso
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", "/etc/ptpbox/config.json"))
 PIDS_FILE = STATE_DIR / "processes.json"
 PHC_MAP_FILE = STATE_DIR / "phcs.json"
+SERVO_STATE_FILE = STATE_DIR / "servo-state.json"
+SERVO_REQUEST_FILE = CONFIG_FILE.with_name("servo-request.json")
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "domain": 24,
@@ -53,6 +56,75 @@ def require_root() -> None:
         raise PermissionError("this action requires root")
 
 
+def enter_namespace_mount_context() -> None:
+    """Use a mount view that contains the named network-namespace handles.
+
+    ``ip netns exec`` creates a private mount namespace for its child.  That
+    view keeps every named namespace handle alive even if the observation
+    service is upgraded from an older, filesystem-sandboxed unit.  Prefer a
+    surviving managed ptp4l process during that migration; on a clean boot the
+    service and PID 1 share the host mount view and no switch is necessary.
+    """
+    if os.geteuid() != 0:
+        return
+    if os.environ.get("PTPBOX_MOUNT_CONTEXT") == "1":
+        return
+
+    processes = load_json(PIDS_FILE, [])
+    if isinstance(processes, list):
+        for item in processes:
+            pid = item.get("pid") if isinstance(item, dict) else None
+            if not isinstance(pid, int) or not process_alive(pid):
+                continue
+            mount_namespace = Path(f"/proc/{pid}/ns/mnt")
+            if not mount_namespace.exists():
+                continue
+            nsenter = "/usr/bin/nsenter" if Path("/usr/bin/nsenter").exists() else "/bin/nsenter"
+            if not Path(nsenter).exists():
+                raise RuntimeError("nsenter is required to retain the managed network namespace context")
+            env = "/usr/bin/env" if Path("/usr/bin/env").exists() else "/bin/env"
+            os.execv(
+                nsenter,
+                [
+                    nsenter,
+                    f"--mount={mount_namespace}",
+                    "--",
+                    env,
+                    "PTPBOX_MOUNT_CONTEXT=1",
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    *sys.argv[1:],
+                ],
+            )
+
+    # A fresh start has no managed process to borrow from.  Escape an older
+    # service sandbox so namespace setup happens in the persistent host view.
+    try:
+        current = os.readlink("/proc/self/ns/mnt")
+        host = os.readlink("/proc/1/ns/mnt")
+    except OSError:
+        return
+    if current == host:
+        return
+    nsenter = "/usr/bin/nsenter" if Path("/usr/bin/nsenter").exists() else "/bin/nsenter"
+    if not Path(nsenter).exists():
+        raise RuntimeError("nsenter is required to control host network namespaces from the sandboxed agent")
+    env = "/usr/bin/env" if Path("/usr/bin/env").exists() else "/bin/env"
+    os.execv(
+        nsenter,
+        [
+            nsenter,
+            "--mount=/proc/1/ns/mnt",
+            "--",
+            env,
+            "PTPBOX_MOUNT_CONTEXT=1",
+            sys.executable,
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+        ],
+    )
+
+
 def load_json(path: Path, fallback: Any = None) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -80,6 +152,41 @@ def config() -> dict[str, Any]:
         if isinstance(value.get("servo"), dict):
             merged["servo"].update(value["servo"])
     return merged
+
+
+def servo_state(topo: dict[str, Any] | None = None) -> dict[str, Any]:
+    topo = topo or topology()
+    saved = load_json(SERVO_STATE_FILE, {})
+    saved_nodes = saved.get("nodes", {}) if isinstance(saved, dict) else {}
+    default_type = str(config()["servo"]["type"])
+    if default_type not in SUPPORTED_SERVOS:
+        default_type = "pi"
+    nodes: dict[str, dict[str, Any]] = {}
+    for index, node in enumerate(topo["nodes"]):
+        name = node["name"]
+        item = saved_nodes.get(name, {}) if isinstance(saved_nodes, dict) else {}
+        servo_type = item.get("type", default_type) if isinstance(item, dict) else default_type
+        if servo_type not in SUPPORTED_SERVOS:
+            servo_type = default_type
+        enabled = bool(item.get("enabled", True)) if isinstance(item, dict) else True
+        if index == 0:
+            nodes[name] = {"mode": "reference", "enabled": False, "type": None, "changed_at": None, "holdover_started": None}
+        else:
+            nodes[name] = {
+                "mode": "active" if enabled else "holdover",
+                "enabled": enabled,
+                "type": servo_type,
+                "changed_at": item.get("changed_at") if isinstance(item, dict) else None,
+                "holdover_started": item.get("holdover_started") if isinstance(item, dict) and not enabled else None,
+            }
+    return {"updated_at": saved.get("updated_at") if isinstance(saved, dict) else None, "nodes": nodes}
+
+
+def save_servo_state(value: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    value["updated_at"] = time.time()
+    SERVO_STATE_FILE.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    SERVO_STATE_FILE.chmod(0o644)
 
 
 def namespace_exists(name: str) -> bool:
@@ -126,9 +233,13 @@ def render_ptp_config(
     ingress: str | None = None,
     egress: str | None = None,
     uds_label: str | None = None,
+    servo_override: dict[str, Any] | None = None,
+    free_running: bool = False,
 ) -> None:
     values = config()
-    servo = values["servo"]
+    servo = {**values["servo"], **(servo_override or {})}
+    if servo["type"] not in SUPPORTED_SERVOS:
+        raise ValueError(f"unsupported servo type: {servo['type']}")
     transport = {"L2": "L2", "UDPv4": "UDPv4", "UDPv6": "UDPv6"}[values["transport"]]
     if role == "boundary" and (not ingress or not egress):
         raise ValueError("a boundary clock requires ingress and egress interfaces")
@@ -159,6 +270,7 @@ twoStepFlag {1 if values['two_step'] else 0}
 logSyncInterval {int(values['log_sync_interval'])}
 summary_interval {int(values['log_sync_interval'])}
 tx_timestamp_timeout 100
+free_running {1 if free_running else 0}
 clock_servo {servo['type']}
 pi_proportional_const {float(servo['kp'])}
 pi_integral_const {float(servo['ki'])}
@@ -290,6 +402,7 @@ def start() -> dict[str, Any]:
     prioritize_timestamp_workers()
     topo = topology()
     phcs_by_id = {item["id"]: item for item in setup_result.get("phcs", [])}
+    control_state = servo_state(topo)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     processes: list[dict[str, Any]] = []
     try:
@@ -305,6 +418,7 @@ def start() -> dict[str, Any]:
             # providers are hardware-synchronized; no host-side clock loop is
             # started or required for their operation.
             boundary_jbod = not first and not last and not bool(inventory.get("shared_phc"))
+            node_servo = control_state["nodes"][node["name"]]
             render_ptp_config(
                 role,
                 node_config,
@@ -312,6 +426,8 @@ def start() -> dict[str, Any]:
                 ingress=node["ingress"] if role == "boundary" else None,
                 egress=node["egress"] if role == "boundary" else None,
                 uds_label=node["name"].lower(),
+                servo_override={"type": node_servo["type"]} if node_servo["type"] else None,
+                free_running=not node_servo["enabled"] and not first,
             )
             interfaces = [node["egress"]] if first else [node["ingress"]] if last else [node["ingress"], node["egress"]]
             args = ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(node_config)]
@@ -322,6 +438,7 @@ def start() -> dict[str, Any]:
                     args.extend(["-i", interface])
             args.extend(["-m", "-q"])
             spawn(label, args, processes)
+            processes[-1].update({"node": node["name"], "servo": node_servo})
     except Exception:
         for item in reversed(processes):
             try:
@@ -330,7 +447,8 @@ def start() -> dict[str, Any]:
                 pass
         raise
     PIDS_FILE.write_text(json.dumps(processes, indent=2) + "\n", encoding="utf-8")
-    return {"ok": True, "running": True, "processes": processes}
+    save_servo_state(control_state)
+    return {"ok": True, "running": True, "processes": processes, "servo": control_state}
 
 
 def process_alive(pid: int) -> bool:
@@ -341,13 +459,102 @@ def process_alive(pid: int) -> bool:
         return False
 
 
+def stop_process(item: dict[str, Any], timeout: float = 4.0) -> None:
+    pid = item.get("pid")
+    if not isinstance(pid, int) or not process_alive(pid):
+        return
+    os.killpg(pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process_alive(pid):
+        time.sleep(0.05)
+    if process_alive(pid):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def servo_apply() -> dict[str, Any]:
+    """Apply a validated servo/holdover request without stopping observation."""
+    require_root()
+    request = load_json(SERVO_REQUEST_FILE)
+    if not isinstance(request, dict):
+        raise ValueError("missing servo request")
+    target = request.get("target")
+    enabled = request.get("enabled")
+    servo_type = request.get("type")
+    if not isinstance(target, str) or not isinstance(enabled, bool) or servo_type not in SUPPORTED_SERVOS:
+        raise ValueError("servo request requires a valid target, enabled flag, and servo type")
+
+    topo = topology()
+    receivers = [node["name"] for node in topo["nodes"][1:]]
+    if target != "all" and target not in receivers:
+        raise ValueError(f"invalid servo target: {target}")
+    targets = receivers if target == "all" else [target]
+    if not enabled:
+        targets = list(reversed(targets))
+
+    processes = load_json(PIDS_FILE, [])
+    if not isinstance(processes, list) or not processes:
+        raise RuntimeError("cascade is not running")
+    state = servo_state(topo)
+    changed: list[str] = []
+    for name in targets:
+        index = next((i for i, item in enumerate(processes) if item.get("node") == name or str(item.get("label", "")).startswith(f"{name}-")), None)
+        if index is None:
+            raise RuntimeError(f"no managed ptp4l process for {name}")
+        item = processes[index]
+        if not isinstance(item.get("command"), list) or not item.get("label"):
+            raise RuntimeError(f"invalid process record for {name}")
+        node_index = next(i for i, node in enumerate(topo["nodes"]) if node["name"] == name)
+        node = topo["nodes"][node_index]
+        last = node_index == len(topo["nodes"]) - 1
+        role = "client" if last else "boundary"
+        inventory_items = load_json(PHC_MAP_FILE, [])
+        if not isinstance(inventory_items, list):
+            inventory_items = []
+        inventory = next((entry for entry in inventory_items if isinstance(entry, dict) and entry.get("id") == name), {})
+        node_config = LINUXPTP_CONFIG_DIR / f"ptpbox-{name.lower()}.conf"
+        render_ptp_config(
+            role,
+            node_config,
+            boundary_jbod=not last and not bool(inventory.get("shared_phc")),
+            ingress=node["ingress"] if role == "boundary" else None,
+            egress=node["egress"] if role == "boundary" else None,
+            uds_label=name.lower(),
+            servo_override={"type": servo_type},
+            free_running=not enabled,
+        )
+        stop_process(item)
+        replacement: list[dict[str, Any]] = []
+        spawn(str(item["label"]), list(item["command"]), replacement)
+        changed_at = time.time()
+        node_state = {
+            "mode": "active" if enabled else "holdover",
+            "enabled": enabled,
+            "type": servo_type,
+            "changed_at": changed_at,
+            "holdover_started": None if enabled else changed_at,
+        }
+        replacement[0].update({"node": name, "servo": node_state})
+        processes[index] = replacement[0]
+        state["nodes"][name] = node_state
+        PIDS_FILE.write_text(json.dumps(processes, indent=2) + "\n", encoding="utf-8")
+        save_servo_state(state)
+        changed.append(name)
+    return {"ok": True, "running": True, "changed": changed, "servo": state}
+
+
 def status() -> dict[str, Any]:
     processes = load_json(PIDS_FILE, [])
     if not isinstance(processes, list):
         processes = []
     for item in processes:
         item["alive"] = isinstance(item.get("pid"), int) and process_alive(item["pid"])
-    return {"running": bool(processes) and all(item.get("alive") for item in processes), "processes": processes, "namespaces": [node["name"] for node in topology()["nodes"] if namespace_exists(node["name"])]}
+    topo = topology()
+    return {
+        "running": bool(processes) and all(item.get("alive") for item in processes),
+        "processes": processes,
+        "namespaces": [node["name"] for node in topo["nodes"] if namespace_exists(node["name"])],
+        "servo": servo_state(topo),
+    }
 
 
 def stop() -> dict[str, Any]:
@@ -411,8 +618,9 @@ def discover() -> dict[str, Any]:
 
 
 def main() -> None:
+    enter_namespace_mount_context()
     parser = argparse.ArgumentParser(description="Manage the PTPBox namespace cascade")
-    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "teardown"])
+    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "teardown"])
     args = parser.parse_args()
     try:
         if args.action == "discover":
@@ -428,6 +636,8 @@ def main() -> None:
             result = start()
         elif args.action == "status":
             result = status()
+        elif args.action == "servo":
+            result = servo_apply()
         else:
             result = teardown()
         print(json.dumps(result))

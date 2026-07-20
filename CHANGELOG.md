@@ -4,6 +4,15 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added per-clock and all-downstream live servo selection for LinuxPTP PI,
+  adaptive linear-regression, and null-frequency implementations.
+- Added measured holdover control using LinuxPTP `free_running`: PTP offset logs
+  and one-hertz raw PHC comparisons continue while clock adjustment is frozen,
+  and the Observatory reports elapsed holdover and fitted frequency drift.
+- Preserved network-namespace control across upgrades from older systemd mount
+  sandboxes by borrowing a surviving managed `ptp4l` mount view; new installs
+  keep persistent `/run/netns` handles in the host mount view.
+
 - Replaced sequential PHC midpoint reads with Linux kernel cross timestamps:
   prefer `PTP_SYS_OFFSET_PRECISE`, otherwise select the shortest of nine
   `PTP_SYS_OFFSET_EXTENDED` brackets against `CLOCK_MONOTONIC_RAW` and

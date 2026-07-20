@@ -39,7 +39,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Section = "Overview" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
-type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "NO DATA" | "STALE" | "FAULTY";
+type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
+type ServoType = "pi" | "linreg" | "nullf";
+
+type ServoNodeControl = {
+  mode: "reference" | "active" | "holdover";
+  enabled: boolean;
+  type: ServoType | null;
+  changed_at: number | null;
+  holdover_started: number | null;
+};
+
+type ServoControlState = { updated_at: number | null; nodes: Record<string, ServoNodeControl> };
 
 type ClockNode = {
   id: string;
@@ -62,6 +73,9 @@ type ClockNode = {
   phcReadSpan: number | null;
   phcUncertainty?: number | null;
   phcMethod?: string | null;
+  servoType?: ServoType | null;
+  servoEnabled?: boolean;
+  holdoverStarted?: number | null;
   source: string;
   lastSampleAt: number | null;
 };
@@ -79,6 +93,7 @@ type AgentStatus = {
   ptp_interfaces?: number;
   namespaces?: string[];
   running?: boolean;
+  servo_control?: ServoControlState;
 };
 
 type HostInterface = {
@@ -158,6 +173,7 @@ type TelemetryPayload = {
   phc_reference_device: string | null;
   phc_fresh_clocks: number;
   phc_method: string;
+  servo_control: ServoControlState;
   measurement_source: string;
   raw: true;
   smoothing: "none";
@@ -284,6 +300,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
   return payload.clocks.map((clock, index) => {
     const ptpMeasurement = clock.measurement;
     const phcMeasurement = clock.phc_measurement;
+    const servoControl = payload.servo_control?.nodes?.[clock.id];
     const stale = Boolean(ptpMeasurement && payload.timestamp - ptpMeasurement.observed_at > 5);
     return {
       id: clock.id,
@@ -294,7 +311,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       meanPathDelay: ptpMeasurement?.mean_path_delay_ns ?? 0,
       rms: clock.rms_ns ?? 0,
       frequencyPpb: ptpMeasurement?.frequency_ppb ?? 0,
-      state: stateFromMeasurement(ptpMeasurement, stale, clock.role),
+      state: servoControl?.mode === "holdover" ? "HOLDOVER" : stateFromMeasurement(ptpMeasurement, stale, clock.role),
       ingress: clock.ingress,
       egress: clock.egress,
       phc: clock.measurement_phc ? `/dev/${clock.measurement_phc}` : "—",
@@ -306,6 +323,9 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       phcReadSpan: phcMeasurement?.read_span_ns ?? null,
       phcUncertainty: phcMeasurement?.comparison_uncertainty_ns ?? null,
       phcMethod: phcMeasurement?.cross_timestamp_method ?? null,
+      servoType: servoControl?.type ?? (clock.role === "grandmaster" ? null : "pi"),
+      servoEnabled: servoControl?.enabled ?? clock.role !== "grandmaster",
+      holdoverStarted: servoControl?.holdover_started ?? null,
       source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
       lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
@@ -506,8 +526,12 @@ export default function PTPBoxDashboard() {
   const [hardwareTs, setHardwareTs] = useState(true);
   const [sanity, setSanity] = useState(true);
   const [controlBusy, setControlBusy] = useState(false);
+  const [servoType, setServoType] = useState<ServoType>("pi");
+  const [servoTarget, setServoTarget] = useState("BC7");
+  const [servoBusy, setServoBusy] = useState(false);
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
+  const servoSelectionHydratedRef = useRef(false);
 
   const refreshInterfaces = useCallback(async () => {
     const controller = new AbortController();
@@ -526,6 +550,14 @@ export default function PTPBoxDashboard() {
   }, []);
 
   const activeNode = nodes.find((node) => node.id === selectedNode) ?? nodes[nodes.length - 1];
+  const controlledServoNodes = useMemo(() => servoTarget === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === servoTarget), [nodes, servoTarget]);
+  const targetInHoldover = controlledServoNodes.length > 0 && controlledServoNodes.every((node) => node.servoEnabled === false);
+  const targetHasHoldover = controlledServoNodes.some((node) => node.servoEnabled === false);
+  const servoStatusLabel = targetInHoldover ? "HOLDOVER" : targetHasHoldover ? "MIXED" : "DISCIPLINED";
+  const holdoverElapsedSeconds = activeNode.holdoverStarted && telemetryStatus ? Math.max(0, Math.floor(telemetryStatus.timestamp - activeNode.holdoverStarted)) : null;
+  const selectedServoLabel = activeNode.role === "Grandmaster" ? "REFERENCE CLOCK" : `${activeNode.servoType?.toUpperCase() ?? "PTP"}${activeNode.servoEnabled === false ? " · FROZEN" : " SERVO"}`;
+  const selectedServoDescription = activeNode.servoType === "linreg" ? "Adaptive frequency regression" : activeNode.servoType === "nullf" ? "Zero frequency correction · SyncE" : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
+  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
   const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
@@ -556,6 +588,21 @@ export default function PTPBoxDashboard() {
     const skew = sigma ? values.reduce((sum, value) => sum + ((value - mean) / sigma) ** 3, 0) / values.length : 0;
     return { bins: counts.map((count) => (count / highest) * 100), min: minimum, max: maximum, sigma, p95, skew };
   }, [history, nodes]);
+
+  const holdoverMetrics = useMemo(() => {
+    if (!activeNode.holdoverStarted) return null;
+    const points = history
+      .filter((point) => point.t >= activeNode.holdoverStarted && Number.isFinite(point.values[activeNode.id]))
+      .map((point) => ({ t: point.t, offset: point.values[activeNode.id] }));
+    if (points.length < 2) return { driftPpb: null };
+    const origin = points[0].t;
+    const xs = points.map((point) => point.t - origin);
+    const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const meanY = points.reduce((sum, point) => sum + point.offset, 0) / points.length;
+    const denominator = xs.reduce((sum, value) => sum + (value - meanX) ** 2, 0);
+    const driftPpb = denominator ? points.reduce((sum, point, index) => sum + (xs[index] - meanX) * (point.offset - meanY), 0) / denominator : null;
+    return { driftPpb };
+  }, [activeNode.holdoverStarted, activeNode.id, history]);
 
   useEffect(() => {
     const updateClock = () => setTime(new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZoneName: "short" }).format(new Date()));
@@ -628,6 +675,11 @@ export default function PTPBoxDashboard() {
         const newest = incoming.reduce((value, point) => Math.max(value, point.t), latestTelemetryAtRef.current);
         latestTelemetryAtRef.current = newest;
         setTelemetryStatus(payload);
+        const initialServo = payload.servo_control?.nodes?.BC7?.type;
+        if (!servoSelectionHydratedRef.current && initialServo) {
+          setServoType(initialServo);
+          servoSelectionHydratedRef.current = true;
+        }
         setConnection(payload.phc_mode);
         setNodes(nodesFromTelemetry(payload));
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
@@ -706,6 +758,13 @@ export default function PTPBoxDashboard() {
     setVisibleTraces((current) => (current.includes(id) ? current : [...current.slice(-3), id]));
   };
 
+  const selectServoTarget = (target: string) => {
+    setServoTarget(target);
+    const targets = target === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === target);
+    const types = [...new Set(targets.map((node) => node.servoType).filter((value): value is ServoType => Boolean(value)))];
+    if (types.length === 1) setServoType(types[0]);
+  };
+
   const downloadRawCsv = () => {
     const rows = ["timestamp_utc,clock,phc_offset_vs_bc1_ns"];
     history.forEach((point) => Object.entries(point.values).forEach(([clock, offset]) => rows.push(`${new Date(point.t * 1000).toISOString()},${clock},${offset}`)));
@@ -742,6 +801,26 @@ export default function PTPBoxDashboard() {
     }
   };
 
+  const controlServo = async (enabled: boolean) => {
+    setServoBusy(true);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/servo/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: servoTarget, enabled, type: servoType }),
+      });
+      const result = await response.json() as { error?: string; changed?: string[] };
+      if (!response.ok) throw new Error(result.error || "servo transition failed");
+      const targets = result.changed?.join(", ") || servoTarget;
+      setToast(enabled ? `${targets}: ${servoType.toUpperCase()} discipline active` : `${targets}: holdover started · PHC monitoring continues`);
+      setAgentStatus((current) => current ? { ...current } : current);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Servo control is unavailable");
+    } finally {
+      setServoBusy(false);
+    }
+  };
+
   const handleApply = async () => {
     const payload = {
       profile,
@@ -752,7 +831,7 @@ export default function PTPBoxDashboard() {
       two_step: twoStep,
       hardware_timestamping: hardwareTs,
       servo: {
-        type: "pi",
+        type: servoType,
         kp,
         ki,
         step_threshold_ns: stepThreshold,
@@ -897,7 +976,7 @@ export default function PTPBoxDashboard() {
                     {nodes.map((node, index) => (
                       <div className="node-unit" key={node.id}>
                         {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {formatOffset(node.hopOffset ?? 0, node.measured)}</small></div>}
-                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
+                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "HOLDOVER" ? "holdover" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
                           <div className="node-topline"><span>{node.role === "Boundary" ? "BC" : node.role === "Grandmaster" ? "GM" : "OC"}</span><i style={{ background: node.color }} /></div>
                           <div className="node-symbol"><Clock3 size={20} strokeWidth={1.4} /><span className="pulse-ring" /></div>
                           <strong>{node.label}</strong>
@@ -949,7 +1028,7 @@ export default function PTPBoxDashboard() {
                   </div>
                   <div className="selected-status">
                     <div className="radial-score"><span>{activeNode.ptpMeasured ? activeNode.servoSampleCount : 0}</span><small>PTP SAMPLES</small></div>
-                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
+                    <div><span className={`locked-pill ${activeNode.state === "HOLDOVER" ? "holdover" : ""}`}>{activeNode.state === "HOLDOVER" ? <Pause size={12} /> : <Check size={12} />} {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
                   </div>
                   <div className="selected-metrics">
                     <div><span>Servo offset RMS</span><strong>{activeNode.ptpMeasured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
@@ -958,10 +1037,12 @@ export default function PTPBoxDashboard() {
                     <div><span>PTP frequency adj.</span><strong>{activeNode.ptpMeasured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
                     <div><span>Comparison error bound</span><strong>{activeNode.phcUncertainty == null ? "—" : `≤ ${formatNanoseconds(activeNode.phcUncertainty)}`}</strong></div>
                     <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
+                    <div><span>Servo mode</span><strong>{activeNode.role === "Grandmaster" ? "REFERENCE" : activeNode.servoEnabled === false ? "HOLDOVER" : activeNode.servoType?.toUpperCase() ?? "—"}</strong></div>
+                    <div><span>Holdover drift{holdoverElapsedSeconds == null ? "" : ` · ${holdoverElapsedSeconds} s`}</span><strong>{holdoverMetrics?.driftPpb == null ? "—" : `${holdoverMetrics.driftPpb >= 0 ? "+" : ""}${holdoverMetrics.driftPpb.toFixed(2)} ppb`}</strong></div>
                   </div>
                   <div className="servo-mini">
-                    <div><span>PI SERVO</span><strong>K<sub>p</sub> {kp.toFixed(2)} · K<sub>i</sub> {ki.toFixed(2)}</strong></div>
-                    <div className="servo-rail"><i style={{ width: `${kp * 76}%` }} /></div>
+                    <div><span>{selectedServoLabel}</span><strong>{selectedServoDescription}</strong></div>
+                    <div className="servo-rail"><i style={{ width: `${selectedServoRail}%` }} /></div>
                   </div>
                   <button className="full-secondary" type="button" onClick={() => setSection("Configuration")}><Settings2 size={14} /> Tune this clock <ArrowRight size={14} /></button>
                 </section>
@@ -1073,14 +1154,19 @@ export default function PTPBoxDashboard() {
                   </div>
                 </section>
                 <section className="instrument-panel config-section">
-                  <div className="panel-heading"><div><span className="section-kicker">SERVO</span><h2>Clock discipline</h2></div><button className="quiet-button">Copy to all</button></div>
+                  <div className="panel-heading"><div><span className="section-kicker">SERVO & HOLDOVER</span><h2>Clock discipline</h2></div><span className={`quality-badge ${targetHasHoldover ? "holdover" : ""}`}>{servoStatusLabel}</span></div>
                   <div className="form-grid">
-                    <label><span>Servo type</span><button className="select-control" type="button">PI controller <ChevronDown size={14} /></button></label>
-                    <label><span>Target</span><button className="select-control" type="button">All boundary clocks <ChevronDown size={14} /></button></label>
+                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>LinuxPTP native servo implementation.</small></label>
+                    <label><span>Target</span><select className="select-control" value={servoTarget} onChange={(event) => selectServoTarget(event.target.value)}><option value="all">All downstream clocks</option>{nodes.filter((node) => node.role !== "Grandmaster").map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select><small>Holdover can be isolated to one cascade stage.</small></label>
                     <label><span>Proportional constant</span><div className="input-unit"><input value={kp.toFixed(2)} onChange={(event) => setKp(Number(event.target.value))} /><em>Kp</em></div></label>
                     <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
                     <label><span>First-step threshold</span><div className="input-unit"><input value="20,000" readOnly /><em>ns</em></div></label>
                     <label><span>Step threshold</span><div className="input-unit"><input value={stepThreshold} onChange={(event) => setStepThreshold(Number(event.target.value))} /><em>ns</em></div></label>
+                  </div>
+                  <div className="servo-live-control">
+                    <div><strong>{targetInHoldover ? "Holdover observation active" : targetHasHoldover ? "Mixed discipline state" : "Clock discipline active"}</strong><span>{targetInHoldover ? "PTP messages, raw offsets, and PHC comparisons continue while clock adjustments are frozen." : targetHasHoldover ? "Some selected clocks are in holdover; apply a servo to resume all, or enter holdover for a coordinated comparison." : `${servoType.toUpperCase()} will discipline ${servoTarget === "all" ? "all downstream clocks" : servoTarget}.`}</span></div>
+                    <button className="full-secondary" type="button" disabled={servoBusy || !agentStatus?.running || targetInHoldover} onClick={() => void controlServo(false)}><Pause size={14} /> {servoBusy ? "Transitioning…" : "Enter holdover"}</button>
+                    <button className="primary-action" type="button" disabled={servoBusy || !agentStatus?.running} onClick={() => void controlServo(true)}><Play size={14} /> {servoBusy ? "Applying…" : targetInHoldover ? "Resume servo" : "Apply & run"}</button>
                   </div>
                 </section>
                 <section className="instrument-panel config-section">

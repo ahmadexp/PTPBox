@@ -66,8 +66,9 @@ sed \
 chmod 0644 /etc/systemd/system/ptpbox-agent.service
 install -d -o "$PTPBOX_USER_NAME" -g "$PTPBOX_GROUP_NAME" -m 0755 "$PTPBOX_ROOT_DIR/runtime"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/config.json" "$ETC_DIR/config.json"
+ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.json"
 
-printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status" > /etc/sudoers.d/ptpbox-web
+printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo" > /etc/sudoers.d/ptpbox-web
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 

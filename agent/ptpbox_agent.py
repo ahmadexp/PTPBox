@@ -33,6 +33,8 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
 STATE_DIR = Path(os.environ.get("PTPBOX_STATE_DIR", ROOT / "runtime"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", STATE_DIR / "config.json"))
+SERVO_REQUEST_FILE = STATE_DIR / "servo-request.json"
+SERVO_STATE_FILE = Path(os.environ.get("PTPBOX_SERVO_STATE", "/run/ptpbox/servo-state.json"))
 CONTROL = Path(os.environ.get("PTPBOX_CONTROL", "/usr/local/sbin/ptpboxctl"))
 WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "static"))
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
@@ -46,6 +48,7 @@ TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 PHC_HISTORY_MAX_SAMPLES = 900
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
     r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
@@ -621,6 +624,8 @@ def validate_config(value: dict[str, Any]) -> list[str]:
     if not isinstance(servo, dict):
         errors.append("servo settings are required")
     else:
+        if servo.get("type") not in SUPPORTED_SERVOS:
+            errors.append("servo.type must be pi, linreg, or nullf")
         for key in ("kp", "ki"):
             if not isinstance(servo.get(key), (int, float)) or not 0 <= float(servo[key]) <= 10:
                 errors.append(f"servo.{key} must be between 0 and 10")
@@ -634,6 +639,11 @@ def save_config(value: dict[str, Any]) -> None:
     pending = CONFIG_FILE.with_suffix(".json.tmp")
     pending.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     pending.replace(CONFIG_FILE)
+
+
+def load_servo_state() -> dict[str, Any]:
+    value = load_json(SERVO_STATE_FILE, {})
+    return value if isinstance(value, dict) else {}
 
 
 def display_path(path: Path) -> str:
@@ -812,6 +822,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         "phc_reference_device": phc_payload["reference_phc"],
         "phc_fresh_clocks": phc_payload["fresh_clocks"],
         "phc_method": phc_payload["method"],
+        "servo_control": load_servo_state(),
         "raw": True,
         "smoothing": "none",
         "measurement_source": "kernel cross-timestamped PHC comparison",
@@ -830,15 +841,16 @@ def status() -> dict[str, Any]:
         "namespaces": namespaces(),
         "processes": processes,
         "running": bool(processes),
+        "servo_control": load_servo_state(),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.5.2",
+        "agent_version": "1.6.0",
         "timestamp": time.time(),
     }
 
 
 def control(action: str) -> tuple[int, dict[str, Any]]:
-    if action not in {"start", "stop", "restart", "status"}:
+    if action not in {"start", "stop", "restart", "status", "servo"}:
         return HTTPStatus.BAD_REQUEST, {"error": "unsupported control action"}
     if not CONTROL.exists():
         return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "privileged control helper is not installed", "observer_only": True}
@@ -938,6 +950,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(phc_telemetry(history_seconds, since))
             elif route == "/api/config":
                 self.send_json(load_config())
+            elif route == "/api/servo":
+                self.send_json({"supported": sorted(SUPPORTED_SERVOS), "state": load_servo_state(), "timestamp": time.time()})
             elif route == "/healthz":
                 self.send_json({"ok": True, "timestamp": time.time()})
             else:
@@ -957,7 +971,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "staged": True, "path": str(CONFIG_FILE), "timestamp": time.time()})
             return
         if route == "/api/control":
-            code, response = control(str(body.get("action", "")))
+            action = str(body.get("action", ""))
+            if action not in {"start", "stop", "restart", "status"}:
+                self.send_json({"error": "unsupported control action"}, HTTPStatus.BAD_REQUEST)
+                return
+            code, response = control(action)
+            self.send_json(response, code)
+            return
+        if route == "/api/servo/control":
+            target = body.get("target")
+            enabled = body.get("enabled")
+            servo_type = body.get("type")
+            receiver_ids = [node["name"] for node in topology_nodes()[1:]]
+            if target != "all" and target not in receiver_ids:
+                self.send_json({"error": "target must be all or a downstream clock"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            if not isinstance(enabled, bool) or servo_type not in SUPPORTED_SERVOS:
+                self.send_json({"error": "enabled must be boolean and type must be pi, linreg, or nullf"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            pending = SERVO_REQUEST_FILE.with_suffix(".json.tmp")
+            pending.write_text(json.dumps({"target": target, "enabled": enabled, "type": servo_type}, indent=2) + "\n", encoding="utf-8")
+            pending.replace(SERVO_REQUEST_FILE)
+            code, response = control("servo")
             self.send_json(response, code)
             return
         if route == "/api/experiments/start":

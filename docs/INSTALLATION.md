@@ -117,12 +117,13 @@ The installer:
 3. copies the topology to `/etc/ptpbox/topology.json`;
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
-6. validates a sudoers policy for `start`, `stop`, `restart`, and `status` only;
+6. validates a sudoers policy for fixed `start`, `stop`, `restart`, `status`,
+   and validated `servo` operations only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
 8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
 9. installs a systemd-tmpfiles rule so `/run/netns` and `/run/ptpbox` are
-   recreated after every reboot, before the sandboxed agent starts;
+   recreated after every reboot, before the agent starts;
 10. starts the web service on port 8090.
 
 The service starts after `network.target`, not `network-online.target`.
@@ -165,6 +166,27 @@ from the downstream port as a true boundary clock. The controller records each
 port's timestamp provider in `/run/ptpbox/phcs.json`. The agent reads the
 selected NIC PHCs through the `clock` group and compares them to BC1 without
 modifying them.
+
+## Servo selection and measured holdover
+
+Open **Configuration → Clock discipline** to select a downstream clock (or all
+downstream clocks) and choose one of:
+
+- **PI controller** — LinuxPTP's standard proportional-integral servo;
+- **Linear regression** — LinuxPTP's adaptive regression servo;
+- **Null frequency** — forces zero frequency correction for a SyncE-backed
+  diagnostic setup.
+
+**Enter holdover** restarts only the selected clock with `free_running 1`.
+LinuxPTP keeps receiving PTP messages and logging raw master offsets, while the
+PHC comparison sampler keeps measuring every clock at one hertz. The UI derives
+holdover drift from those real PHC samples. **Resume servo** applies the chosen
+implementation with `free_running 0` and shows acquisition through `s0`, `s1`,
+and `s2` lock states.
+
+This is clock-servo holdover, not a simulated graph and not a stopped timing
+process. A servo transition causes a brief restart of the selected `ptp4l`
+instance because LinuxPTP does not switch `clock_servo` dynamically.
 
 ## Stop and restore
 

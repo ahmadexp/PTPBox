@@ -13,7 +13,7 @@ The React application in `app/` is a client-side instrument UI. It renders:
 - the cascade and selected-clock detail;
 - live or modeled offset traces on Canvas;
 - stability and per-hop error analysis;
-- experiment design and PI-servo tuning;
+- experiment design, selectable servo control, and measured holdover;
 - interface/PHC inventory;
 - guarded configuration review;
 - event and session summaries.
@@ -61,6 +61,10 @@ time-series interpolation, or synthetic fill is applied in live mode.
 - start/stop LinuxPTP processes;
 - generate role-specific `ptp4l` configuration;
 - run one two-port boundary-clock process for every intermediate NIC;
+- apply PI, linear-regression, or null-frequency discipline to one receiver or
+  every downstream clock;
+- enter LinuxPTP `free_running` holdover while keeping both PTP diagnostics and
+  the independent PHC comparison sampler alive;
 - write the authoritative PHC measurement map for the unprivileged agent;
 - never run a local PHC discipline loop—the NICs synchronize only through
   `ptp4l` over the physical chain;
@@ -83,10 +87,20 @@ priority 30 to the driver's timestamp workers. The reference cascade uses the
 original project's one Sync per second cadence to avoid overdriving a shared
 multi-port timestamp engine.
 
-The web sudo policy permits only `start`, `stop`, `restart`, and `status` with no
-additional arguments. `setup` and `teardown` remain manual root operations.
+The web sudo policy permits only `start`, `stop`, `restart`, `status`, and
+`servo` with no additional arguments. The agent validates and atomically stages
+the servo request before invoking that fixed verb. `setup` and `teardown` remain
+manual root operations.
 The observation service uses `KillMode=process`, so restarting or upgrading the
 web agent does not terminate the separately tracked timing processes.
+
+The service shares the host filesystem mount view. Named network namespaces are
+`nsfs` mounts under `/run/netns`; hiding them in a short-lived service mount
+namespace would make a later web-agent restart lose the handles. The API still
+runs as an unprivileged account, and its only root path is the exact-command
+sudo allowlist. During upgrades from older sandboxed units, the controller can
+borrow a surviving managed `ptp4l` process's mount view so the cascade remains
+controllable without a data-plane restart.
 
 ## Data plane
 
@@ -154,6 +168,12 @@ sequenceDiagram
     P-->>A: LinuxPTP logs
     A->>N: Read mapped PHCs without adjustment
     A-->>UI: PHC comparisons, servo telemetry, process state
+    Operator->>UI: Enter holdover on BC7
+    UI->>A: POST /api/servo/control
+    A->>C: sudo -n ptpboxctl servo
+    C->>P: Restart BC7 with free_running 1
+    P-->>A: Sync offsets continue; PHC is not adjusted
+    A-->>UI: Raw drift while monitoring stays live
 ```
 
 ## State and files
@@ -163,7 +183,7 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs and read-only PHC map |
+| `/run/ptpbox` | root | boot | managed process IDs, servo state, and read-only PHC map |
 | `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible generated LinuxPTP config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |
@@ -196,8 +216,10 @@ deterministic demonstration model. No control operation is attempted.
 - Configuration is validated and serialized as JSON.
 - `ptpboxctl` never executes user-provided shell text.
 - The controller refuses overlap between assigned and management interfaces.
-- The systemd service uses `ProtectSystem=strict`, `ProtectHome=read-only`, and
-  the `clock` supplementary group for read-only PHC device access.
+- The systemd service is unprivileged and receives only the `clock`
+  supplementary group for read-only PHC device access.
+- Root control is restricted to five exact `ptpboxctl` command lines; the HTTP
+  agent cannot supply controller arguments or shell text.
 - Public exposure requires a separate authenticated TLS reverse proxy.
 
 See [`SECURITY.md`](../SECURITY.md) for deployment policy.

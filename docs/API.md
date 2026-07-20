@@ -173,6 +173,10 @@ direct PHC-read freshness. `samples` and `phc_samples` can be empty on an
 incremental request even while their latest measurements and window statistics
 remain populated.
 
+The response also includes `servo_control.nodes`. Each downstream node reports
+its selected `type`, whether discipline is `enabled`, its `mode` (`active` or
+`holdover`), and the Unix timestamp at which holdover began.
+
 The raw payload preserves invalid samples but marks them `valid: false`. For
 this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
 driver timestamp failure. Such samples are counted separately and excluded
@@ -213,6 +217,44 @@ Validates and atomically stages a complete configuration document.
 Success is `200` with `staged: true`. Validation failures return `422` with a
 `details` array.
 
+## Servo and holdover control
+
+### `GET /api/servo`
+
+Returns the supported on-box servo implementations and the current per-clock
+state. The safe built-in choices are `pi`, `linreg`, and `nullf`.
+
+### `POST /api/servo/control`
+
+Applies a servo to one downstream clock or every receiver. Setting `enabled`
+to `false` enters measured holdover: LinuxPTP continues receiving Sync messages
+and reporting raw offsets, but the generated configuration uses
+`free_running 1` so it does not adjust the PHC. The independent one-hertz PHC
+comparison sampler continues unchanged.
+
+```json
+{
+  "target": "BC7",
+  "enabled": false,
+  "type": "pi"
+}
+```
+
+Resume BC7 under the adaptive linear-regression servo with:
+
+```json
+{
+  "target": "BC7",
+  "enabled": true,
+  "type": "linreg"
+}
+```
+
+Use `target: "all"` for BC2 through the final OC. Changing the servo requires a
+brief restart of only the selected `ptp4l` instance; the agent and PHC sampler
+do not restart. `nullf` deliberately commands zero frequency correction and is
+intended for SyncE-backed diagnostics, not ordinary oscillator discipline.
+
 ## Experiments
 
 ### `POST /api/experiments/start`
@@ -240,8 +282,10 @@ kept separate from the HTTP agent until a target-specific actuator is installed.
 { "action": "status" }
 ```
 
-Allowed actions are `start`, `stop`, `restart`, and `status`. The agent invokes
-the fixed installed helper through `sudo -n`. Unsupported actions return `400`;
+Allowed actions are `start`, `stop`, `restart`, and `status`. Servo transitions
+use `/api/servo/control` so their request is validated and atomically staged
+before the internal fixed helper verb is invoked. The agent invokes the fixed
+installed helper through `sudo -n`. Unsupported actions return `400`;
 missing integration returns `503`; lifecycle conflicts return `409`.
 
 ## Static application
