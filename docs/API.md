@@ -53,28 +53,36 @@ and whether privileged lifecycle control is installed.
       "driver": "mlx5_core",
       "bus": "0000:19:00.0",
       "phc": "ptp0",
-      "hardware_timestamping": true
+      "hardware_timestamping": true,
+      "namespace": "BC1",
+      "assignment": "BC1 / INACTIVE IN"
     }
   ],
   "timestamp": 1784327816.62
 }
 ```
 
+The lifecycle controller records timing-port metadata after moving each adapter
+into its namespace. The unprivileged agent merges that snapshot with the live
+host-namespace management ports, so the response and status counts still cover
+all physical interfaces while the cascade is running.
+
 ## Telemetry
 
 ### `GET /api/phc`
 
 Returns one-hertz, read-only PHC comparisons. The first mapped NIC is the
-reference. Every target is bracketed by two reference reads and compared with
-their midpoint. `offset_ns` is cumulative difference from BC1;
-`previous_hop_offset_ns` is the delta from the preceding NIC. The sampler never
-sets, steps, or adjusts a clock.
+reference. Every PHC is cross timestamped against `CLOCK_MONOTONIC_RAW` using
+the shortest of nine kernel-bracketed samples. BC1 is measured before and after
+the targets and interpolated to each target's measurement epoch. `offset_ns` is
+the cumulative difference from BC1; `previous_hop_offset_ns` is the delta from
+the preceding NIC. The sampler never sets, steps, or adjusts a clock.
 
 ```json
 {
   "reference": "BC1",
   "reference_phc": "ptp2",
-  "method": "sequential PHC midpoint reads",
+  "method": "common-system cross timestamps with interpolated BC1 reference",
   "raw": true,
   "smoothing": "none",
   "clocks": [
@@ -82,9 +90,11 @@ sets, steps, or adjusts a clock.
       "id": "BC2",
       "phc": "ptp1",
       "measurement": {
-        "offset_ns": 42,
-        "previous_hop_offset_ns": 42,
-        "read_span_ns": 2100,
+        "offset_ns": 31.4,
+        "previous_hop_offset_ns": 31.4,
+        "read_span_ns": 710,
+        "comparison_uncertainty_ns": 715,
+        "cross_timestamp_method": "PTP_SYS_OFFSET_EXTENDED(CLOCK_MONOTONIC_RAW), best of 9",
         "observed_at": 1784327800.0,
         "raw": true,
         "valid": true,
@@ -115,7 +125,7 @@ Query parameters:
   "timestamp": 1784327816.64,
   "mode": "live",
   "phc_mode": "live",
-  "measurement_source": "direct PHC comparison",
+  "measurement_source": "kernel cross-timestamped PHC comparison",
   "measured_clocks": 1,
   "fresh_clocks": 1,
   "raw": true,
@@ -128,6 +138,7 @@ Query parameters:
       "egress": "enp26s0f1np1",
       "logs": 2,
       "window_sample_count": 1920,
+      "window_locked_sample_count": 1912,
       "rms_ns": 18.7,
       "measurement_phc": "ptp1",
       "phc_rms_ns": 45.1,
@@ -162,10 +173,16 @@ direct PHC-read freshness. `samples` and `phc_samples` can be empty on an
 incremental request even while their latest measurements and window statistics
 remain populated.
 
+The response also includes `servo_control.nodes`. Each downstream node reports
+its selected `type`, whether discipline is `enabled`, its `mode` (`active` or
+`holdover`), and the Unix timestamp at which holdover began.
+
 The raw payload preserves invalid samples but marks them `valid: false`. For
 this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
 driver timestamp failure. Such samples are counted separately and excluded
 from RMS and charts; their original values remain available through the API.
+Servo `rms_ns` uses only valid locked (`s2`) samples. Acquisition samples remain
+in `samples` but cannot inflate the steady-state stability metric.
 
 ## Configuration
 
@@ -200,6 +217,44 @@ Validates and atomically stages a complete configuration document.
 Success is `200` with `staged: true`. Validation failures return `422` with a
 `details` array.
 
+## Servo and holdover control
+
+### `GET /api/servo`
+
+Returns the supported on-box servo implementations and the current per-clock
+state. The safe built-in choices are `pi`, `linreg`, and `nullf`.
+
+### `POST /api/servo/control`
+
+Applies a servo to one downstream clock or every receiver. Setting `enabled`
+to `false` enters measured holdover: LinuxPTP continues receiving Sync messages
+and reporting raw offsets, but the generated configuration uses
+`free_running 1` so it does not adjust the PHC. The independent one-hertz PHC
+comparison sampler continues unchanged.
+
+```json
+{
+  "target": "BC7",
+  "enabled": false,
+  "type": "pi"
+}
+```
+
+Resume BC7 under the adaptive linear-regression servo with:
+
+```json
+{
+  "target": "BC7",
+  "enabled": true,
+  "type": "linreg"
+}
+```
+
+Use `target: "all"` for BC2 through the final OC. Changing the servo requires a
+brief restart of only the selected `ptp4l` instance; the agent and PHC sampler
+do not restart. `nullf` deliberately commands zero frequency correction and is
+intended for SyncE-backed diagnostics, not ordinary oscillator discipline.
+
 ## Experiments
 
 ### `POST /api/experiments/start`
@@ -209,7 +264,7 @@ Stages experiment metadata under `PTPBOX_STATE_DIR/experiment.json`.
 ```json
 {
   "type": "step",
-  "target": "BC4",
+  "target": "BC7",
   "amplitude_ns": 1000,
   "duration_s": 120,
   "servo": { "kp": 0.7, "ki": 0.3, "step_threshold_ns": 0 }
@@ -227,8 +282,10 @@ kept separate from the HTTP agent until a target-specific actuator is installed.
 { "action": "status" }
 ```
 
-Allowed actions are `start`, `stop`, `restart`, and `status`. The agent invokes
-the fixed installed helper through `sudo -n`. Unsupported actions return `400`;
+Allowed actions are `start`, `stop`, `restart`, and `status`. Servo transitions
+use `/api/servo/control` so their request is validated and atomically staged
+before the internal fixed helper verb is invoked. The agent invokes the fixed
+installed helper through `sudo -n`. Unsupported actions return `400`;
 missing integration returns `503`; lifecycle conflicts return `409`.
 
 ## Static application

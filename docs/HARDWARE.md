@@ -26,44 +26,81 @@ time naturally; genuinely distinct clocks remain visible in the measurements.
 
 ## Reference host
 
-The current reference machine exposes sixteen physical ports across NVIDIA,
-Intel E810, and Intel ixgbe drivers. Fourteen ports form the timing lab; two are
-reserved for management and spare use.
+The current reference machine exposes sixteen physical ports across seven
+NVIDIA ConnectX-6 Dx timing adapters and one Intel X550 management adapter.
+Fourteen 100G ports form the timing lab; two ports are reserved for management
+and spare use.
 
 | Cascade stage | Physical clock | Ingress | Egress | Driver | PHC behavior |
 | --- | --- | --- | --- | --- | --- |
-| 1 | BC1 | `enp25s0f0np0` | `enp25s0f1np1` | `mlx5_core` | distinct PHCs |
-| 2 | BC2 | `enp26s0f0np0` | `enp26s0f1np1` | `ice` | shared provider `ptp1` |
-| 3 | BC7 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct PHCs |
-| 4 | BC6 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct PHCs |
-| 5 | BC5 | `enp103s0f0np0` | `enp103s0f1np1` | `mlx5_core` | distinct PHCs |
-| 6 | BC3 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct PHCs |
-| 7 | BC4 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct PHCs |
+| 1 | BC1 | `enp25s0f0np0` | `enp25s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 2 | BC2 | `enp26s0f0np0` | `enp26s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 3 | BC3 | `enp105s0f0np0` | `enp105s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 4 | BC4 | `enp104s0f0np0` | `enp104s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 5 | BC5 | `enp103s0f0np0` | `enp103s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 6 | BC6 | `enp27s0f0np0` | `enp27s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
+| 7 | BC7 | `enp28s0f0np0` | `enp28s0f1np1` | `mlx5_core` | distinct devices, hardware-aligned RTC |
 | — | Management | `enp179s0f0` | — | `ixgbe` | excluded |
 | — | Spare | `enp179s0f1` | — | `ixgbe` | excluded |
 
 Interface names are examples, not portable defaults. PCI enumeration can change
 after firmware, BIOS, or hardware changes.
 
+### ConnectX-6 Dx real-time clock mode
+
+Every ConnectX-6 Dx timing card must use one real-time clock domain across its
+functions. NVIDIA documents `REAL_TIME_CLOCK_ENABLE` as a device-wide NV_CONFIG
+setting and requires a firmware reset after it changes. A card can otherwise
+lock its ingress servo while its egress timestamps remain phase-discontinuous.
+
+For each physical card, query the PF0 PCI address and enable the setting if
+needed. Stop PTP before resetting the adapter, and keep management on a
+different PCI device:
+
+```bash
+sudo mstconfig -d 0000:1a:00.0 query | grep REAL_TIME_CLOCK_ENABLE
+sudo mstconfig -y -d 0000:1a:00.0 set REAL_TIME_CLOCK_ENABLE=1
+sudo mstfwreset -d 0000:1a:00.0 query
+sudo mstfwreset -d 0000:1a:00.0 reset -l 3 -t 0 --sync 0 -y
+```
+
+Use only a reset level reported as supported by `mstfwreset query`; some
+firmware revisions require a full power cycle. See NVIDIA's
+[time-stamping guide](https://docs.nvidia.com/networking/display/mlnxofedv23100540/time-stamping)
+and [real-time clock guide](https://docs.nvidia.com/networking/display/NVIDIA5TTechnologyUserManualv10/Real-Time%2BClock).
+
 ## Physical cabling
 
-The reference machine is physically wired as a ring. A broadcast/counter probe
-verified every peer on 17 July 2026. The controller follows six links as a
+The reference machine is physically wired as a ring. A raw experimental-frame
+probe verified every peer on 18 July 2026. The controller follows six links as a
 cascade and leaves the return link inactive, avoiding a PTP timing loop:
 
 ```text
-GM: BC1 egress ──50G──> BC2 ingress
-    BC2 egress ──50G──> BC7 ingress
-    BC7 egress ─100G──> BC6 ingress
-    BC6 egress ─100G──> BC5 ingress
-    BC5 egress ─100G──> BC3 ingress
-    BC3 egress ─100G──> BC4 ingress :OC
+GM: BC1 egress ─100G──> BC2 ingress
+    BC2 egress ─100G──> BC3 ingress
+    BC3 egress ─100G──> BC4 ingress
+    BC4 egress ─100G──> BC5 ingress
+    BC5 egress ─100G──> BC6 ingress
+    BC6 egress ─100G──> BC7 ingress :OC
 
-inactive return: BC4 egress ──100G──> BC1 ingress
+inactive return: BC7 egress ──100G──> BC1 ingress
 ```
 
-Use direct attach or optics supported consistently by each pair. Mixed 50G and
-100G links are fine when both ends negotiate the same speed.
+Use direct attach or optics supported consistently by each pair. Every timing
+link in the current reference setup negotiates at 100G.
+
+To rediscover wiring after a hardware change, first stop and tear down the
+cascade so all timing ports are back in the host namespace. Run the probe only
+on an isolated lab fabric: it sends a few broadcast frames with IEEE's local
+experimental EtherType and never modifies interface configuration.
+
+```bash
+sudo ptpboxctl teardown
+sudo python3 scripts/probe-cabling.py --topology agent/topology.json
+```
+
+The result lists bidirectional cable peers and any unresolved ports. Review the
+physical result, update `agent/topology.json`, then start the cascade again.
 
 ## Generate an inventory
 

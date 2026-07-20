@@ -4,6 +4,42 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Turned the top-bar bell into an accessible live notification center with
+  unread state, current clock/servo/measurement health, direct navigation,
+  mark-all-read, outside-click dismissal, and Escape-key support.
+- Added per-clock and all-downstream live servo selection for LinuxPTP PI,
+  adaptive linear-regression, and null-frequency implementations.
+- Added measured holdover control using LinuxPTP `free_running`: PTP offset logs
+  and one-hertz raw PHC comparisons continue while clock adjustment is frozen,
+  and the Observatory reports elapsed holdover and fitted frequency drift.
+- Preserved network-namespace control across upgrades from older systemd mount
+  sandboxes by borrowing a surviving managed `ptp4l` mount view; new installs
+  keep persistent `/run/netns` handles in the host mount view.
+
+- Replaced sequential PHC midpoint reads with Linux kernel cross timestamps:
+  prefer `PTP_SYS_OFFSET_PRECISE`, otherwise select the shortest of nine
+  `PTP_SYS_OFFSET_EXTENDED` brackets against `CLOCK_MONOTONIC_RAW` and
+  interpolate BC1 to each target epoch. The live ConnectX host reduced its
+  measurement transaction from roughly 20 microseconds to 0.7 microseconds.
+- Added the per-sample cross-timestamp method and conservative comparison-error
+  bound to the API and Observatory provenance surfaces.
+- Renumbered cascade stages in physical order (`BC1` through `BC7`) while
+  preserving the verified port sequence and cabling.
+- Corrected Observatory RMS surfaces to use raw LinuxPTP servo offsets, which
+  are hardware-timestamped nanosecond measurements, instead of cross-device PHC
+  comparison dispersion; the measurement error bound is now shown separately.
+- Reused read-only PHC descriptors to reduce userspace midpoint-read latency.
+
+- Updated the reference profile to seven ConnectX-6 Dx timing cards with all
+  fourteen cascade ports at 100G, including the replacement BC2 adapter.
+- Added namespace-aware live interface inventory and removed stale hard-coded
+  E810, 50G, PHC, PCI, line-rate, and driver values from the Observatory.
+- Added an experimental-EtherType cable peer probe for safely remapping a
+  changed lab, plus ConnectX real-time-clock firmware setup and reset guidance.
+- Made volatile namespace/controller paths boot-persistent through
+  `systemd-tmpfiles` and avoided `network-online.target` deadlock on intentionally
+  unnumbered timing ports.
+
 - Added a live Start/Stop cascade control backed by the narrowly scoped sudo
   policy, periodic process-state refresh, and AppArmor-compatible LinuxPTP
   configuration paths on Ubuntu hosts.

@@ -1,7 +1,6 @@
 [Unit]
 Description=PTPBox observation API
-After=network-online.target
-Wants=network-online.target
+After=network.target systemd-tmpfiles-setup.service
 
 [Service]
 Type=simple
@@ -19,10 +18,9 @@ ExecStart=/usr/bin/python3 /opt/ptpbox-web/agent/ptpbox_agent.py
 Restart=on-failure
 RestartSec=2
 KillMode=process
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=@PTPBOX_ROOT@/runtime /etc/linuxptp /run/netns /run/ptpbox /var/log/ptpbox
+# The unprivileged API must share the host mount view because its exact-command
+# sudo helper controls persistent /run/netns nsfs handles. Filesystem authority
+# remains limited by the service user and the fixed sudoers command allowlist.
 
 [Install]
 WantedBy=multi-user.target

@@ -9,6 +9,7 @@ fi
 systemctl disable --now ptpbox-agent.service 2>/dev/null || true
 rm -f /etc/systemd/system/ptpbox-agent.service
 rm -f /etc/sudoers.d/ptpbox-web
+rm -f /etc/tmpfiles.d/ptpbox.conf
 rm -f /usr/local/sbin/ptpboxctl
 rm -f /etc/ptpbox/config.json
 rm -rf /opt/ptpbox-web

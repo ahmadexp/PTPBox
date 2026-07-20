@@ -33,6 +33,8 @@ install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /etc/li
 install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_agent.py"
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" /etc/tmpfiles.d/ptpbox.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/ptpbox.conf
 
 # Ubuntu confines ptp4l with AppArmor. Multi-PHC boundary clocks need the
 # JBOD clock-switch notification socket, while one host-wide filesystem needs
@@ -64,8 +66,9 @@ sed \
 chmod 0644 /etc/systemd/system/ptpbox-agent.service
 install -d -o "$PTPBOX_USER_NAME" -g "$PTPBOX_GROUP_NAME" -m 0755 "$PTPBOX_ROOT_DIR/runtime"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/config.json" "$ETC_DIR/config.json"
+ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.json"
 
-printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status" > /etc/sudoers.d/ptpbox-web
+printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo" > /etc/sudoers.d/ptpbox-web
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 

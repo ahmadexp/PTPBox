@@ -39,7 +39,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Section = "Overview" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
-type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "NO DATA" | "STALE" | "FAULTY";
+type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
+type ServoType = "pi" | "linreg" | "nullf";
+
+type ServoNodeControl = {
+  mode: "reference" | "active" | "holdover";
+  enabled: boolean;
+  type: ServoType | null;
+  changed_at: number | null;
+  holdover_started: number | null;
+};
+
+type ServoControlState = { updated_at: number | null; nodes: Record<string, ServoNodeControl> };
+
+type ObservatoryNotification = {
+  id: string;
+  level: "good" | "info" | "warn";
+  title: string;
+  detail: string;
+  meta: string;
+  section: Section;
+  nodeId?: string;
+  servoTarget?: string;
+  icon: typeof Bell;
+};
 
 type ClockNode = {
   id: string;
@@ -58,6 +81,13 @@ type ClockNode = {
   measured: boolean;
   ptpMeasured?: boolean;
   sampleCount: number;
+  servoSampleCount: number;
+  phcReadSpan: number | null;
+  phcUncertainty?: number | null;
+  phcMethod?: string | null;
+  servoType?: ServoType | null;
+  servoEnabled?: boolean;
+  holdoverStarted?: number | null;
   source: string;
   lastSampleAt: number | null;
 };
@@ -75,6 +105,21 @@ type AgentStatus = {
   ptp_interfaces?: number;
   namespaces?: string[];
   running?: boolean;
+  servo_control?: ServoControlState;
+};
+
+type HostInterface = {
+  name: string;
+  state: string;
+  carrier: boolean;
+  speed_mbps: number | null;
+  mac: string;
+  driver: string | null;
+  bus: string | null;
+  phc: string | null;
+  hardware_timestamping: boolean;
+  namespace: string | null;
+  assignment: string | null;
 };
 
 type TelemetrySample = {
@@ -95,6 +140,8 @@ type PhcSample = {
   offset_ns: number | null;
   previous_hop_offset_ns: number | null;
   read_span_ns: number | null;
+  comparison_uncertainty_ns: number | null;
+  cross_timestamp_method: string | null;
   observed_at: number;
   sample_id: string;
   phc: string;
@@ -112,6 +159,7 @@ type TelemetryClock = {
   samples: TelemetrySample[];
   window_sample_count: number;
   window_valid_sample_count: number;
+  window_locked_sample_count: number;
   window_invalid_sample_count: number;
   rms_ns: number | null;
   logs: number;
@@ -137,7 +185,8 @@ type TelemetryPayload = {
   phc_reference_device: string | null;
   phc_fresh_clocks: number;
   phc_method: string;
-  measurement_source: "direct PHC comparison";
+  servo_control: ServoControlState;
+  measurement_source: string;
   raw: true;
   smoothing: "none";
   history_seconds: number;
@@ -154,33 +203,45 @@ function agentBaseUrl() {
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
 
 const INITIAL_NODES: ClockNode[] = [
-  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp2", color: TRACE_COLORS[0], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp1", color: TRACE_COLORS[1], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC7", label: "BC7", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC6", label: "BC6", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC3", label: "BC3", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp4", color: TRACE_COLORS[5], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
-  { id: "BC4", label: "BC4 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp5", color: TRACE_COLORS[6], measured: true, sampleCount: 120, source: "simulation", lastSampleAt: null },
+  { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp1", color: TRACE_COLORS[0], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 0, source: "simulation", lastSampleAt: null },
+  { id: "BC2", label: "BC2", role: "Boundary", offset: 4.8, meanPathDelay: 212, rms: 3.2, frequencyPpb: -2.4, state: "LOCKED", ingress: "enp26s0f0np0", egress: "enp26s0f1np1", phc: "ptp2", color: TRACE_COLORS[1], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC3", label: "BC3", role: "Boundary", offset: 11.7, meanPathDelay: 228, rms: 6.1, frequencyPpb: 3.1, state: "LOCKED", ingress: "enp105s0f0np0", egress: "enp105s0f1np1", phc: "ptp14", color: TRACE_COLORS[2], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC4", label: "BC4", role: "Boundary", offset: 24.3, meanPathDelay: 241, rms: 10.8, frequencyPpb: -8.7, state: "LOCKED", ingress: "enp104s0f0np0", egress: "enp104s0f1np1", phc: "ptp12", color: TRACE_COLORS[3], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC5", label: "BC5", role: "Boundary", offset: 41.6, meanPathDelay: 237, rms: 18.9, frequencyPpb: -6.2, state: "LOCKED", ingress: "enp103s0f0np0", egress: "enp103s0f1np1", phc: "ptp10", color: TRACE_COLORS[4], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC6", label: "BC6", role: "Boundary", offset: 63.8, meanPathDelay: 255, rms: 27.6, frequencyPpb: -12.4, state: "TRACKING", ingress: "enp27s0f0np0", egress: "enp27s0f1np1", phc: "ptp6", color: TRACE_COLORS[5], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
+  { id: "BC7", label: "BC7 · OC", role: "Ordinary", offset: 91.2, meanPathDelay: 269, rms: 40.2, frequencyPpb: 7.9, state: "LOCKED", ingress: "enp28s0f0np0", egress: "enp28s0f1np1", phc: "ptp8", color: TRACE_COLORS[6], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 2100, source: "simulation", lastSampleAt: null },
 ];
 
-const INTERFACES = [
-  ["enp25s0f0np0", "BC1 / INACTIVE IN", "100 Gb/s", "ptp0", "UP"],
-  ["enp25s0f1np1", "BC1 / GM OUT", "50 Gb/s", "ptp2", "UP"],
-  ["enp26s0f0np0", "BC2 / IN", "50 Gb/s", "ptp1", "UP"],
-  ["enp26s0f1np1", "BC2 / OUT", "50 Gb/s", "ptp1", "UP"],
-  ["enp27s0f0np0", "BC3 / IN", "100 Gb/s", "ptp3", "UP"],
-  ["enp27s0f1np1", "BC3 / OUT", "100 Gb/s", "ptp4", "UP"],
-  ["enp28s0f0np0", "BC4 / OC IN", "100 Gb/s", "ptp5", "UP"],
-  ["enp28s0f1np1", "BC4 / INACTIVE OUT", "100 Gb/s", "ptp8", "UP"],
-  ["enp103s0f0np0", "BC5 / IN", "100 Gb/s", "ptp9", "UP"],
-  ["enp103s0f1np1", "BC5 / OUT", "100 Gb/s", "ptp10", "UP"],
-  ["enp104s0f0np0", "BC6 / IN", "100 Gb/s", "ptp11", "UP"],
-  ["enp104s0f1np1", "BC6 / OUT", "100 Gb/s", "ptp12", "UP"],
-  ["enp105s0f0np0", "BC7 / IN", "50 Gb/s", "ptp13", "UP"],
-  ["enp105s0f1np1", "BC7 / OUT", "100 Gb/s", "ptp14", "UP"],
-  ["enp179s0f0", "MANAGEMENT", "1 Gb/s", "ptp6", "UP"],
-  ["enp179s0f1", "SPARE", "—", "ptp7", "DOWN"],
-];
+const FALLBACK_INTERFACES: HostInterface[] = [
+  ["enp25s0f0np0", "BC1 / INACTIVE IN", 100000, "ptp0", "0000:19:00.0", "mlx5_core", "BC1"],
+  ["enp25s0f1np1", "BC1 / GM OUT", 100000, "ptp1", "0000:19:00.1", "mlx5_core", "BC1"],
+  ["enp26s0f0np0", "BC2 / IN", 100000, "ptp2", "0000:1a:00.0", "mlx5_core", "BC2"],
+  ["enp26s0f1np1", "BC2 / OUT", 100000, "ptp3", "0000:1a:00.1", "mlx5_core", "BC2"],
+  ["enp105s0f0np0", "BC3 / IN", 100000, "ptp14", "0000:69:00.0", "mlx5_core", "BC3"],
+  ["enp105s0f1np1", "BC3 / OUT", 100000, "ptp15", "0000:69:00.1", "mlx5_core", "BC3"],
+  ["enp104s0f0np0", "BC4 / IN", 100000, "ptp12", "0000:68:00.0", "mlx5_core", "BC4"],
+  ["enp104s0f1np1", "BC4 / OUT", 100000, "ptp13", "0000:68:00.1", "mlx5_core", "BC4"],
+  ["enp103s0f0np0", "BC5 / IN", 100000, "ptp10", "0000:67:00.0", "mlx5_core", "BC5"],
+  ["enp103s0f1np1", "BC5 / OUT", 100000, "ptp11", "0000:67:00.1", "mlx5_core", "BC5"],
+  ["enp27s0f0np0", "BC6 / IN", 100000, "ptp6", "0000:1b:00.0", "mlx5_core", "BC6"],
+  ["enp27s0f1np1", "BC6 / OUT", 100000, "ptp7", "0000:1b:00.1", "mlx5_core", "BC6"],
+  ["enp28s0f0np0", "BC7 / OC IN", 100000, "ptp8", "0000:1c:00.0", "mlx5_core", "BC7"],
+  ["enp28s0f1np1", "BC7 / INACTIVE OUT", 100000, "ptp9", "0000:1c:00.1", "mlx5_core", "BC7"],
+  ["enp179s0f0", "MANAGEMENT", 1000, "ptp4", "0000:b3:00.0", "ixgbe", null],
+  ["enp179s0f1", "SPARE", null, "ptp5", "0000:b3:00.1", "ixgbe", null],
+].map(([name, assignment, speed, phc, bus, driver, namespace]) => ({
+  name: name as string,
+  assignment: assignment as string,
+  speed_mbps: speed as number | null,
+  phc: phc as string,
+  bus: bus as string,
+  driver: driver as string,
+  namespace: namespace as string | null,
+  state: speed ? "UP" : "DOWN",
+  carrier: Boolean(speed),
+  mac: "",
+  hardware_timestamping: true,
+}));
 
 const EVENTS = [
   ["13:42:18.420", "INFO", "BC–06", "SERVO_LOCKED_STABLE", "Offset settled within ±100 ns"],
@@ -226,6 +287,13 @@ function formatOffset(value: number, measured = true) {
   return formatNanoseconds(value, true);
 }
 
+function formatLineRate(speedMbps: number | null) {
+  if (!speedMbps) return "—";
+  if (speedMbps >= 1_000_000) return `${(speedMbps / 1_000_000).toFixed(2)} Tb/s`;
+  if (speedMbps >= 1_000) return `${speedMbps / 1_000} Gb/s`;
+  return `${speedMbps} Mb/s`;
+}
+
 function rangeSeconds(range: string) {
   return range === "30 s" ? 30 : range === "15 min" ? 900 : 120;
 }
@@ -244,6 +312,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
   return payload.clocks.map((clock, index) => {
     const ptpMeasurement = clock.measurement;
     const phcMeasurement = clock.phc_measurement;
+    const servoControl = payload.servo_control?.nodes?.[clock.id];
     const stale = Boolean(ptpMeasurement && payload.timestamp - ptpMeasurement.observed_at > 5);
     return {
       id: clock.id,
@@ -252,9 +321,9 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       offset: phcMeasurement?.offset_ns ?? 0,
       hopOffset: phcMeasurement?.previous_hop_offset_ns ?? 0,
       meanPathDelay: ptpMeasurement?.mean_path_delay_ns ?? 0,
-      rms: clock.phc_rms_ns ?? 0,
+      rms: clock.rms_ns ?? 0,
       frequencyPpb: ptpMeasurement?.frequency_ppb ?? 0,
-      state: stateFromMeasurement(ptpMeasurement, stale, clock.role),
+      state: servoControl?.mode === "holdover" ? "HOLDOVER" : stateFromMeasurement(ptpMeasurement, stale, clock.role),
       ingress: clock.ingress,
       egress: clock.egress,
       phc: clock.measurement_phc ? `/dev/${clock.measurement_phc}` : "—",
@@ -262,6 +331,13 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       measured: Boolean(phcMeasurement?.valid && phcMeasurement.offset_ns !== null),
       ptpMeasured: Boolean(ptpMeasurement?.valid),
       sampleCount: clock.phc_window_sample_count,
+      servoSampleCount: clock.window_locked_sample_count,
+      phcReadSpan: phcMeasurement?.read_span_ns ?? null,
+      phcUncertainty: phcMeasurement?.comparison_uncertainty_ns ?? null,
+      phcMethod: phcMeasurement?.cross_timestamp_method ?? null,
+      servoType: servoControl?.type ?? (clock.role === "grandmaster" ? null : "pi"),
+      servoEnabled: servoControl?.enabled ?? clock.role !== "grandmaster",
+      holdoverStarted: servoControl?.holdover_started ?? null,
       source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
       lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
@@ -283,6 +359,8 @@ function waitingNodes(source: string): ClockNode[] {
     frequencyPpb: 0,
     measured: false,
     sampleCount: 0,
+    servoSampleCount: 0,
+    phcReadSpan: null,
     source,
     state: node.role === "Grandmaster" ? "REFERENCE" : "NO DATA",
   }));
@@ -437,13 +515,15 @@ export default function PTPBoxDashboard() {
   const [section, setSection] = useState<Section>("Overview");
   const [mobileNav, setMobileNav] = useState(false);
   const [nodes, setNodes] = useState(() => waitingNodes("Finding PTPBox agent"));
-  const [selectedNode, setSelectedNode] = useState("BC4");
-  const [visibleTraces, setVisibleTraces] = useState(["BC2", "BC6", "BC3", "BC4"]);
+  const [selectedNode, setSelectedNode] = useState("BC7");
+  const [visibleTraces, setVisibleTraces] = useState(["BC4", "BC5", "BC6", "BC7"]);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [paused, setPaused] = useState(false);
   const [time, setTime] = useState("");
   const [connection, setConnection] = useState<ConnectionMode>("checking");
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const [interfaceInventory, setInterfaceInventory] = useState<HostInterface[]>(FALLBACK_INTERFACES);
+  const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
   const [range, setRange] = useState("2 min");
   const [experimentRunning, setExperimentRunning] = useState(false);
@@ -458,15 +538,52 @@ export default function PTPBoxDashboard() {
   const [hardwareTs, setHardwareTs] = useState(true);
   const [sanity, setSanity] = useState(true);
   const [controlBusy, setControlBusy] = useState(false);
+  const [servoType, setServoType] = useState<ServoType>("pi");
+  const [servoTarget, setServoTarget] = useState("BC7");
+  const [servoBusy, setServoBusy] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
+  const servoSelectionHydratedRef = useRef(false);
+  const notificationCenterRef = useRef<HTMLDivElement>(null);
+
+  const refreshInterfaces = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 1800);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/interfaces`, { signal: controller.signal });
+      if (!response.ok) throw new Error("interface inventory unavailable");
+      const payload = await response.json() as { interfaces?: HostInterface[]; timestamp?: number };
+      if (Array.isArray(payload.interfaces) && payload.interfaces.length) {
+        setInterfaceInventory(payload.interfaces);
+        setInterfaceUpdatedAt(payload.timestamp ?? Date.now() / 1000);
+      }
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
 
   const activeNode = nodes.find((node) => node.id === selectedNode) ?? nodes[nodes.length - 1];
+  const controlledServoNodes = useMemo(() => servoTarget === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === servoTarget), [nodes, servoTarget]);
+  const targetInHoldover = controlledServoNodes.length > 0 && controlledServoNodes.every((node) => node.servoEnabled === false);
+  const targetHasHoldover = controlledServoNodes.some((node) => node.servoEnabled === false);
+  const servoStatusLabel = targetInHoldover ? "HOLDOVER" : targetHasHoldover ? "MIXED" : "DISCIPLINED";
+  const holdoverElapsedSeconds = activeNode.holdoverStarted && telemetryStatus ? Math.max(0, Math.floor(telemetryStatus.timestamp - activeNode.holdoverStarted)) : null;
+  const selectedServoLabel = activeNode.role === "Grandmaster" ? "REFERENCE CLOCK" : `${activeNode.servoType?.toUpperCase() ?? "PTP"}${activeNode.servoEnabled === false ? " · FROZEN" : " SERVO"}`;
+  const selectedServoDescription = activeNode.servoType === "linreg" ? "Adaptive frequency regression" : activeNode.servoType === "nullf" ? "Zero frequency correction · SyncE" : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
+  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
   const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
   const newestSampleAge = newestSampleAt && telemetryStatus ? Math.max(0, telemetryStatus.timestamp - newestSampleAt) : null;
   const invalidWindowSamples = telemetryStatus?.clocks.reduce((total, clock) => total + clock.window_invalid_sample_count, 0) ?? 0;
+  const timingInterfaces = interfaceInventory.filter((item) => item.namespace);
+  const ptpCapableInterfaces = interfaceInventory.filter((item) => item.hardware_timestamping);
+  const activeLineRateMbps = interfaceInventory.reduce((total, item) => total + (item.carrier ? item.speed_mbps ?? 0 : 0), 0);
+  const hardwareClocks = new Set(interfaceInventory.map((item) => item.phc).filter(Boolean)).size;
+  const interfaceDrivers = [...new Set(interfaceInventory.map((item) => item.driver).filter((item): item is string => Boolean(item)))];
+  const hundredGigTimingPorts = timingInterfaces.filter((item) => item.speed_mbps === 100000).length;
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -487,12 +604,33 @@ export default function PTPBoxDashboard() {
     return { bins: counts.map((count) => (count / highest) * 100), min: minimum, max: maximum, sigma, p95, skew };
   }, [history, nodes]);
 
+  const holdoverMetrics = useMemo(() => {
+    if (!activeNode.holdoverStarted) return null;
+    const points = history
+      .filter((point) => point.t >= activeNode.holdoverStarted && Number.isFinite(point.values[activeNode.id]))
+      .map((point) => ({ t: point.t, offset: point.values[activeNode.id] }));
+    if (points.length < 2) return { driftPpb: null };
+    const origin = points[0].t;
+    const xs = points.map((point) => point.t - origin);
+    const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const meanY = points.reduce((sum, point) => sum + point.offset, 0) / points.length;
+    const denominator = xs.reduce((sum, value) => sum + (value - meanX) ** 2, 0);
+    const driftPpb = denominator ? points.reduce((sum, point, index) => sum + (xs[index] - meanX) * (point.offset - meanY), 0) / denominator : null;
+    return { driftPpb };
+  }, [activeNode.holdoverStarted, activeNode.id, history]);
+
   useEffect(() => {
     const updateClock = () => setTime(new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZoneName: "short" }).format(new Date()));
     updateClock();
     const timer = window.setInterval(updateClock, 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    void refreshInterfaces().catch(() => undefined);
+    const timer = window.setInterval(() => void refreshInterfaces().catch(() => undefined), 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshInterfaces]);
 
   useEffect(() => {
     let disposed = false;
@@ -552,6 +690,11 @@ export default function PTPBoxDashboard() {
         const newest = incoming.reduce((value, point) => Math.max(value, point.t), latestTelemetryAtRef.current);
         latestTelemetryAtRef.current = newest;
         setTelemetryStatus(payload);
+        const initialServo = payload.servo_control?.nodes?.BC7?.type;
+        if (!servoSelectionHydratedRef.current && initialServo) {
+          setServoType(initialServo);
+          servoSelectionHydratedRef.current = true;
+        }
         setConnection(payload.phc_mode);
         setNodes(nodesFromTelemetry(payload));
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
@@ -603,6 +746,70 @@ export default function PTPBoxDashboard() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!notificationsOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (notificationCenterRef.current && !notificationCenterRef.current.contains(event.target as Node)) setNotificationsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNotificationsOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [notificationsOpen]);
+
+  const notifications = useMemo<ObservatoryNotification[]>(() => {
+    const items: ObservatoryNotification[] = [];
+    const receivers = nodes.filter((node) => node.role !== "Grandmaster");
+    const holdover = receivers.filter((node) => node.state === "HOLDOVER");
+    const unhealthy = receivers.filter((node) => ["FAULTY", "STALE", "NO DATA", "UNLOCKED"].includes(node.state));
+
+    if (holdover.length) {
+      const names = holdover.map((node) => node.id).join(", ");
+      items.push({ id: `holdover-${names}`, level: "warn", title: `Holdover active on ${names}`, detail: "PHC adjustment is frozen; raw offset and drift measurement continue.", meta: "SERVO", section: "Overview", nodeId: holdover[0].id, icon: Pause });
+    }
+    if (unhealthy.length && connection !== "checking") {
+      const names = unhealthy.map((node) => node.id).join(", ");
+      items.push({ id: `clock-state-${unhealthy.map((node) => `${node.id}-${node.state}`).join("-")}`, level: "warn", title: `${unhealthy.length} receiver${unhealthy.length === 1 ? "" : "s"} need attention`, detail: `${names} · ${unhealthy.map((node) => node.state).join(" / ")}`, meta: "CLOCK STATE", section: "Overview", nodeId: unhealthy[0].id, icon: Zap });
+    }
+    if (invalidWindowSamples > 0) {
+      items.push({ id: `invalid-samples-${invalidWindowSamples}`, level: "warn", title: `${invalidWindowSamples} raw sample${invalidWindowSamples === 1 ? "" : "s"} rejected`, detail: "The original LinuxPTP values remain in the API but are excluded from RMS and charts.", meta: "MEASUREMENT", section: "Analytics", icon: Activity });
+    }
+
+    if (agentStatus?.running && connection === "live") {
+      const fresh = telemetryStatus?.phc_fresh_clocks ?? nodes.filter((node) => node.measured).length;
+      items.push({ id: "phc-stream-live", level: "info", title: "Raw PHC monitoring is live", detail: `${fresh}/${nodes.length} hardware clocks fresh · no smoothing or clock control`, meta: newestSampleAge == null ? "LIVE" : `${newestSampleAge.toFixed(1)} s AGO`, section: "Analytics", icon: Radio });
+    } else if (agentStatus?.running) {
+      items.push({ id: `stream-${connection}`, level: "warn", title: connection === "waiting" ? "Waiting for timing samples" : "Raw measurement stream is not live", detail: "The agent is running; check PTP process state and the latest LinuxPTP logs.", meta: connection.toUpperCase(), section: "Overview", icon: Activity });
+    } else if (agentStatus) {
+      items.push({ id: "cascade-stopped", level: "warn", title: "Timing cascade is stopped", detail: "Observation remains available, but no managed LinuxPTP processes are running.", meta: "SYSTEM", section: "Overview", icon: Square });
+    }
+
+    const locked = receivers.filter((node) => node.state === "LOCKED").length;
+    if (receivers.length && locked === receivers.length) {
+      items.push({ id: "all-receivers-locked", level: "good", title: "All downstream clocks are locked", detail: `${locked}/${receivers.length} receivers report LinuxPTP servo state s2.`, meta: "HEALTH", section: "Overview", icon: ShieldCheck });
+    }
+
+    const servoCounts = receivers.reduce<Record<string, number>>((counts, node) => {
+      const type = node.servoType?.toUpperCase();
+      if (type && node.servoEnabled !== false) counts[type] = (counts[type] ?? 0) + 1;
+      return counts;
+    }, {});
+    const servoSummary = Object.entries(servoCounts).map(([type, count]) => `${count} ${type}`).join(" · ");
+    if (servoSummary) {
+      const signature = Object.entries(servoCounts).map(([type, count]) => `${type}-${count}`).join("-");
+      items.push({ id: `servo-profile-${signature}`, level: "info", title: "Servo profile active", detail: servoSummary, meta: "CONFIGURATION", section: "Configuration", servoTarget: "all", icon: SlidersHorizontal });
+    }
+
+    return items.slice(0, 6);
+  }, [agentStatus, connection, invalidWindowSamples, newestSampleAge, nodes, telemetryStatus?.phc_fresh_clocks]);
+
+  const unreadNotificationCount = notifications.filter((item) => item.level === "warn" && !readNotificationIds.includes(item.id)).length;
+
   const stats = useMemo(() => {
     const final = nodes[nodes.length - 1];
     const values = history.flatMap((point) => Object.values(point.values)).filter(Number.isFinite);
@@ -611,7 +818,7 @@ export default function PTPBoxDashboard() {
     const locked = nodes.filter((node) => node.role !== "Grandmaster" && node.state === "LOCKED").length;
     if (connection !== "simulation") {
       return [
-        { label: "Endpoint PHC RMS", value: final.measured ? formatNanoseconds(final.rms) : "—", delta: "DIRECT", note: `${final.sampleCount} PHC reads`, icon: Activity, good: final.measured },
+        { label: "Endpoint servo RMS", value: final.ptpMeasured ? formatNanoseconds(final.rms) : "—", delta: "PTP RAW", note: `${final.servoSampleCount} valid offset samples`, icon: Activity, good: final.ptpMeasured },
         { label: "Peak PHC difference", value: values.length ? formatNanoseconds(peak) : "—", delta: "UNFILTERED", note: `${range} vs BC1`, icon: Zap, good: values.length > 0 },
         { label: "Locked receivers", value: `${locked}/${receiverCount}`, delta: telemetryStatus?.mode.toUpperCase() ?? "WAITING", note: "LinuxPTP servo state", icon: ShieldCheck, good: locked === receiverCount && receiverCount > 0 },
         { label: "PHC comparisons", value: history.length.toLocaleString(), delta: "NO CONTROL", note: "read-only browser buffer", icon: TimerReset, good: history.length > 0 },
@@ -628,6 +835,27 @@ export default function PTPBoxDashboard() {
   const selectNode = (id: string) => {
     setSelectedNode(id);
     setVisibleTraces((current) => (current.includes(id) ? current : [...current.slice(-3), id]));
+  };
+
+  const selectServoTarget = (target: string) => {
+    setServoTarget(target);
+    const targets = target === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === target);
+    const types = [...new Set(targets.map((node) => node.servoType).filter((value): value is ServoType => Boolean(value)))];
+    if (types.length === 1) setServoType(types[0]);
+  };
+
+  const openNotification = (item: ObservatoryNotification) => {
+    setReadNotificationIds((current) => current.includes(item.id) ? current : [...current, item.id]);
+    setNotificationsOpen(false);
+    setSection(item.section);
+    if (item.nodeId) selectNode(item.nodeId);
+    if (item.servoTarget) selectServoTarget(item.servoTarget);
+  };
+
+  const openEventLog = () => {
+    setReadNotificationIds((current) => [...new Set([...current, ...notifications.map((item) => item.id)])]);
+    setNotificationsOpen(false);
+    setSection("Event log");
   };
 
   const downloadRawCsv = () => {
@@ -666,6 +894,26 @@ export default function PTPBoxDashboard() {
     }
   };
 
+  const controlServo = async (enabled: boolean) => {
+    setServoBusy(true);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/servo/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: servoTarget, enabled, type: servoType }),
+      });
+      const result = await response.json() as { error?: string; changed?: string[] };
+      if (!response.ok) throw new Error(result.error || "servo transition failed");
+      const targets = result.changed?.join(", ") || servoTarget;
+      setToast(enabled ? `${targets}: ${servoType.toUpperCase()} discipline active` : `${targets}: holdover started · PHC monitoring continues`);
+      setAgentStatus((current) => current ? { ...current } : current);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Servo control is unavailable");
+    } finally {
+      setServoBusy(false);
+    }
+  };
+
   const handleApply = async () => {
     const payload = {
       profile,
@@ -676,7 +924,7 @@ export default function PTPBoxDashboard() {
       two_step: twoStep,
       hardware_timestamping: hardwareTs,
       servo: {
-        type: "pi",
+        type: servoType,
         kp,
         ki,
         step_threshold_ns: stepThreshold,
@@ -711,7 +959,7 @@ export default function PTPBoxDashboard() {
         await fetch(`${agentBaseUrl()}/api/experiments/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "step", target: "BC4", amplitude_ns: 1000, duration_s: 120, servo: { kp, ki, step_threshold_ns: stepThreshold } }),
+          body: JSON.stringify({ type: "step", target: "BC7", amplitude_ns: 1000, duration_s: 120, servo: { kp, ki, step_threshold_ns: stepThreshold } }),
         });
       } catch {
         setToast("Experiment is running locally; host capture could not be staged");
@@ -725,7 +973,7 @@ export default function PTPBoxDashboard() {
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
     { label: "Configuration", icon: SlidersHorizontal },
-    { label: "Event log", icon: Terminal, badge: "6" },
+    { label: "Event log", icon: Terminal, badge: unreadNotificationCount ? String(unreadNotificationCount) : undefined },
   ];
 
   return (
@@ -772,8 +1020,34 @@ export default function PTPBoxDashboard() {
           <div className="topbar-actions">
             <button className="search-box" type="button"><Search size={15} /><span>Search or jump to…</span><kbd>⌘ K</kbd></button>
             <span className="utc-clock"><Clock3 size={14} /> {time || "--:--:--"}</span>
-            <button className="icon-button notification" type="button" aria-label="Notifications"><Bell size={17} /><i /></button>
-            <button className="primary-action" type="button" onClick={() => setApplyOpen(true)}><SlidersHorizontal size={15} /> Apply settings</button>
+            <div className="notification-center" ref={notificationCenterRef}>
+              <button className={`icon-button notification ${notificationsOpen ? "open" : ""}`} type="button" aria-label={`Notifications, ${unreadNotificationCount} unread`} aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => setNotificationsOpen((value) => !value)}>
+                <Bell size={17} />
+                {unreadNotificationCount > 0 && <span className="notification-count warning">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
+              </button>
+              {notificationsOpen && (
+                <section className="notification-panel" id="notification-panel" aria-label="Notification center">
+                  <header className="notification-panel-header">
+                    <div><span className="section-kicker">LIVE OBSERVATORY</span><strong>Notifications</strong></div>
+                    <div>
+                      <button type="button" className="notification-mark-read" disabled={!unreadNotificationCount} onClick={() => setReadNotificationIds((current) => [...new Set([...current, ...notifications.map((item) => item.id)])])}>Mark all read</button>
+                      <button type="button" className="notification-close" aria-label="Close notifications" onClick={() => setNotificationsOpen(false)}><X size={15} /></button>
+                    </div>
+                  </header>
+                  <div className="notification-list">
+                    {notifications.map((item) => (
+                      <button type="button" className={`notification-item ${item.level} ${item.level === "warn" ? readNotificationIds.includes(item.id) ? "read" : "unread" : "status"}`} key={item.id} onClick={() => openNotification(item)}>
+                        <span className="notification-symbol"><item.icon size={15} /></span>
+                        <span className="notification-copy"><span>{item.meta}</span><strong>{item.title}</strong><small>{item.detail}</small></span>
+                        <ArrowRight size={14} />
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" className="notification-footer" onClick={openEventLog}><Terminal size={14} /> Open full event log <ArrowRight size={13} /></button>
+                </section>
+              )}
+            </div>
+            <button className="primary-action" type="button" onClick={() => { setNotificationsOpen(false); setApplyOpen(true); }}><SlidersHorizontal size={15} /> Apply settings</button>
           </div>
         </header>
 
@@ -791,8 +1065,8 @@ export default function PTPBoxDashboard() {
           </div>
 
           <div className={`data-provenance ${connection}`}>
-            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "DIRECT PHC COMPARISON"}</span>
-            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : "read-only · raw=true · smoothing=none"}</code>
+            <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "CROSS-TIMESTAMPED PHC COMPARISON"}</span>
+            <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : activeNode.phcMethod ?? "read-only kernel cross timestamps"}</code>
             <span>{history.length.toLocaleString()} PHC samples buffered</span>
             {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} ptp4l samples rejected</span>}
             <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
@@ -821,7 +1095,7 @@ export default function PTPBoxDashboard() {
                     {nodes.map((node, index) => (
                       <div className="node-unit" key={node.id}>
                         {index > 0 && <div className="hop-link"><span className="signal-dot one" /><span className="signal-dot two" /><small>H{index} · {formatOffset(node.hopOffset ?? 0, node.measured)}</small></div>}
-                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
+                        <button type="button" onClick={() => selectNode(node.id)} className={`clock-node ${selectedNode === node.id ? "selected" : ""} ${node.state === "TRACKING" ? "tracking" : ""} ${node.state === "HOLDOVER" ? "holdover" : ""} ${node.state === "FAULTY" ? "faulty" : ""} ${node.state === "STALE" || node.state === "NO DATA" ? "stale" : ""}`}>
                           <div className="node-topline"><span>{node.role === "Boundary" ? "BC" : node.role === "Grandmaster" ? "GM" : "OC"}</span><i style={{ background: node.color }} /></div>
                           <div className="node-symbol"><Clock3 size={20} strokeWidth={1.4} /><span className="pulse-ring" /></div>
                           <strong>{node.label}</strong>
@@ -863,7 +1137,7 @@ export default function PTPBoxDashboard() {
                     <span className="chart-unit">PHC Δ VS BC1 · AUTO-SCALED</span>
                   </div>
                   <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Every point is a direct, read-only PHC comparison. No phc2sys loop, smoothing, or interpolation is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch; BC1 is interpolated only between its two bracketing reads. No phc2sys loop or time-series smoothing is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">
@@ -872,18 +1146,22 @@ export default function PTPBoxDashboard() {
                     <button className="more-button" type="button">•••</button>
                   </div>
                   <div className="selected-status">
-                    <div className="radial-score"><span>{activeNode.measured ? activeNode.sampleCount : 0}</span><small>SAMPLES</small></div>
-                    <div><span className="locked-pill"><Check size={12} /> {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
+                    <div className="radial-score"><span>{activeNode.ptpMeasured ? activeNode.servoSampleCount : 0}</span><small>PTP SAMPLES</small></div>
+                    <div><span className={`locked-pill ${activeNode.state === "HOLDOVER" ? "holdover" : ""}`}>{activeNode.state === "HOLDOVER" ? <Pause size={12} /> : <Check size={12} />} {activeNode.state}</span><strong>{formatOffset(activeNode.offset, activeNode.measured)}</strong><small>direct PHC difference vs BC1 · {activeNode.phc}</small></div>
                   </div>
                   <div className="selected-metrics">
-                    <div><span>PHC window RMS</span><strong>{activeNode.measured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
+                    <div><span>Servo offset RMS</span><strong>{activeNode.ptpMeasured ? formatNanoseconds(activeNode.rms) : "—"}</strong></div>
                     <div><span>Previous-hop PHC Δ</span><strong>{formatOffset(activeNode.hopOffset ?? 0, activeNode.measured)}</strong></div>
                     <div><span>PTP path delay</span><strong>{activeNode.ptpMeasured ? `${activeNode.meanPathDelay} ns` : "—"}</strong></div>
                     <div><span>PTP frequency adj.</span><strong>{activeNode.ptpMeasured ? `${activeNode.frequencyPpb >= 0 ? "+" : ""}${activeNode.frequencyPpb.toFixed(1)} ppb` : "—"}</strong></div>
+                    <div><span>Comparison error bound</span><strong>{activeNode.phcUncertainty == null ? "—" : `≤ ${formatNanoseconds(activeNode.phcUncertainty)}`}</strong></div>
+                    <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
+                    <div><span>Servo mode</span><strong>{activeNode.role === "Grandmaster" ? "REFERENCE" : activeNode.servoEnabled === false ? "HOLDOVER" : activeNode.servoType?.toUpperCase() ?? "—"}</strong></div>
+                    <div><span>Holdover drift{holdoverElapsedSeconds == null ? "" : ` · ${holdoverElapsedSeconds} s`}</span><strong>{holdoverMetrics?.driftPpb == null ? "—" : `${holdoverMetrics.driftPpb >= 0 ? "+" : ""}${holdoverMetrics.driftPpb.toFixed(2)} ppb`}</strong></div>
                   </div>
                   <div className="servo-mini">
-                    <div><span>PI SERVO</span><strong>K<sub>p</sub> {kp.toFixed(2)} · K<sub>i</sub> {ki.toFixed(2)}</strong></div>
-                    <div className="servo-rail"><i style={{ width: `${kp * 76}%` }} /></div>
+                    <div><span>{selectedServoLabel}</span><strong>{selectedServoDescription}</strong></div>
+                    <div className="servo-rail"><i style={{ width: `${selectedServoRail}%` }} /></div>
                   </div>
                   <button className="full-secondary" type="button" onClick={() => setSection("Configuration")}><Settings2 size={14} /> Tune this clock <ArrowRight size={14} /></button>
                 </section>
@@ -904,16 +1182,16 @@ export default function PTPBoxDashboard() {
                 <LineChart data={history} selected={visibleTraces.length ? visibleTraces : nodes.length ? [nodes[nodes.length - 1].id] : []} nodes={nodes} />
               </section>
               <section className="instrument-panel distribution-panel">
-                <div className="panel-heading"><div><span className="section-kicker">DISTRIBUTION</span><h2>Endpoint PHC difference density</h2></div><span className="quality-badge">RAW</span></div>
+                <div className="panel-heading"><div><span className="section-kicker">KERNEL CROSS TIMESTAMPS</span><h2>Endpoint PHC difference distribution</h2></div><span className="quality-badge">COMMON EPOCH</span></div>
                 <div className="histogram" aria-label="Raw endpoint offset histogram">{endpointDistribution.bins.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>raw samples</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
-                <div className="distribution-stats"><div><span>σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
+                <div className="hist-axis"><span>{formatNanoseconds(endpointDistribution.min)}</span><span>common-epoch PHC comparisons · not servo RMS</span><span>{formatNanoseconds(endpointDistribution.max)}</span></div>
+                <div className="distribution-stats"><div><span>PHC Δ σ</span><strong>{formatNanoseconds(endpointDistribution.sigma)}</strong></div><div><span>PHC Δ P95</span><strong>{formatNanoseconds(endpointDistribution.p95)}</strong></div><div><span>Skew</span><strong>{endpointDistribution.skew.toFixed(2)}</strong></div></div>
               </section>
               <section className="instrument-panel hop-table-panel">
                 <div className="panel-heading"><div><span className="section-kicker">PHC + SERVO DATA</span><h2>Read-only clock comparisons</h2></div><span className="panel-meta">{range} raw window</span></div>
                 <div className="data-table hop-table">
-                  <div className="table-header"><span>Clock / PHC</span><span>Δ vs BC1</span><span>Hop Δ</span><span>PHC RMS</span><span>PTP frequency</span><span>PHC reads</span><span>PTP state</span></div>
-                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{formatOffset(node.hopOffset ?? 0, node.measured)}</span><span>{node.measured ? formatNanoseconds(node.rms) : "—"}</span><span>{node.ptpMeasured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.sampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
+                  <div className="table-header"><span>Clock / PHC</span><span>Δ vs BC1</span><span>Hop Δ</span><span>Servo RMS</span><span>PTP frequency</span><span>PTP samples</span><span>PTP state</span></div>
+                  {nodes.slice(1).map((node) => <button type="button" className="table-row" key={node.id} onClick={() => selectNode(node.id)}><span><i style={{ background: node.color }} />{node.label}<small>{node.phc}</small></span><strong>{formatOffset(node.offset, node.measured)}</strong><span>{formatOffset(node.hopOffset ?? 0, node.measured)}</span><span>{node.ptpMeasured ? formatNanoseconds(node.rms) : "—"}</span><span>{node.ptpMeasured ? `${node.frequencyPpb.toFixed(1)} ppb` : "—"}</span><span>{node.servoSampleCount.toLocaleString()}</span><em className={node.state === "LOCKED" ? "state-good" : node.state === "NO DATA" || node.state === "STALE" ? "state-off" : "state-warn"}>{node.state}</em></button>)}
                 </div>
               </section>
             </div>
@@ -958,20 +1236,20 @@ export default function PTPBoxDashboard() {
           {section === "Interfaces" && (
             <div className="interfaces-layout">
               <div className="interface-summary">
-                <article><Cpu size={18} /><span>PTP-capable ports</span><strong>16</strong><small>14 cascade · 2 utility</small></article>
-                <article><Gauge size={18} /><span>Aggregate line rate</span><strong>1.2 Tb/s</strong><small>10 × 100G · 4 × 50G · 1 × 1G</small></article>
-                <article><Clock3 size={18} /><span>Hardware clocks</span><strong>15</strong><small>All precise IEEE 1588 quality</small></article>
-                <article><Network size={18} /><span>Drivers</span><strong>3</strong><small>mlx5_core · ice · ixgbe</small></article>
+                <article><Cpu size={18} /><span>PTP-capable ports</span><strong>{ptpCapableInterfaces.length}</strong><small>{timingInterfaces.length} cascade · {interfaceInventory.length - timingInterfaces.length} host</small></article>
+                <article><Gauge size={18} /><span>Active line rate</span><strong>{formatLineRate(activeLineRateMbps)}</strong><small>{hundredGigTimingPorts} × 100G timing · management separate</small></article>
+                <article><Clock3 size={18} /><span>Hardware clocks</span><strong>{hardwareClocks}</strong><small>Distinct PHC device providers</small></article>
+                <article><Network size={18} /><span>Drivers</span><strong>{interfaceDrivers.length}</strong><small>{interfaceDrivers.join(" · ") || "Awaiting inventory"}</small></article>
               </div>
               <section className="instrument-panel interface-table-panel">
-                <div className="panel-heading"><div><span className="section-kicker">LIVE INVENTORY</span><h2>Physical interfaces & PHCs</h2></div><div className="panel-tools"><span className="scan-time"><RefreshCw size={13} /> Discovered 8 s ago</span><button className="quiet-button">Rescan</button></div></div>
+                <div className="panel-heading"><div><span className="section-kicker">LIVE INVENTORY</span><h2>Physical interfaces & PHCs</h2></div><div className="panel-tools"><span className="scan-time"><RefreshCw size={13} /> {interfaceUpdatedAt === null ? "Hardware model" : "Live host snapshot"}</span><button className="quiet-button" type="button" onClick={() => void refreshInterfaces().catch(() => setToast("Live interface rescan unavailable"))}>Rescan</button></div></div>
                 <div className="interface-map">
                   <div className="interface-map-labels">{nodes.map((node) => <span key={node.id}>{node.label}</span>)}</div>
                   <div className="interface-map-line">{Array.from({ length: nodes.length * 2 }).map((_, index) => <i key={index} className={index % 2 ? "in" : "out"} />)}</div>
                 </div>
                 <div className="data-table interface-table">
                   <div className="table-header"><span>Interface</span><span>Assignment</span><span>Link</span><span>PHC</span><span>Timestamping</span><span>Driver</span><span>State</span></div>
-                  {INTERFACES.map((item, index) => <div className="table-row" key={item[0]}><span><i className={`port-icon ${item[4] === "UP" ? "up" : "down"}`} /> <strong>{item[0]}</strong><small>0000:{index < 2 ? "19" : index < 4 ? "1a" : index < 6 ? "1b" : index < 8 ? "1c" : `${67 + Math.floor((index - 8) / 2)}`}:00.{index % 2}</small></span><span>{item[1]}</span><strong>{item[2]}</strong><code>/dev/{item[3]}</code><span><ShieldCheck size={13} /> HW TX/RX</span><span>{index === 2 || index === 3 ? "ice" : index > 13 ? "ixgbe" : "mlx5_core"}</span><em className={item[4] === "UP" ? "state-good" : "state-off"}>{item[4]}</em></div>)}
+                  {interfaceInventory.map((item) => <div className="table-row" key={item.name}><span><i className={`port-icon ${item.carrier ? "up" : "down"}`} /> <strong>{item.name}</strong><small>{item.bus ?? item.namespace ?? "host"}</small></span><span>{item.assignment ?? item.namespace ?? "UNASSIGNED"}</span><strong>{formatLineRate(item.speed_mbps)}</strong><code>{item.phc ? `/dev/${item.phc}` : "—"}</code><span>{item.hardware_timestamping ? <><ShieldCheck size={13} /> HW TX/RX</> : "—"}</span><span>{item.driver ?? "—"}</span><em className={item.carrier ? "state-good" : "state-off"}>{item.carrier ? "LINK" : item.state === "DOWN" ? "DOWN" : "NO LINK"}</em></div>)}
                 </div>
               </section>
             </div>
@@ -995,14 +1273,19 @@ export default function PTPBoxDashboard() {
                   </div>
                 </section>
                 <section className="instrument-panel config-section">
-                  <div className="panel-heading"><div><span className="section-kicker">SERVO</span><h2>Clock discipline</h2></div><button className="quiet-button">Copy to all</button></div>
+                  <div className="panel-heading"><div><span className="section-kicker">SERVO & HOLDOVER</span><h2>Clock discipline</h2></div><span className={`quality-badge ${targetHasHoldover ? "holdover" : ""}`}>{servoStatusLabel}</span></div>
                   <div className="form-grid">
-                    <label><span>Servo type</span><button className="select-control" type="button">PI controller <ChevronDown size={14} /></button></label>
-                    <label><span>Target</span><button className="select-control" type="button">All boundary clocks <ChevronDown size={14} /></button></label>
+                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>LinuxPTP native servo implementation.</small></label>
+                    <label><span>Target</span><select className="select-control" value={servoTarget} onChange={(event) => selectServoTarget(event.target.value)}><option value="all">All downstream clocks</option>{nodes.filter((node) => node.role !== "Grandmaster").map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select><small>Holdover can be isolated to one cascade stage.</small></label>
                     <label><span>Proportional constant</span><div className="input-unit"><input value={kp.toFixed(2)} onChange={(event) => setKp(Number(event.target.value))} /><em>Kp</em></div></label>
                     <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
                     <label><span>First-step threshold</span><div className="input-unit"><input value="20,000" readOnly /><em>ns</em></div></label>
                     <label><span>Step threshold</span><div className="input-unit"><input value={stepThreshold} onChange={(event) => setStepThreshold(Number(event.target.value))} /><em>ns</em></div></label>
+                  </div>
+                  <div className="servo-live-control">
+                    <div><strong>{targetInHoldover ? "Holdover observation active" : targetHasHoldover ? "Mixed discipline state" : "Clock discipline active"}</strong><span>{targetInHoldover ? "PTP messages, raw offsets, and PHC comparisons continue while clock adjustments are frozen." : targetHasHoldover ? "Some selected clocks are in holdover; apply a servo to resume all, or enter holdover for a coordinated comparison." : `${servoType.toUpperCase()} will discipline ${servoTarget === "all" ? "all downstream clocks" : servoTarget}.`}</span></div>
+                    <button className="full-secondary" type="button" disabled={servoBusy || !agentStatus?.running || targetInHoldover} onClick={() => void controlServo(false)}><Pause size={14} /> {servoBusy ? "Transitioning…" : "Enter holdover"}</button>
+                    <button className="primary-action" type="button" disabled={servoBusy || !agentStatus?.running} onClick={() => void controlServo(true)}><Play size={14} /> {servoBusy ? "Applying…" : targetInHoldover ? "Resume servo" : "Apply & run"}</button>
                   </div>
                 </section>
                 <section className="instrument-panel config-section">
@@ -1042,7 +1325,7 @@ export default function PTPBoxDashboard() {
           <button className="modal-backdrop" onClick={() => setApplyOpen(false)} aria-label="Close review" />
           <section className="apply-drawer">
             <div className="drawer-heading"><div><span className="section-kicker">SAFE APPLY</span><h2 id="apply-title">Review configuration</h2></div><button className="icon-button" onClick={() => setApplyOpen(false)} aria-label="Close"><X size={18} /></button></div>
-            <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>16 interfaces available · 8 clocks responsive · rollback ready</span></div></div>
+            <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>{interfaceInventory.length} interfaces available · {hardwareClocks} clocks responsive · rollback ready</span></div></div>
             <div className="change-list">
               <div><span>Target</span><strong>BC–01 through BC–06</strong></div>
               <div><span>Proportional constant</span><p><del>0.50</del><ArrowRight size={13} /><ins>{kp.toFixed(2)}</ins></p></div>

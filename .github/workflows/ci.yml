@@ -43,7 +43,7 @@ jobs:
 
       - name: Validate Python
         run: |
-          python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py
+          python3 -m py_compile agent/ptpbox_agent.py scripts/ptpboxctl.py scripts/probe-cabling.py
           python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Validate shell

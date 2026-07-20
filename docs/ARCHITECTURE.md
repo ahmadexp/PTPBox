@@ -13,7 +13,7 @@ The React application in `app/` is a client-side instrument UI. It renders:
 - the cascade and selected-clock detail;
 - live or modeled offset traces on Canvas;
 - stability and per-hop error analysis;
-- experiment design and PI-servo tuning;
+- experiment design, selectable servo control, and measured holdover;
 - interface/PHC inventory;
 - guarded configuration review;
 - event and session summaries.
@@ -31,12 +31,14 @@ The same component has two build targets:
 `agent/ptpbox_agent.py` uses only the Python standard library. It runs as the
 operator account and reads:
 
-- `/sys/class/net` for link, driver, bus, MAC, speed, and PHC data;
+- `/sys/class/net` for host-namespace link, driver, bus, MAC, speed, and PHC data;
 - `ethtool -T` when sysfs does not expose a distinct PHC;
 - `ip netns list` for namespace state;
 - `ps` for active `ptp4l` processes;
-- `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map;
-- mapped `/dev/ptp*` clocks for one-hertz, read-only midpoint comparisons;
+- `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map and the
+  timing-interface metadata captured inside each namespace;
+- mapped `/dev/ptp*` clocks for one-hertz, read-only kernel cross-timestamp
+  comparisons;
 - raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
   `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo
   state.
@@ -47,7 +49,7 @@ It also serves the standalone application and stages JSON configuration under
 The browser requests an initial raw window and then polls incrementally with a
 `since` cursor. Direct PHC comparisons and LinuxPTP diagnostics retain their
 native timestamps. Missing samples are rendered as gaps; no moving average,
-interpolation, or synthetic fill is applied in live mode.
+time-series interpolation, or synthetic fill is applied in live mode.
 
 ### Lifecycle helper
 
@@ -59,6 +61,10 @@ interpolation, or synthetic fill is applied in live mode.
 - start/stop LinuxPTP processes;
 - generate role-specific `ptp4l` configuration;
 - run one two-port boundary-clock process for every intermediate NIC;
+- apply PI, linear-regression, or null-frequency discipline to one receiver or
+  every downstream clock;
+- enter LinuxPTP `free_running` holdover while keeping both PTP diagnostics and
+  the independent PHC comparison sampler alive;
 - write the authoritative PHC measurement map for the unprivileged agent;
 - never run a local PHC discipline loop—the NICs synchronize only through
   `ptp4l` over the physical chain;
@@ -81,21 +87,31 @@ priority 30 to the driver's timestamp workers. The reference cascade uses the
 original project's one Sync per second cadence to avoid overdriving a shared
 multi-port timestamp engine.
 
-The web sudo policy permits only `start`, `stop`, `restart`, and `status` with no
-additional arguments. `setup` and `teardown` remain manual root operations.
+The web sudo policy permits only `start`, `stop`, `restart`, `status`, and
+`servo` with no additional arguments. The agent validates and atomically stages
+the servo request before invoking that fixed verb. `setup` and `teardown` remain
+manual root operations.
 The observation service uses `KillMode=process`, so restarting or upgrading the
 web agent does not terminate the separately tracked timing processes.
+
+The service shares the host filesystem mount view. Named network namespaces are
+`nsfs` mounts under `/run/netns`; hiding them in a short-lived service mount
+namespace would make a later web-agent restart lose the handles. The API still
+runs as an unprivileged account, and its only root path is the exact-command
+sudo allowlist. During upgrades from older sandboxed units, the controller can
+borrow a surviving managed `ptp4l` process's mount view so the cascade remains
+controllable without a data-plane restart.
 
 ## Data plane
 
 The reference host's physically verified seven-node sequence is:
 
 ```text
-BC1 → BC2 → BC7 → BC6 → BC5 → BC3 → BC4
+BC1 → BC2 → BC3 → BC4 → BC5 → BC6 → BC7
 GM       boundary clocks                    OC
 ```
 
-The final BC4-to-BC1 cable closes the physical ring but carries no PTP process;
+The final BC7-to-BC1 cable closes the physical ring but carries no PTP process;
 it is the deliberate logical break that prevents a timing loop.
 
 Each node receives two physical ports. PTP is transported directly over Layer 2
@@ -114,11 +130,20 @@ hardware-synchronizes its port clocks naturally propagates time. If a card
 exposes genuinely independent PHCs, their divergence remains visible instead
 of being concealed by a host-side control loop.
 
-The PHC sampler opens each mapped `/dev/ptp*` read-only. For every target it
-reads BC1, the target, then BC1 again, and compares the target with the midpoint
-of the two BC1 reads. It reports both cumulative difference from BC1 and the
-difference from the previous NIC. This is measurement only: no adjustment,
-frequency command, or phase step is issued.
+The PHC sampler opens each mapped `/dev/ptp*` read-only and uses the Linux
+`PTP_SYS_OFFSET_EXTENDED` ioctl. Each call requests nine kernel-bracketed
+PHC/system pairs and keeps the pair with the shortest pre/post interval, the
+same estimator used by LinuxPTP. `CLOCK_MONOTONIC_RAW` supplies a common,
+step-free system reference. BC1 is sampled before and after the targets; its
+PHC-to-system offset is interpolated to each target's exact measurement epoch
+before the large integer clock offsets are subtracted. This removes read-order
+latency without disciplining any clock.
+
+If available, the agent prefers `PTP_SYS_OFFSET_PRECISE`; older kernels fall
+back through extended `CLOCK_REALTIME` measurements to a userspace midpoint.
+The API identifies the selected method, shortest kernel bracket, and a
+conservative comparison-error bound for every sample. The UI keeps PHC
+comparison dispersion separate from LinuxPTP servo RMS.
 
 ## Control flow
 
@@ -143,6 +168,12 @@ sequenceDiagram
     P-->>A: LinuxPTP logs
     A->>N: Read mapped PHCs without adjustment
     A-->>UI: PHC comparisons, servo telemetry, process state
+    Operator->>UI: Enter holdover on BC7
+    UI->>A: POST /api/servo/control
+    A->>C: sudo -n ptpboxctl servo
+    C->>P: Restart BC7 with free_running 1
+    P-->>A: Sync offsets continue; PHC is not adjusted
+    A-->>UI: Raw drift while monitoring stays live
 ```
 
 ## State and files
@@ -152,7 +183,7 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs and read-only PHC map |
+| `/run/ptpbox` | root | boot | managed process IDs, servo state, and read-only PHC map |
 | `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible generated LinuxPTP config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |
@@ -185,8 +216,10 @@ deterministic demonstration model. No control operation is attempted.
 - Configuration is validated and serialized as JSON.
 - `ptpboxctl` never executes user-provided shell text.
 - The controller refuses overlap between assigned and management interfaces.
-- The systemd service uses `ProtectSystem=strict`, `ProtectHome=read-only`, and
-  the `clock` supplementary group for read-only PHC device access.
+- The systemd service is unprivileged and receives only the `clock`
+  supplementary group for read-only PHC device access.
+- Root control is restricted to five exact `ptpboxctl` command lines; the HTTP
+  agent cannot supply controller arguments or shell text.
 - Public exposure requires a separate authenticated TLS reverse proxy.
 
 See [`SECURITY.md`](../SECURITY.md) for deployment policy.

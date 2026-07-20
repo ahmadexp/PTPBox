@@ -39,15 +39,23 @@ test("ships the live-agent and standalone-host surfaces", async () => {
 
   assert.match(page, /\/api\/status/);
   assert.match(page, /\/api\/telemetry/);
-  assert.match(page, /read-only · raw=true · smoothing=none/);
-  assert.match(page, /direct, read-only PHC comparison/i);
+  assert.match(page, /read-only kernel cross timestamps/);
+  assert.match(page, /Kernel cross timestamps place every PHC at a common epoch/i);
   assert.match(page, /Analytics/);
   assert.match(page, /Experiments/);
   assert.match(page, /Interfaces/);
   assert.match(page, /Configuration/);
+  assert.match(page, /\/api\/servo\/control/);
+  assert.match(page, /Linear regression/);
+  assert.match(page, /Enter holdover/);
+  assert.match(page, /Notification center/);
+  assert.match(page, /Mark all read/);
+  assert.match(page, /Open full event log/);
   assert.match(layout, /PTPBox — Precision Time Lab/);
   assert.match(agent, /\/api\/telemetry/);
   assert.match(agent, /\/api\/config\/apply/);
+  assert.match(agent, /\/api\/servo\/control/);
+  assert.match(agent, /PTP_SYS_OFFSET_EXTENDED/);
   assert.match(packageJson, /build:standalone/);
   assert.match(standalone, /PTPBox — Precision Time Lab/);
 });

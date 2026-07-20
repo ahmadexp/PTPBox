@@ -35,7 +35,7 @@ configuration, and an explicit simulation fallback for demos.
 
 ## See timing error grow, hop by hop
 
-<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing an eight-clock cascade and accumulated offset traces" width="100%">
+<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing a seven-clock cascade and accumulated offset traces" width="100%">
 
 The first viewport is the experiment: GM to OC, measured one hardware clock at
 a time. Select any node to isolate its direct PHC difference from BC1, per-hop
@@ -48,7 +48,7 @@ PHC delta, LinuxPTP path delay, frequency adjustment, and servo state.
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
-| **Servo tuning** | Adjust PI gains and thresholds, preview behavior, validate, stage, and roll changes through the chain. |
+| **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Event stream** | Follow clock-state transitions, measurement windows, threshold events, and operator actions. |
 | **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
@@ -127,22 +127,26 @@ flowchart LR
     Agent --> Inventory
     Agent --> Logs
     Agent --> PHCs
-    Agent -. "sudo: start / stop / restart / status only" .-> Helper
+    Agent -. "sudo: fixed lifecycle + servo verbs" .-> Helper
     Helper --> NS
     NS --> PTP
 ```
 
 The agent runs as the operator, not root. Observation stays unprivileged.
-Lifecycle control crosses a narrow sudo boundary that accepts four fixed
+Lifecycle control crosses a narrow sudo boundary that accepts five fixed
 commands and no arbitrary arguments. See [Architecture](docs/ARCHITECTURE.md)
 and [Security](SECURITY.md).
 
 ## What gets measured
 
-- Direct PHC difference and PHC RMS for each NIC relative to BC1
+- Common-epoch PHC difference for each NIC relative to BC1, using the best of
+  nine kernel cross timestamps and an interpolated BC1 reference
+- Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC comparison
+  dispersion and its reported error bound
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
 - Lock/tracking state and recovery events
+- Holdover elapsed time and frequency drift from the continuing raw PHC trace
 - MTIE windows and mask verdicts
 - Offset distribution, P95, skew, and contribution share
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
@@ -154,11 +158,16 @@ UI switches to its deterministic hardware-model mode.
 
 ## Hardware
 
-The reference host uses seven dual-port timing-capable adapters for the cascade
-plus separate management ports. Each adapter is isolated in its own namespace.
+The current reference host uses seven dual-port ConnectX-6 Dx adapters with all
+fourteen timing links at 100G, plus a separate Intel X550 management adapter.
+Each timing adapter is isolated in its own namespace.
 PTPBox never hides a split-clock card with a local synchronization loop: if its
 ports do not share or hardware-synchronize a PHC, the direct comparison exposes
 that difference as part of the experiment.
+
+ConnectX cards must have device-wide real-time clock mode enabled and loaded by
+a supported firmware reset. The [hardware guide](docs/HARDWARE.md) includes the
+verified setting, reset sequence, current PCI/PHC map, and cable-probe workflow.
 
 <table>
   <tr>
@@ -199,9 +208,10 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory, direct incremental PHC comparison pipeline, raw LinuxPTP servo
-telemetry, standalone host, inventory agent, configuration staging, and guarded
-lifecycle controller are implemented. The next milestones are durable
+The Observatory, selectable live servos, measured holdover, direct incremental
+PHC comparison pipeline, raw LinuxPTP servo telemetry, standalone host,
+inventory agent, configuration staging, and guarded lifecycle controller are
+implemented. The next milestones are durable
 experiment storage, PPS comparison datasets, automated MTIE/TDEV/Allan
 deviation, and reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
 

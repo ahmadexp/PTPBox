@@ -11,6 +11,7 @@ that can create namespaces and run LinuxPTP processes.
 - Python 3.11 or newer
 - LinuxPTP 4.x (`ptp4l` and optionally `pmc`)
 - `iproute2`, `ethtool`, `systemd`, and `sudo`
+- `mstflint` when ConnectX firmware clock mode must be inspected or changed
 - Two timing-capable ports per boundary-clock stage
 - A separate management interface that is never assigned to a PTP namespace
 
@@ -69,6 +70,12 @@ done
 Record the management interface first. Verify that the SSH session uses that
 interface and that it is not part of the timing chain.
 
+After changing ConnectX hardware, also verify `REAL_TIME_CLOCK_ENABLE=1` and
+perform the supported firmware reset described in the
+[hardware guide](HARDWARE.md#connectx-6-dx-real-time-clock-mode). A normal
+LinuxPTP lock does not prove that two independently exposed port PHCs share a
+continuous hardware time domain.
+
 ### 2. Define the topology
 
 Edit [`agent/topology.json`](../agent/topology.json). Each node represents one
@@ -110,11 +117,18 @@ The installer:
 3. copies the topology to `/etc/ptpbox/topology.json`;
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
-6. validates a sudoers policy for `start`, `stop`, `restart`, and `status` only;
+6. validates a sudoers policy for fixed `start`, `stop`, `restart`, `status`,
+   and validated `servo` operations only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
 8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
-9. starts the web service on port 8090.
+9. installs a systemd-tmpfiles rule so `/run/netns` and `/run/ptpbox` are
+   recreated after every reboot, before the agent starts;
+10. starts the web service on port 8090.
+
+The service starts after `network.target`, not `network-online.target`.
+Timing interfaces intentionally have no IP configuration, so waiting for every
+NetworkManager connection to become routable would deadlock host startup.
 
 ### 4. Verify the control plane
 
@@ -152,6 +166,27 @@ from the downstream port as a true boundary clock. The controller records each
 port's timestamp provider in `/run/ptpbox/phcs.json`. The agent reads the
 selected NIC PHCs through the `clock` group and compares them to BC1 without
 modifying them.
+
+## Servo selection and measured holdover
+
+Open **Configuration → Clock discipline** to select a downstream clock (or all
+downstream clocks) and choose one of:
+
+- **PI controller** — LinuxPTP's standard proportional-integral servo;
+- **Linear regression** — LinuxPTP's adaptive regression servo;
+- **Null frequency** — forces zero frequency correction for a SyncE-backed
+  diagnostic setup.
+
+**Enter holdover** restarts only the selected clock with `free_running 1`.
+LinuxPTP keeps receiving PTP messages and logging raw master offsets, while the
+PHC comparison sampler keeps measuring every clock at one hertz. The UI derives
+holdover drift from those real PHC samples. **Resume servo** applies the chosen
+implementation with `free_running 0` and shows acquisition through `s0`, `s1`,
+and `s2` lock states.
+
+This is clock-servo holdover, not a simulated graph and not a stopped timing
+process. A servo transition causes a brief restart of the selected `ptp4l`
+instance because LinuxPTP does not switch `clock_servo` dynamically.
 
 ## Stop and restore
 
