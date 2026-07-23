@@ -298,6 +298,54 @@ type ResearchPayload = {
     diagonal_lines?: number;
     threshold_sigma?: number;
   };
+  bifurcation: {
+    status: string;
+    samples?: number;
+    parameter?: string;
+    parameter_min?: number;
+    parameter_max?: number;
+    current_gain_scale?: number;
+    base_gains?: { kp: number; ki: number };
+    active_controller?: string;
+    baseline_is_live?: boolean;
+    points?: Array<{
+      gain_scale: number;
+      residual_ns: number;
+      stable: boolean;
+      regime: string;
+      branch: number;
+      clipped?: boolean;
+    }>;
+    summaries?: Array<{
+      gain_scale: number;
+      kp: number;
+      ki: number;
+      stable: boolean;
+      regime: string;
+      branch_count: number;
+      tail_rms_ns: number | null;
+      peak_ns: number | null;
+    }>;
+    current?: {
+      gain_scale: number;
+      kp: number;
+      ki: number;
+      stable: boolean;
+      regime: string;
+      branch_count: number;
+      tail_rms_ns: number | null;
+      peak_ns: number | null;
+    };
+    stable_through_gain?: number | null;
+    first_transition_gain?: number | null;
+    display_limit_ns?: number;
+    forcing_envelope_ns?: number;
+    method?: string;
+    provenance?: string;
+    interpretation?: string;
+    live_changes?: number;
+    reason?: string;
+  };
   koopman: {
     status: string;
     singular_values?: number[];
@@ -759,6 +807,48 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
   const recurrenceThreshold = sortedDistances[Math.floor(sortedDistances.length * .14)] ?? 0;
   const recurrenceMatrix = vectors.map((left) => vectors.map((right) => Math.sqrt(left.reduce((sum, value, index) => sum + (value - right[index]) ** 2, 0)) <= recurrenceThreshold ? "1" : "0").join(""));
   const recurrenceCount = recurrenceMatrix.reduce((sum, row) => sum + [...row].filter((value) => value === "1").length, 0);
+  const bifurcationInput = endpointValues.slice(-384);
+  const bifurcationCenter = median(bifurcationInput);
+  const bifurcationForcing = bifurcationInput.map((value) => value - bifurcationCenter);
+  const bifurcationEnvelope = Math.max(1, percentile(bifurcationForcing.map(Math.abs), .95));
+  const bifurcationHardLimit = Math.max(20_000, bifurcationEnvelope * 12);
+  const bifurcationPoints: NonNullable<ResearchPayload["bifurcation"]["points"]> = [];
+  const bifurcationSummaries: NonNullable<ResearchPayload["bifurcation"]["summaries"]> = [];
+  Array.from({ length: 46 }, (_, index) => .25 + index * 2.25 / 45).forEach((gainScale) => {
+    let correction = 0;
+    let integral = 0;
+    let peak = 0;
+    let divergent = false;
+    let settled: number[] = [];
+    for (let replayPass = 0; replayPass < 4 && !divergent; replayPass += 1) {
+      for (const measurement of bifurcationForcing) {
+        const residual = measurement - correction;
+        if (!Number.isFinite(residual) || Math.abs(residual) > bifurcationHardLimit * 8) {
+          divergent = true;
+          break;
+        }
+        integral = Math.max(-200_000, Math.min(200_000, integral + residual));
+        correction += gainScale * (.7 * residual + .3 * integral);
+        peak = Math.max(peak, Math.abs(residual));
+        if (replayPass === 3) settled.push(residual);
+      }
+    }
+    settled = settled.slice(-Math.max(16, Math.min(96, Math.floor(settled.length / 3))));
+    let extrema = settled.filter((value, index) => index > 0 && index < settled.length - 1 && (value - settled[index - 1]) * (settled[index + 1] - value) <= 0);
+    if (extrema.length < 3 && settled.length) extrema = Array.from({ length: 8 }, (_, index) => settled[Math.round(index * (settled.length - 1) / 7)]);
+    if (extrema.length > 20) extrema = Array.from({ length: 20 }, (_, index) => extrema[Math.round(index * (extrema.length - 1) / 19)]);
+    if (divergent) extrema = [-bifurcationHardLimit, bifurcationHardLimit];
+    const tailRms = settled.length ? Math.sqrt(settled.reduce((sum, value) => sum + value * value, 0) / settled.length) : null;
+    const stable = !divergent && tailRms !== null && peak <= bifurcationHardLimit && tailRms <= Math.max(4 * bifurcationEnvelope, 500);
+    const branchCount = Math.min(16, Math.max(1, Math.round(extrema.length / 2)));
+    const regime = stable ? (branchCount <= 2 ? "single-band" : branchCount <= 8 ? "multi-band" : "broadband") : "divergent";
+    extrema.forEach((value, branch) => bifurcationPoints.push({ gain_scale: gainScale, residual_ns: Math.max(-bifurcationHardLimit, Math.min(bifurcationHardLimit, value)), stable, regime, branch, clipped: divergent || Math.abs(value) >= bifurcationHardLimit }));
+    bifurcationSummaries.push({ gain_scale: gainScale, kp: .7 * gainScale, ki: .3 * gainScale, stable, regime, branch_count: branchCount, tail_rms_ns: tailRms, peak_ns: peak });
+  });
+  const bifurcationTransition = bifurcationSummaries.find((item) => !item.stable)?.gain_scale ?? null;
+  const bifurcationCurrent = bifurcationSummaries.reduce((closest, item) => Math.abs(item.gain_scale - 1) < Math.abs(closest.gain_scale - 1) ? item : closest, bifurcationSummaries[0]);
+  const bifurcationVisibleValues = bifurcationPoints.filter((point) => !point.clipped).map((point) => Math.abs(point.residual_ns));
+  const bifurcationDisplayLimit = Math.min(bifurcationHardLimit, Math.max(25, bifurcationEnvelope * 1.25, percentile(bifurcationVisibleValues, .99) * 1.08));
   const variances = nodes.slice(1).map((node) => Math.max(1, node.rms ** 2));
   const rawWeights = variances.map((value) => 1 / value);
   const weightTotal = rawWeights.reduce((sum, value) => sum + value, 0);
@@ -803,6 +893,28 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
     ensemble: { status: "ready", samples: history.length, virtual_offset_ns: virtualOffset, one_sigma_ns: Math.sqrt(1 / weightTotal), weights },
     change_detection: { status: "stable", latest_probability: .018, probabilities: history.map((_point, index) => .01 + .15 * Math.max(0, Math.sin(index * .12 - 2.5)) ** 8), change_points: [] },
     recurrence: { status: "ready", matrix: recurrenceMatrix, samples: recurrenceLength, recurrence_rate: recurrenceCount / Math.max(1, recurrenceLength ** 2), determinism: .71, diagonal_lines: 18, threshold_sigma: recurrenceThreshold },
+    bifurcation: {
+      status: bifurcationInput.length >= 32 ? "ready" : "learning",
+      samples: bifurcationInput.length,
+      parameter: "PI gain scale",
+      parameter_min: .25,
+      parameter_max: 2.5,
+      current_gain_scale: 1,
+      base_gains: { kp: .7, ki: .3 },
+      active_controller: nodes[nodes.length - 1]?.servoType ?? "pi",
+      baseline_is_live: (nodes[nodes.length - 1]?.servoType ?? "pi") === "pi",
+      points: bifurcationPoints,
+      summaries: bifurcationSummaries,
+      current: bifurcationCurrent,
+      stable_through_gain: bifurcationSummaries.filter((item) => item.stable).at(-1)?.gain_scale ?? null,
+      first_transition_gain: bifurcationTransition,
+      display_limit_ns: bifurcationDisplayLimit,
+      forcing_envelope_ns: bifurcationEnvelope,
+      method: "settled extrema from bounded offline PI replay",
+      provenance: "modeled endpoint phase; centered and replayed without writing a clock",
+      interpretation: "A response-branch screening map. A true hardware bifurcation requires a controlled gain sweep with settled observations at every step.",
+      live_changes: 0,
+    },
     koopman: { status: "ready", singular_values: [1.014, .982, .941, .72, .38, .17], spectral_norm: 1.014, residual_sigma_ns: 2.84, interpretation: "amplifying" },
     system_identification: { status: "stable", samples: history.length, spectral_radius: .921, settling_time_s: 48.6, dc_gain: .84, r_squared: .91, residual_sigma_ns: 4.2, poles: [{ real: .91, imag: .14, magnitude: .921 }, { real: .91, imag: -.14, magnitude: .921 }] },
     auto_tune: {
@@ -1852,6 +1964,47 @@ function RecurrenceCanvas({ matrix }: { matrix: string[] }) {
   return <canvas className="recurrence-canvas" ref={canvasRef} width="320" height="320" aria-label="Recurrence matrix" />;
 }
 
+function BifurcationDiagram({ analysis }: { analysis: ResearchPayload["bifurcation"] }) {
+  const points = analysis.points ?? [];
+  const width = 620;
+  const height = 270;
+  const padding = { left: 58, right: 18, top: 17, bottom: 42 };
+  if (analysis.status !== "ready" || !points.length) {
+    return <div className="bifurcation-empty"><Orbit size={20} /><span>{analysis.reason ?? `Collecting endpoint phase samples for the gain sweep (${analysis.samples ?? 0}/32)`}</span></div>;
+  }
+  const xMin = analysis.parameter_min ?? Math.min(...points.map((point) => point.gain_scale));
+  const xMax = analysis.parameter_max ?? Math.max(...points.map((point) => point.gain_scale));
+  const yLimit = Math.max(1, analysis.display_limit_ns ?? Math.max(...points.map((point) => Math.abs(point.residual_ns))));
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (value: number) => padding.left + (value - xMin) / Math.max(.01, xMax - xMin) * plotWidth;
+  const y = (value: number) => padding.top + (yLimit - Math.max(-yLimit, Math.min(yLimit, value))) / (2 * yLimit) * plotHeight;
+  const xTicks = [xMin, .5, 1, 1.5, 2, xMax].filter((value, index, values) => value >= xMin && value <= xMax && values.findIndex((item) => Math.abs(item - value) < .01) === index);
+  const yTicks = [-yLimit, -yLimit / 2, 0, yLimit / 2, yLimit];
+  const transition = analysis.first_transition_gain;
+  return (
+    <div className="bifurcation-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="bifurcation-title bifurcation-description">
+        <title id="bifurcation-title">Offline PI replay bifurcation diagram</title>
+        <desc id="bifurcation-description">Settled endpoint phase residual extrema across a sweep from one quarter to two and a half times the configured PI gains. The one-times line is the live controller only when the endpoint uses PI. Cyan points passed replay bounds; coral points did not.</desc>
+        <defs><clipPath id="bifurcation-clip"><rect x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} /></clipPath></defs>
+        <g className="bifurcation-legend" transform={`translate(${width - 220} 9)`}><circle className="bifurcation-point stable" cx="0" cy="0" r="2.5" /><text x="7" y="2.5">WITHIN REPLAY BOUND</text><circle className="bifurcation-point unstable" cx="116" cy="0" r="2.5" /><text x="123" y="2.5">BOUND EXCEEDED</text></g>
+        <rect className="bifurcation-frame" x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} />
+        {yTicks.map((value) => <g key={`y-${value}`}><line className={Math.abs(value) < .001 ? "bifurcation-zero" : "bifurcation-grid"} x1={padding.left} x2={width - padding.right} y1={y(value)} y2={y(value)} /><text className="bifurcation-axis-label" x={padding.left - 9} y={y(value) + 3} textAnchor="end">{formatNanoseconds(value, true)}</text></g>)}
+        {xTicks.map((value) => <g key={`x-${value}`}><line className="bifurcation-grid" x1={x(value)} x2={x(value)} y1={padding.top} y2={height - padding.bottom} /><text className="bifurcation-axis-label" x={x(value)} y={height - 21} textAnchor="middle">{value.toFixed(value % 1 === 0 ? 1 : 2)}×</text></g>)}
+        <line className="bifurcation-current-line" x1={x(analysis.current_gain_scale ?? 1)} x2={x(analysis.current_gain_scale ?? 1)} y1={padding.top} y2={height - padding.bottom} />
+        <text className="bifurcation-current-label" x={x(analysis.current_gain_scale ?? 1) + 5} y={padding.top + 11}>{analysis.baseline_is_live ? "LIVE PI" : "PI BASELINE"}</text>
+        {transition != null && transition >= xMin && transition <= xMax && <><line className="bifurcation-transition-line" x1={x(transition)} x2={x(transition)} y1={padding.top} y2={height - padding.bottom} /><text className="bifurcation-transition-label" x={x(transition) - 5} y={padding.top + 11} textAnchor="end">BOUND</text></>}
+        <g clipPath="url(#bifurcation-clip)">
+          {points.map((point, index) => <circle className={`bifurcation-point ${point.stable ? "stable" : "unstable"} ${point.clipped ? "clipped" : ""}`} key={`${point.gain_scale}-${point.branch}-${index}`} cx={x(point.gain_scale)} cy={y(point.residual_ns)} r={point.stable ? 1.45 : 2.1} />)}
+        </g>
+        <text className="bifurcation-axis-title" x={padding.left + plotWidth / 2} y={height - 4} textAnchor="middle">PI GAIN SCALE × CONFIGURED Kp / Ki</text>
+        <text className="bifurcation-axis-title" transform={`translate(11 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">SETTLED PHASE RESIDUAL</text>
+      </svg>
+    </div>
+  );
+}
+
 function MetrologyWorkbench({
   research,
   nodes,
@@ -2011,6 +2164,9 @@ function IntelligenceWorkbench({
   const probabilities = activeNode.servoType === "imm" ? activeNode.kalman?.model_probabilities : undefined;
   const temperature = research.temperature_holdover[activeNode.id];
   const changeProbability = research.change_detection.latest_probability ?? 0;
+  const [nonlinearView, setNonlinearView] = useState<"bifurcation" | "recurrence">("bifurcation");
+  const bifurcation = research.bifurcation ?? { status: "learning", samples: 0, points: [], summaries: [], live_changes: 0 };
+  const currentBranch = bifurcation.current;
   return (
     <div className="intelligence-layout">
       <section className="instrument-panel estimator-hero">
@@ -2039,9 +2195,18 @@ function IntelligenceWorkbench({
         <div className="panel-heading"><div><span className="section-kicker">REPLAY-SAFE OPTIMIZATION</span><h2>Constrained gain recommendation</h2></div><span className={`quality-badge ${research.auto_tune.status === "recommended" ? "" : "pending"}`}>{research.auto_tune.status.toUpperCase()}</span></div>
         {research.auto_tune.recommendation ? <><div className="tune-recommendation"><div><span>RECOMMENDED PI</span><strong>Kp {research.auto_tune.recommendation.kp.toFixed(2)} · Ki {research.auto_tune.recommendation.ki.toFixed(2)}</strong><small>{research.auto_tune.safe_candidates}/{research.auto_tune.evaluated_candidates} replay-safe candidates</small></div><em><strong>{research.auto_tune.predicted_improvement_pct?.toFixed(1)}%</strong><span>predicted RMS improvement</span></em></div><div className="frontier-row">{research.auto_tune.frontier?.slice(0, 5).map((candidate, index) => <div key={`${candidate.kp}-${candidate.ki}`} style={{ height: `${35 + (1 - index / 5) * 45}%` }}><span>{candidate.score.toFixed(1)}</span></div>)}</div><button type="button" className="full-secondary" onClick={() => stageTune(research.auto_tune.recommendation!.kp, research.auto_tune.recommendation!.ki)}><SlidersHorizontal size={14} /> Stage recommendation for review</button></> : <div className="capability-empty"><Gauge size={20} /><div><strong>More samples required</strong><span>Optimization never explores gains on live hardware. It ranks candidates against captured data and enforces peak/error constraints.</span></div></div>}
       </section>
-      <section className="instrument-panel recurrence-panel">
-        <div className="panel-heading"><div><span className="section-kicker">RECURRENCE QUANTIFICATION</span><h2>Return structure</h2></div><span className="quality-badge">{((research.recurrence.recurrence_rate ?? 0) * 100).toFixed(1)}% RR</span></div>
-        <div className="recurrence-body"><RecurrenceCanvas matrix={research.recurrence.matrix ?? []} /><div><div><span>Determinism</span><strong>{((research.recurrence.determinism ?? 0) * 100).toFixed(1)}%</strong></div><div><span>Diagonal lines</span><strong>{research.recurrence.diagonal_lines ?? 0}</strong></div><div><span>Threshold</span><strong>{(research.recurrence.threshold_sigma ?? 0).toFixed(2)} σ</strong></div><p>Diagonal structures indicate repeatable evolution, not proof of chaos or a deterministic attractor.</p></div></div>
+      <section className="instrument-panel recurrence-panel nonlinear-panel">
+        <div className="panel-heading"><div><span className="section-kicker">NONLINEAR RETURN ANALYSIS</span><h2>{nonlinearView === "bifurcation" ? "Replay bifurcation map" : "Recurrence quantification"}</h2></div><span className={`quality-badge ${nonlinearView === "bifurcation" && bifurcation.status !== "ready" ? "pending" : ""}`}>{nonlinearView === "bifurcation" ? (bifurcation.status === "ready" ? "NO LIVE CHANGES" : bifurcation.status.toUpperCase()) : `${((research.recurrence.recurrence_rate ?? 0) * 100).toFixed(1)}% RR`}</span></div>
+        <div className="nonlinear-switch" aria-label="Nonlinear analysis view"><div className="segmented-control"><button type="button" className={nonlinearView === "bifurcation" ? "active" : ""} onClick={() => setNonlinearView("bifurcation")}>Bifurcation map</button><button type="button" className={nonlinearView === "recurrence" ? "active" : ""} onClick={() => setNonlinearView("recurrence")}>Recurrence plot</button></div><span>{nonlinearView === "bifurcation" ? `${bifurcation.samples ?? 0} endpoint samples · ${bifurcation.summaries?.length ?? 0} replay gains` : `${research.recurrence.samples ?? 0} aligned hop states`}</span></div>
+        {nonlinearView === "bifurcation" ? <>
+          <BifurcationDiagram analysis={bifurcation} />
+          <div className="bifurcation-ledger">
+            <div><span>1.00× PI replay</span><strong>{currentBranch?.tail_rms_ns == null ? "—" : formatNanoseconds(currentBranch.tail_rms_ns)}</strong><small>{currentBranch ? `${currentBranch.branch_count} response bands · ${currentBranch.regime}` : "learning"}</small></div>
+            <div><span>First bound crossing</span><strong>{bifurcation.first_transition_gain == null ? "not found" : `${bifurcation.first_transition_gain.toFixed(2)}×`}</strong><small>{bifurcation.first_transition_gain == null ? "within scanned range" : "replay safety envelope"}</small></div>
+            <div><span>PI baseline</span><strong>{bifurcation.base_gains ? `Kp ${bifurcation.base_gains.kp.toFixed(2)} · Ki ${bifurcation.base_gains.ki.toFixed(2)}` : "—"}</strong><small>{bifurcation.baseline_is_live ? "active endpoint controller" : `candidate only · active ${bifurcation.active_controller?.replaceAll("-", " ") ?? "servo"}`}</small></div>
+          </div>
+          <div className="bifurcation-note"><Info size={13} /><span>Settled extrema come from offline replay of captured endpoint PHC phase. {bifurcation.baseline_is_live ? "The 1.00× line matches the active endpoint PI gains." : `The endpoint is running ${bifurcation.active_controller?.replaceAll("-", " ") ?? "another servo"}; the PI baseline is not live.`} A true physical bifurcation claim requires a controlled hardware sweep with dwell at every gain.</span></div>
+        </> : <div className="recurrence-body"><RecurrenceCanvas matrix={research.recurrence.matrix ?? []} /><div><div><span>Determinism</span><strong>{((research.recurrence.determinism ?? 0) * 100).toFixed(1)}%</strong></div><div><span>Diagonal lines</span><strong>{research.recurrence.diagonal_lines ?? 0}</strong></div><div><span>Threshold</span><strong>{(research.recurrence.threshold_sigma ?? 0).toFixed(2)} σ</strong></div><p>Diagonal structures indicate repeatable evolution, not proof of chaos or a deterministic attractor.</p></div></div>}
       </section>
       <section className="instrument-panel koopman-panel">
         <div className="panel-heading"><div><span className="section-kicker">KOOPMAN / DMD</span><h2>Dynamic mode amplification</h2></div><span className={`quality-badge ${research.koopman.interpretation === "contracting" ? "" : "pending"}`}>{research.koopman.interpretation?.toUpperCase() ?? "LEARNING"}</span></div>
@@ -2810,7 +2975,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-state", group: "Navigate", label: "State-space atlas", description: "Modal trajectory and empirical Poincaré map", keywords: "pca poincare phase portrait", section: "State space", icon: Activity },
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
-    { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, IMM, system ID, tuning, recurrence, and Koopman", keywords: "kalman drift model auto tune bocpd recurrence dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, IMM, system ID, bifurcation, recurrence, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence dmd holdover", section: "Intelligence", icon: Gauge },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },

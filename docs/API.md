@@ -415,6 +415,7 @@ The main objects are:
 | `auto_tune` | Replay-only GP/EI PI recommendation, frontier, candidate counts, and `live_changes: 0` |
 | `change_detection` | Bounded BOCPD probability and detected change indices |
 | `recurrence` | Binary recurrence matrix, recurrence rate, determinism, and threshold |
+| `bifurcation` | Offline PI gain-scale sweep with settled extrema, response bands, replay bounds, provenance, and `live_changes: 0` |
 | `koopman` | Fitted snapshot operator, singular values, residual σ, and amplification label |
 | `capabilities` | Hardware-derived DPLL, SyncE, devlink, temperature, path-monitor, and PPS status |
 | `profiles` | Applied configuration checks; explicitly not standards certification |

@@ -83,6 +83,11 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /INTERACTING MULTIPLE MODEL/);
   assert.match(page, /BAYESIAN ROOT-CAUSE WATCH/);
   assert.match(page, /COMMON-EDGE PHC COMPARISON/);
+  assert.match(page, /Replay bifurcation map/);
+  assert.match(page, /settled extrema from bounded offline PI replay/i);
+  assert.match(page, /true physical bifurcation claim requires a controlled hardware sweep/i);
+  assert.match(page, /PI baseline is not live/i);
+  assert.match(page, /NO LIVE CHANGES/);
   assert.match(page, /IEEE 802\.1AS gPTP/);
   assert.match(page, /PTP message authentication/);
   assert.match(page, /Inject bounded fault/);

@@ -4,6 +4,12 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a nonlinear-analysis switch from recurrence quantification to a
+  replay-safe PI bifurcation map: 46 gain-scale columns, settled endpoint-phase
+  extrema, response-band counts, PI-baseline and first-bound markers,
+  active-servo provenance, and `live_changes: 0`. The UI and research guide
+  distinguish the screening diagram from a controlled physical bifurcation
+  experiment.
 - Added the advanced Precision Observatory: overlapping
   ADEV/MDEV/TDEV/HDEV/MTIE/Theo1, weighted factor-graph clock fusion,
   covariance-regularized ensemble time, and correlated cascade error budgets.

@@ -113,6 +113,35 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(3, len(koopman["operator"]))
         self.assertTrue(koopman["singular_values"])
 
+    def test_bifurcation_sweep_uses_settled_replay_and_never_changes_live_gains(self) -> None:
+        samples = [80.0 * math.sin(index / 7.0) + 0.08 * index for index in range(160)]
+        result = RESEARCH.replay_bifurcation_analysis(
+            samples,
+            1.0,
+            0.7,
+            0.3,
+            active_controller="adaptive-kalman",
+        )
+
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(0, result["live_changes"])
+        self.assertEqual("PI gain scale", result["parameter"])
+        self.assertGreaterEqual(len(result["summaries"]), 40)
+        self.assertTrue(result["points"])
+        self.assertAlmostEqual(1.0, result["current"]["gain_scale"], places=6)
+        self.assertEqual("adaptive-kalman", result["active_controller"])
+        self.assertFalse(result["baseline_is_live"])
+        self.assertTrue(any(item["stable"] for item in result["summaries"]))
+        self.assertTrue(all(0.25 <= point["gain_scale"] <= 2.5 for point in result["points"]))
+        self.assertIn("true hardware bifurcation", result["interpretation"])
+
+    def test_bifurcation_sweep_waits_for_an_auditable_sample_window(self) -> None:
+        result = RESEARCH.replay_bifurcation_analysis([1.0, 2.0, 3.0], 1.0, 0.7, 0.3)
+
+        self.assertEqual("learning", result["status"])
+        self.assertEqual([], result["points"])
+        self.assertEqual(0, result["live_changes"])
+
     def test_temperature_model_predicts_frequency_sensitivity(self) -> None:
         timestamps = [float(index) for index in range(100)]
         temperatures = [35.0 + index * 0.02 for index in range(100)]

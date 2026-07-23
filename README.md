@@ -148,7 +148,7 @@ delay.
     <td width="50%"><img src="docs/screenshots/resilience-live.png" alt="Live PTPBox resilience workbench"></td>
   </tr>
   <tr>
-    <td><strong>Control intelligence</strong><br>Three-state adaptive Kalman, interacting multiple models, temperature-aware holdover, ARX identification, replay-only Gaussian-process tuning, recurrence quantification, Koopman/DMD, and Bayesian online change detection.</td>
+    <td><strong>Control intelligence</strong><br>Three-state adaptive Kalman, interacting multiple models, temperature-aware holdover, ARX identification, replay-only Gaussian-process tuning, a PI response bifurcation map, recurrence quantification, Koopman/DMD, and Bayesian online change detection.</td>
     <td><strong>Resilience lab</strong><br>Profile configuration guardrails, capability-gated DPLL/SyncE truth, LinuxPTP Authentication TLVs, and one-hop netem faults with mandatory automatic expiry.</td>
   </tr>
 </table>
@@ -158,6 +158,24 @@ decision makers. Gain optimization evaluates captured samples only and stages a
 recommendation for operator review; it never explores gains on the live
 cascade. Hardware claims remain capability-gated, and profile checks are
 configuration guardrails rather than standards certification.
+
+### Sweep response branches without touching a clock
+
+The nonlinear workbench now moves directly between the recurrence plot and a
+gain-parameter bifurcation map. For each multiplier from 0.25× to 2.50×, it
+replays the captured endpoint PHC phase through the configured PI gains,
+discards controller-state transients, and plots extrema from the settled tail.
+The 1.00× configured PI baseline and the first replay safety-bound crossing are
+marked on the same axes. When the endpoint is running another servo, such as
+adaptive Kalman, the line says **PI baseline** instead of implying that PI is
+live. The ledger keeps the active-controller provenance, base gains, settled
+RMS, response-band count, and regime visible.
+
+This is intentionally labeled a **replay bifurcation map** and reports
+`live_changes: 0`. It is a screening instrument for fixed, multi-band, and
+divergent response regions—not proof that the physical clock cascade underwent
+a mathematical bifurcation. That stronger claim requires a controlled hardware
+gain sweep with adequate dwell and settled observations at every step.
 
 ## What you can do
 
@@ -169,7 +187,7 @@ configuration guardrails rather than standards certification.
 | **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
 | **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
-| **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, and rank replay-safe PI gains. |
+| **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, and inspect settled response branches across an offline gain sweep. |
 | **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |

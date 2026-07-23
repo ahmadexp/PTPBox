@@ -1271,11 +1271,15 @@ def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
     telemetry_payload = telemetry(history_seconds=history_seconds, limit=TELEMETRY_MAX_SAMPLES)
     config_value = load_config()
     servo = config_value.get("servo", {})
+    endpoint_id = str(telemetry_payload["clocks"][-1].get("id")) if telemetry_payload["clocks"] else ""
+    control_nodes = (telemetry_payload.get("servo_control") or {}).get("nodes", {})
+    active_controller = str((control_nodes.get(endpoint_id) or {}).get("type") or "pi")
     snapshot = RESEARCH_ENGINE.snapshot(
         telemetry_payload["clocks"],
         float(telemetry_payload.get("phc_sample_rate_hz") or configured_phc_sample_rate_hz()),
         float(servo.get("kp", 0.7)),
         float(servo.get("ki", 0.3)),
+        active_controller,
     )
     snapshot.update(
         {

@@ -207,6 +207,43 @@ binary matrix, recurrence rate, diagonal-line count, and determinism. Diagonal
 structure can indicate repeatable evolution; it is not proof of chaos or a
 deterministic attractor.
 
+### Replay bifurcation map
+
+The bifurcation workbench uses PI gain scale \(g\) as its continuation
+parameter. It evaluates 46 evenly spaced values from \(g=0.25\) to \(g=2.50\)
+against the captured endpoint PHC phase record. At each value, the replay:
+
+1. centers the raw endpoint phase with a robust median;
+2. runs four passes through the same captured forcing record;
+3. retains only the final settled tail;
+4. extracts local extrema as response branches; and
+5. marks candidates that exceed the bounded replay envelope.
+
+Both configured gains scale together:
+
+\[
+K_p(g)=gK_p,\qquad K_i(g)=gK_i
+\]
+
+The response ordinate is settled replay phase residual in nanoseconds. The
+result includes every plotted point, per-gain branch count, tail RMS, peak,
+regime, the first replay-bound crossing, base gains, active endpoint controller,
+whether the 1.00× PI baseline is actually live, sample count, method, and
+provenance. It always includes:
+
+```json
+{ "live_changes": 0 }
+```
+
+This is a model-based response-branch screening diagram, not evidence that the
+hardware crossed a mathematical bifurcation. Bifurcation means a qualitative
+change in dynamics as a system parameter varies; a physical claim therefore
+requires a controlled on-hardware gain sweep, sufficient dwell at each gain,
+and settled measurements. The distinction follows the standard definition in
+[Guckenheimer](https://doi.org/10.4249/scholarpedia.1517). The original
+recurrence plot remains beside the sweep because recurrence can reveal
+transitions while still not proving a deterministic attractor.
+
 ### Koopman / dynamic mode decomposition
 
 For centered snapshots \(X\) and their one-step successors \(X'\), the engine

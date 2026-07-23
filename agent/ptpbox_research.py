@@ -846,6 +846,202 @@ def recurrence_analysis(channels: Sequence[Sequence[float]], max_points: int = 9
     }
 
 
+def replay_bifurcation_analysis(
+    phase_ns: Sequence[float],
+    sample_period_s: float,
+    current_kp: float,
+    current_ki: float,
+    parameter_steps: int = 46,
+    active_controller: str = "pi",
+) -> dict[str, Any]:
+    """Sweep a PI gain multiplier through a captured endpoint phase record.
+
+    The result is a model-based *bifurcation-style* diagram, not a claim that a
+    physical bifurcation was observed.  Each parameter column contains extrema
+    from the settled tail of an offline replay.  No candidate is applied to a
+    PHC and the response remains explicitly distinguishable from a controlled
+    hardware sweep.
+    """
+    samples = [float(value) for value in phase_ns if math.isfinite(value)][-384:]
+    if len(samples) < 32:
+        return {
+            "status": "learning",
+            "samples": len(samples),
+            "points": [],
+            "summaries": [],
+            "live_changes": 0,
+        }
+    if abs(current_kp) + abs(current_ki) < EPSILON:
+        return {
+            "status": "unavailable",
+            "samples": len(samples),
+            "points": [],
+            "summaries": [],
+            "reason": "The configured PI gains are both zero.",
+            "live_changes": 0,
+        }
+
+    center = statistics.median(samples)
+    forcing = [value - center for value in samples]
+    forcing_envelope = max(1.0, percentile([abs(value) for value in forcing], 0.95))
+    hard_limit = max(20_000.0, forcing_envelope * 12.0)
+    steps = max(12, min(80, int(parameter_steps)))
+    gain_scales = [0.25 + index * (2.5 - 0.25) / (steps - 1) for index in range(steps)]
+    points: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+
+    for gain_scale in gain_scales:
+        correction = 0.0
+        integral = 0.0
+        settled: list[float] = []
+        peak = 0.0
+        divergent = False
+        # Repeating the measured record lets initial controller state decay
+        # before the final pass is sampled at a consistent forcing phase.
+        for replay_pass in range(4):
+            for measurement in forcing:
+                residual = measurement - correction
+                if not math.isfinite(residual) or abs(residual) > hard_limit * 8.0:
+                    divergent = True
+                    break
+                integral = max(
+                    -200_000.0,
+                    min(200_000.0, integral + residual * sample_period_s),
+                )
+                correction += (
+                    gain_scale * (current_kp * residual + current_ki * integral)
+                    * min(1.0, sample_period_s)
+                )
+                peak = max(peak, abs(residual))
+                if replay_pass == 3:
+                    settled.append(residual)
+            if divergent:
+                break
+
+        tail_length = max(16, min(96, len(settled) // 3))
+        tail = settled[-tail_length:] if settled else []
+        tail_rms = math.sqrt(mean([value * value for value in tail])) if tail else math.inf
+        stable = (
+            not divergent
+            and math.isfinite(tail_rms)
+            and peak <= hard_limit
+            and tail_rms <= max(4.0 * forcing_envelope, 500.0)
+        )
+        extrema = [
+            tail[index]
+            for index in range(1, len(tail) - 1)
+            if (tail[index] - tail[index - 1]) * (tail[index + 1] - tail[index]) <= 0.0
+            and (
+                abs(tail[index] - tail[index - 1])
+                + abs(tail[index + 1] - tail[index])
+            ) >= max(0.05, forcing_envelope * 0.002)
+        ]
+        if len(extrema) < 3 and tail:
+            extrema = [
+                tail[round(index * (len(tail) - 1) / 7)]
+                for index in range(8)
+            ]
+        if len(extrema) > 20:
+            extrema = [
+                extrema[round(index * (len(extrema) - 1) / 19)]
+                for index in range(20)
+            ]
+
+        if divergent:
+            extrema = [-hard_limit, hard_limit]
+        ordered = sorted(extrema)
+        branch_tolerance = max(
+            0.5,
+            (percentile(ordered, 0.95) - percentile(ordered, 0.05)) * 0.055,
+        )
+        branches: list[float] = []
+        for value in ordered:
+            if not branches or abs(value - branches[-1]) > branch_tolerance:
+                branches.append(value)
+            else:
+                branches[-1] = (branches[-1] + value) / 2.0
+        branch_count = min(16, len(branches))
+        regime = (
+            "divergent"
+            if not stable
+            else "single-band"
+            if branch_count <= 2
+            else "multi-band"
+            if branch_count <= 8
+            else "broadband"
+        )
+        for branch_index, value in enumerate(extrema):
+            points.append(
+                {
+                    "gain_scale": gain_scale,
+                    "residual_ns": max(-hard_limit, min(hard_limit, value)),
+                    "stable": stable,
+                    "regime": regime,
+                    "branch": branch_index,
+                    "clipped": divergent or abs(value) >= hard_limit,
+                }
+            )
+        summaries.append(
+            {
+                "gain_scale": gain_scale,
+                "kp": current_kp * gain_scale,
+                "ki": current_ki * gain_scale,
+                "stable": stable,
+                "regime": regime,
+                "branch_count": branch_count,
+                "tail_rms_ns": tail_rms if math.isfinite(tail_rms) else None,
+                "peak_ns": peak if math.isfinite(peak) else None,
+            }
+        )
+
+    first_transition = next(
+        (item["gain_scale"] for item in summaries if not item["stable"]),
+        None,
+    )
+    stable_through = None
+    for item in summaries:
+        if not item["stable"]:
+            break
+        stable_through = item["gain_scale"]
+    current = min(summaries, key=lambda item: abs(item["gain_scale"] - 1.0))
+    finite_values = [
+        abs(float(point["residual_ns"]))
+        for point in points
+        if not point["clipped"]
+    ]
+    display_limit = max(
+        25.0,
+        forcing_envelope * 1.25,
+        percentile(finite_values, 0.99) * 1.08 if finite_values else 0.0,
+    )
+    display_limit = min(hard_limit, display_limit)
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "parameter": "PI gain scale",
+        "parameter_min": gain_scales[0],
+        "parameter_max": gain_scales[-1],
+        "current_gain_scale": 1.0,
+        "base_gains": {"kp": current_kp, "ki": current_ki},
+        "active_controller": active_controller,
+        "baseline_is_live": active_controller == "pi",
+        "points": points,
+        "summaries": summaries,
+        "current": current,
+        "stable_through_gain": stable_through,
+        "first_transition_gain": first_transition,
+        "display_limit_ns": display_limit,
+        "forcing_envelope_ns": forcing_envelope,
+        "method": "settled extrema from bounded offline PI replay",
+        "provenance": "captured endpoint PHC phase; centered and replayed without writing a clock",
+        "interpretation": (
+            "A response-branch screening map. A true hardware bifurcation "
+            "requires a controlled gain sweep with settled observations at every step."
+        ),
+        "live_changes": 0,
+    }
+
+
 def koopman_dmd(channels: Sequence[Sequence[float]]) -> dict[str, Any]:
     if not channels:
         return {"status": "waiting"}
@@ -1177,6 +1373,7 @@ class RollingResearchEngine:
         sample_rate_hz: float,
         kp: float,
         ki: float,
+        active_controller: str = "pi",
     ) -> dict[str, Any]:
         with self._lock:
             samples = list(self.samples)
@@ -1207,6 +1404,13 @@ class RollingResearchEngine:
         stability = stability_metrics(endpoint_series, period)
         changes = bayesian_change_points(endpoint_series)
         recurrence = recurrence_analysis(hop_channels)
+        bifurcation = replay_bifurcation_analysis(
+            endpoint_series,
+            period,
+            kp,
+            ki,
+            active_controller=active_controller,
+        )
         koopman = koopman_dmd(hop_channels)
         ensemble_ids = [node for node in node_ids[1:] if series.get(node)]
         ensemble_channels = [series[node] for node in ensemble_ids]
@@ -1297,6 +1501,7 @@ class RollingResearchEngine:
             "ensemble": ensemble,
             "change_detection": changes,
             "recurrence": recurrence,
+            "bifurcation": bifurcation,
             "koopman": koopman,
             "system_identification": system_id,
             "auto_tune": auto_tune,
