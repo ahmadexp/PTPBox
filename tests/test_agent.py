@@ -96,6 +96,25 @@ class TelemetryTests(unittest.TestCase):
         value["log_sync_interval"] = -4
         self.assertIn("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)", AGENT.validate_config(value))
 
+    def test_profile_guardrails_use_profile_specific_domain_ranges(self) -> None:
+        value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
+        value.update({"profile": "G.8275.2 Telecom", "domain": 44, "transport": "UDPv6", "delay_mechanism": "E2E"})
+        self.assertEqual([], AGENT.validate_config(value))
+        self.assertTrue(AGENT.profile_compliance(value)["compliant"])
+        self.assertFalse(AGENT.profile_compliance(value)["certification"])
+
+        value["domain"] = 24
+        self.assertIn("G.8275.2 Telecom requires domain 44 through 63", AGENT.validate_config(value))
+
+        value.update({"profile": "IEEE C37.238 Power", "domain": 254, "transport": "L2", "delay_mechanism": "P2P"})
+        self.assertEqual([], AGENT.validate_config(value))
+
+    def test_authentication_requires_two_step_operation(self) -> None:
+        value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
+        value["security"]["authentication"]["enabled"] = True
+        value["two_step"] = False
+        self.assertIn("LinuxPTP Authentication TLVs require two_step=true", AGENT.validate_config(value))
+
     def test_pps_config_requires_distinct_hardware_source_and_sinks(self) -> None:
         value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
         value["pps"].update({"enabled": True, "source": "BC1", "sinks": ["BC7"]})

@@ -24,6 +24,21 @@ sharing one PHC. PTPBox records both providers for observation but never adds a
 cross-PHC discipline loop. Shared or hardware-synchronized NIC clocks propagate
 time naturally; genuinely distinct clocks remain visible in the measurements.
 
+For PPS experiments, also inspect the PHC feature counts and programmable pins:
+
+```bash
+ptp_dev=ptp1
+for field in pps_available n_external_timestamps n_periodic_outputs n_programmable_pins; do
+  printf '%s: ' "$field"
+  cat "/sys/class/ptp/$ptp_dev/$field"
+done
+find "/sys/class/ptp/$ptp_dev/pins" -maxdepth 1 -type f -print -exec cat {} \;
+```
+
+The Observatory enables a PPS output, PPS input, or common-edge comparison only
+after the requested channel and pin function exist. It does not infer PPS
+capability from the NIC model name.
+
 ## Reference host
 
 The current reference machine exposes sixteen physical ports across seven
@@ -154,6 +169,25 @@ the field is retained for future OOB and UDP profile support.
 - [ ] Keep a physical or BMC console open.
 - [ ] Start with `ptpboxctl status`, then `start`.
 - [ ] Inspect `/var/log/ptpbox` before beginning a long experiment.
+
+## Common-edge PPS comparison
+
+Network PTP timestamps alone cannot independently separate clock phase from
+one-way path asymmetry. When the cards expose external-timestamp inputs, fan
+one physical PPS signal to at least two PHC pins and choose **Configuration →
+PPS & ts2phc → Common-edge comparison**.
+
+In this mode PTPBox:
+
+- configures only EXTS inputs;
+- consumes the same physical edge timestamp from every selected PHC;
+- subtracts the selected reference PHC's edge time;
+- writes a rolling measurement snapshot;
+- never calls `clock_adjtime` and never starts `ts2phc`.
+
+Use equal-length, characterized cables or record their differential delay. A
+common edge improves the clock comparison but does not calibrate the external
+fanout or cable asymmetry automatically.
 
 ## Budget systems
 

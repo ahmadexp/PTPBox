@@ -10,7 +10,8 @@ that can create namespaces and run LinuxPTP processes.
 - Linux with network namespace support; Ubuntu 22.04 or newer is recommended
 - Python 3.11 or newer
 - LinuxPTP 4.x (`ptp4l` and optionally `pmc`)
-- `iproute2`, `ethtool`, `systemd`, and `sudo`
+- `iproute2` (`ip` and `tc`), `util-linux` (`nsenter`), `ethtool`, `systemd`,
+  and `sudo`
 - `mstflint` when ConnectX firmware clock mode must be inspected or changed
 - Two timing-capable ports per boundary-clock stage
 - A separate management interface that is never assigned to a PTP namespace
@@ -113,13 +114,14 @@ sudo \
 The installer:
 
 1. copies the dependency-free web agent to `/opt/ptpbox-web`;
-2. installs `ptpboxctl` as `/usr/local/sbin/ptpboxctl` and its dedicated
-   `/usr/local/sbin/ptpbox-kalman-servo` PHC worker;
+2. installs `ptpboxctl` as `/usr/local/sbin/ptpboxctl`, the
+   `/usr/local/sbin/ptpbox-kalman-servo` PHC worker, the raw LinuxPTP
+   event-monitor collector, and the measurement-only PPS comparator;
 3. copies the topology to `/etc/ptpbox/topology.json`;
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
 6. validates a sudoers policy for fixed `start`, `stop`, `restart`, `status`,
-   and validated `servo` operations only;
+   validated `servo`, and bounded `fault` operations only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
 8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
@@ -162,11 +164,14 @@ Logs are written under `/var/log/ptpbox`. Runtime process state and generated
 LinuxPTP configuration are stored under `/run/ptpbox` and `/etc/linuxptp`
 respectively. `/etc/linuxptp` is required by Ubuntu's packaged AppArmor policy.
 Every intermediate namespace runs one `ptp4l` process with its ingress and
-egress ports. LinuxPTP selects the upstream port as the client and serves time
-from the downstream port as a true boundary clock. The controller records each
-port's timestamp provider in `/run/ptpbox/phcs.json`. The agent reads the
-selected NIC PHCs through the `clock` group and compares them to BC1 without
-modifying them.
+egress ports. The controller enters the named network namespace with `nsenter`
+so each process can still reach its host-visible management socket under
+`/run/ptpbox`. LinuxPTP selects the upstream port as the client and serves time
+from the downstream port as a true boundary clock. One read-only event-monitor
+collector per receiving stage preserves raw exchange timestamps. The controller
+records each port's timestamp provider in `/run/ptpbox/phcs.json`; the agent
+reads the selected NIC PHCs through the `clock` group and compares them to BC1
+without modifying them.
 
 ## Servo selection and measured holdover
 
@@ -180,6 +185,11 @@ downstream clocks) and choose one of:
   dedicated worker applies a bounded PHC frequency correction. Measurement
   noise, oscillator process noise, phase time constant, and innovation gate are
   configurable from the Observatory;
+- **Adaptive Kalman** — adds oscillator drift and adaptive measurement-noise
+  estimation, including controlled reacquisition after a persistent phase
+  transition;
+- **IMM** — runs quiet, dynamic, and holdover estimators in parallel and mixes
+  them using measured innovation likelihoods;
 - **Null frequency** — forces zero frequency correction for a SyncE-backed
   diagnostic setup.
 
@@ -189,12 +199,51 @@ PHC comparison sampler keeps measuring every clock at the applied Sync cadence. 
 holdover drift from those real PHC samples. **Resume servo** applies the chosen
 implementation and shows acquisition through tracking and lock states. PI,
 linear regression, and null frequency use LinuxPTP's native controller path.
-Kalman intentionally keeps LinuxPTP `free_running 1` to prevent competing clock
-control and reports its own acquisition, estimate uncertainty, and lock state.
+Every PTPBox Kalman mode intentionally keeps LinuxPTP `free_running 1` to
+prevent competing clock control and reports its own acquisition, estimate
+uncertainty, innovation gate, rejection count, and lock state.
 
 This is clock-servo holdover, not a simulated graph and not a stopped timing
 process. A servo transition causes a brief restart of the selected `ptp4l`
 instance because LinuxPTP does not switch `clock_servo` dynamically.
+
+## Durable measurement runs
+
+Open **Metrology** and press **Start run** before a trial. The agent stores the
+applied configuration and every raw PHC comparison in
+`$PTPBOX_STATE_DIR/experiments.sqlite3` using SQLite WAL mode. Stopping the run
+does not delete data. Each row in the run ledger has a direct CSV export.
+
+The live stability curves require enough contiguous data for their selected
+averaging interval. A long-τ point that says `learning` is waiting for real
+samples; the agent does not extrapolate it.
+
+## Message authentication
+
+The Resilience and Configuration pages can stage LinuxPTP Authentication TLVs.
+Before enabling them, create the Security Association file named by
+`security.authentication.sa_file` (the default is
+`/etc/linuxptp/ptpbox-sa.cfg`) as root and restrict its permissions. Key
+material is never accepted from or returned to the browser. Authentication
+requires two-step operation; apply is rejected otherwise.
+
+Consult the installed LinuxPTP version's Security Association syntax before
+creating keys:
+
+```bash
+man ptp4l
+man ts2phc
+```
+
+PTPBox refuses to start an authenticated process when the configured SA file is
+missing.
+
+## Bounded fault experiments
+
+The Resilience lab can add delay, jitter, or loss to one declared upstream
+egress. It never accepts a free-form interface name. Every active fault has a
+1–3600 second expiry and is also removed by **Clear now** or `ptpboxctl stop`.
+Use this only on the isolated timing chain, never on the management interface.
 
 ## Stop and restore
 
@@ -260,6 +309,19 @@ preserves topology data, logs, captures, and the source checkout.
 - Check `journalctl -u ptpbox-agent -n 100 --no-pager`.
 - A reachable agent with no active measurements still uses model traces while
   showing real inventory; this is intentional.
+
+### UI says “waiting for raw LinuxPTP sample”
+
+- Run `sudo ptpboxctl status` and confirm every expected `ptp4l` and
+  path-monitor worker is alive.
+- Inspect `journalctl -u ptpbox-agent -n 100 --no-pager` and
+  `/var/log/ptpbox/BC*-*.log`.
+- Confirm the receiving ports progress to LinuxPTP state `s1` and then `s2`.
+- Query `/api/phc`, `/api/telemetry`, and `/api/path-events` separately. PHC
+  comparison, servo logs, and packet-path events have independent freshness;
+  one can remain live while another source is acquiring.
+- On AppArmor hosts, rerun the installer after an upgrade so the local policy
+  includes `/run/ptpbox/monitor-*`.
 
 ### `observer_only` is true
 

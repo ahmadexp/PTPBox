@@ -1,0 +1,208 @@
+import importlib.util
+import math
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+MODULE_PATH = Path(__file__).parents[1] / "agent" / "ptpbox_research.py"
+SPEC = importlib.util.spec_from_file_location("ptpbox_research", MODULE_PATH)
+assert SPEC and SPEC.loader
+RESEARCH = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = RESEARCH
+SPEC.loader.exec_module(RESEARCH)
+
+
+class StabilityTests(unittest.TestCase):
+    def test_linear_phase_ramp_has_zero_allan_deviation_and_measured_mtie(self) -> None:
+        phase = [12.0 * index for index in range(256)]
+        metrics = RESEARCH.stability_metrics(phase, 1.0)
+
+        self.assertGreater(len(metrics["adev"]), 3)
+        self.assertTrue(all(point["value"] < 1e-18 for point in metrics["adev"]))
+        self.assertAlmostEqual(12.0, metrics["mtie"][0]["value"])
+        self.assertAlmostEqual(48.0, next(point["value"] for point in metrics["mtie"] if point["tau_s"] == 4.0))
+
+    def test_time_deviation_retains_nanosecond_units(self) -> None:
+        phase = [math.sin(index * 0.23) * 30 for index in range(512)]
+        metrics = RESEARCH.stability_metrics(phase, 0.5)
+
+        self.assertTrue(metrics["tdev"])
+        self.assertTrue(all(point["value"] >= 0 for point in metrics["tdev"]))
+        self.assertTrue(all(point["pairs"] > 0 for point in metrics["tdev"]))
+
+
+class EstimationTests(unittest.TestCase):
+    def test_factor_graph_fuses_direct_and_adjacent_observations(self) -> None:
+        observations = [
+            RESEARCH.Observation("BC1", "BC2", 10.0, 2.0, "direct"),
+            RESEARCH.Observation("BC1", "BC3", 31.0, 3.0, "direct"),
+            RESEARCH.Observation("BC2", "BC3", 20.0, 1.0, "hop"),
+        ]
+        result = RESEARCH.factor_graph_fusion(["BC1", "BC2", "BC3"], observations, "BC1")
+
+        self.assertEqual("solved", result["status"])
+        self.assertAlmostEqual(10.4, result["nodes"]["BC2"]["offset_ns"], delta=0.5)
+        self.assertAlmostEqual(30.5, result["nodes"]["BC3"]["offset_ns"], delta=0.5)
+        self.assertGreater(result["nodes"]["BC3"]["sigma_ns"], 0)
+
+    def test_three_state_kalman_tracks_frequency_and_drift(self) -> None:
+        estimator = RESEARCH.AdaptiveKalman3(
+            measurement_noise_ns=2.0,
+            process_noise_ppb_s=0.3,
+            drift_noise_ppb_s2=0.02,
+            innovation_gate_sigma=10.0,
+        )
+        phase = 0.0
+        frequency = 25.0
+        for index in range(1, 601):
+            frequency += 0.01
+            phase += frequency
+            status = estimator.update(phase + ((index * 13) % 7 - 3) * 0.25, float(index))
+
+        self.assertEqual("locked", status["state"])
+        self.assertAlmostEqual(frequency, status["frequency_estimate_ppb"], delta=2.0)
+        self.assertAlmostEqual(0.01, status["drift_estimate_ppb_s"], delta=0.02)
+        self.assertGreater(status["accepted_count"], 500)
+
+    def test_three_state_kalman_reacquires_after_a_persistent_regime_step(self) -> None:
+        estimator = RESEARCH.AdaptiveKalman3(
+            measurement_noise_ns=5.0,
+            process_noise_ppb_s=0.2,
+            drift_noise_ppb_s2=0.01,
+            innovation_gate_sigma=4.0,
+        )
+        for index in range(1, 20):
+            estimator.update(0.0, float(index))
+        states = [
+            estimator.update(50_000.0 + 2_000.0 * index, float(20 + index))["state"]
+            for index in range(8)
+        ]
+
+        self.assertIn("reacquiring", states)
+
+    def test_imm_probabilities_are_normalized(self) -> None:
+        estimator = RESEARCH.InteractingMultipleModel(10.0)
+        for index in range(1, 40):
+            result = estimator.update(float(index % 3), float(index))
+
+        self.assertAlmostEqual(1.0, sum(result["model_probabilities"].values()), places=9)
+        self.assertIn(result["regime"], {"quiet", "dynamic", "holdover"})
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_bayesian_change_detector_finds_a_step(self) -> None:
+        values = [0.1 * math.sin(index) for index in range(80)] + [120.0 + 0.1 * math.sin(index) for index in range(80)]
+        result = RESEARCH.bayesian_change_points(values, hazard=1 / 200)
+
+        self.assertTrue(any(75 <= index <= 85 for index in result["change_points"]))
+
+    def test_recurrence_and_koopman_return_auditable_matrices(self) -> None:
+        channels = [
+            [math.sin(index * 0.2 + phase) for index in range(160)]
+            for phase in (0.0, 0.7, 1.4)
+        ]
+        recurrence = RESEARCH.recurrence_analysis(channels, max_points=48)
+        koopman = RESEARCH.koopman_dmd(channels)
+
+        self.assertEqual("ready", recurrence["status"])
+        self.assertEqual(48, len(recurrence["matrix"]))
+        self.assertTrue(0 < recurrence["recurrence_rate"] < 1)
+        self.assertEqual("ready", koopman["status"])
+        self.assertEqual(3, len(koopman["operator"]))
+        self.assertTrue(koopman["singular_values"])
+
+    def test_temperature_model_predicts_frequency_sensitivity(self) -> None:
+        timestamps = [float(index) for index in range(100)]
+        temperatures = [35.0 + index * 0.02 for index in range(100)]
+        phase = [0.0]
+        for index in range(1, 100):
+            frequency = 5.0 + 0.8 * temperatures[index]
+            phase.append(phase[-1] + frequency)
+        result = RESEARCH.temperature_holdover_model(timestamps, phase, temperatures, 60.0)
+
+        self.assertEqual("ready", result["status"])
+        self.assertAlmostEqual(5.0 + 0.8 * temperatures[-1], result["predicted_frequency_ppb"], delta=0.5)
+
+    def test_bayesian_tuner_is_replay_bounded_and_never_changes_live_gains(self) -> None:
+        samples = [80.0 * math.sin(index / 7.0) + 0.08 * index for index in range(160)]
+        result = RESEARCH.safe_bayesian_tune(samples, 1.0, 0.7, 0.3)
+
+        self.assertEqual("recommended", result["status"])
+        self.assertIn("Gaussian-process", result["method"])
+        self.assertEqual(0, result["live_changes"])
+        self.assertLess(result["evaluated_candidates"], result["candidate_space"])
+        self.assertLessEqual(result["evaluated_candidates"], 20)
+
+    def test_error_budget_propagates_cross_hop_covariance(self) -> None:
+        first = [float(index) for index in range(20)]
+        second = [2.0 * value for value in first]
+        result = RESEARCH.error_budget(
+            ["BC1", "BC2", "BC3"],
+            {"BC2": 1.0, "BC3": 1.0},
+            {"BC2": 2.0, "BC3": 2.0},
+            {"BC2": 3.0, "BC3": 3.0},
+            {},
+            [first, second],
+        )
+
+        self.assertIsNotNone(result["cascade"])
+        self.assertGreater(
+            result["cascade"]["correlated_sigma_ns"],
+            result["cascade"]["independent_sigma_ns"],
+        )
+
+
+class ExperimentStoreTests(unittest.TestCase):
+    def test_records_raw_cycles_and_exports_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = RESEARCH.ExperimentStore(Path(temporary) / "experiments.sqlite3")
+            run = store.start({"name": "raw baseline", "kind": "metrology"}, {"profile": "G.8275.1"})
+            store.record_phc(
+                {
+                    "sample_id": "phc:1",
+                    "clocks": [
+                        {
+                            "id": "BC1",
+                            "observed_at": 1.0,
+                            "offset_ns": 0.0,
+                            "previous_hop_offset_ns": None,
+                            "comparison_uncertainty_ns": 2.0,
+                            "valid": True,
+                        },
+                        {
+                            "id": "BC2",
+                            "observed_at": 1.0,
+                            "offset_ns": 8.0,
+                            "previous_hop_offset_ns": 8.0,
+                            "comparison_uncertainty_ns": 3.0,
+                            "valid": True,
+                        },
+                    ],
+                },
+                {"BC2": 43.2},
+            )
+            completed = store.stop(run["id"])
+            exported = store.export_csv(run["id"])
+
+            self.assertEqual("completed", completed["state"])
+            self.assertEqual(2, completed["sample_count"])
+            self.assertIn("BC2", exported)
+            self.assertIn("43.2", exported)
+            self.assertIsNone(store.active())
+
+
+class EventMonitorTests(unittest.TestCase):
+    def test_timestamp_parser_preserves_nanosecond_precision(self) -> None:
+        monitor_path = Path(__file__).parents[1] / "scripts" / "ptpbox_event_monitor.py"
+        spec = importlib.util.spec_from_file_location("ptpbox_event_monitor", monitor_path)
+        assert spec and spec.loader
+        monitor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(monitor)
+
+        self.assertEqual(1_725_000_000_123_456_789, monitor.timestamp_ns("1725000000.123456789"))
+
+
+if __name__ == "__main__":
+    unittest.main()

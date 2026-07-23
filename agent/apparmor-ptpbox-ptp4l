@@ -3,4 +3,5 @@
 # socket or PTPBox's per-process management sockets and inherited log files.
 capability sys_admin,
 @{run}/ptpbox/ptp4l-* rw,
+@{run}/ptpbox/monitor-* rw,
 /var/log/ptpbox/** rw,

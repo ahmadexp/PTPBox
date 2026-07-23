@@ -46,6 +46,34 @@ the clock stepped or slewed on recovery.
 Run a matrix of proportional and integral constants with an identical stimulus.
 Compare settling time, overshoot, steady-state RMS, and worst downstream MTIE.
 
+The Intelligence workbench can rank a bounded PI grid without changing live
+hardware. It replays the current capture, evaluates safe seed points, fits an
+RBF Gaussian-process surrogate, and selects additional candidates with expected
+improvement. The winning gain pair is only staged for review. The run result
+records `live_changes: 0`.
+
+### Regime-transition trial
+
+Use the one-hop netem chamber to add a bounded delay, jitter, or loss condition
+for 30–120 seconds. Compare:
+
+- Bayesian online change probability and detection latency;
+- IMM quiet/dynamic/holdover mode probabilities;
+- path-event continuity and apparent directional residual;
+- factor-graph residuals and covariance-aware cascade uncertainty;
+- acquisition and recovery behavior after the fault expires.
+
+The controller removes the qdisc on expiry, explicit clear, or cascade stop.
+Record the exact target, impairment, and duration in the run metadata.
+
+### Thermal holdover
+
+Let the system collect a long locked baseline with temperature sensors present,
+enter clock-servo holdover without stopping observation, and compare the
+temperature-conditioned phase forecast with the measured direct PHC drift.
+Treat a missing sensor as missing data; do not use a temperature inferred from
+servo behavior.
+
 ## Servo parameters
 
 | Parameter | Effect | Trade-off |
@@ -63,10 +91,14 @@ Compare settling time, overshoot, steady-state RMS, and worst downstream MTIE.
 - **P95 / peak:** captures excursions that RMS can hide.
 - **MTIE:** bounds peak-to-peak time-error growth across observation intervals.
 - **TDEV:** separates time stability across averaging intervals.
-- **Allan deviation:** characterizes oscillator/frequency noise processes.
+- **ADEV / MDEV / HDEV:** characterize fractional-frequency noise with
+  different sensitivity to phase modulation, white phase noise, and linear
+  frequency drift.
+- **Theo1:** extends the useful long-τ region of a finite phase record.
 
-Only RMS, density, P95, and MTIE presentation are currently built into the UI.
-Direct TDEV and Allan-deviation computation are planned.
+The Metrology workbench computes all six families at power-of-two averaging
+intervals and reports the usable-pair count. TDEV/MTIE/Theo1 retain nanosecond
+units; ADEV/MDEV/HDEV are dimensionless fractional-frequency deviations.
 
 ## Result naming
 
@@ -78,6 +110,14 @@ Use a compact name that captures the manipulated variable:
 
 Keep raw logs immutable. Put derived CSV/plots beside them with a suffix such as
 `_summary`, `_mtie`, or `_filtered`.
+
+The built-in run recorder preserves raw PHC comparison rows and the complete
+applied configuration in `runtime/experiments.sqlite3`. Export the run from the
+Metrology ledger before moving it to a long-term dataset:
+
+```text
+GET /api/experiments/run-YYYYMMDD-HHMMSS/export
+```
 
 ## Comparing runs
 

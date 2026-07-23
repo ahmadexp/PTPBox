@@ -16,6 +16,16 @@ if ! id "$PTPBOX_USER_NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
+missing_commands=()
+for required in ip nsenter ethtool ptp4l pmc phc_ctl ts2phc tc; do
+  command -v "$required" >/dev/null 2>&1 || missing_commands+=("$required")
+done
+if (( ${#missing_commands[@]} )); then
+  echo "Missing runtime dependencies: ${missing_commands[*]}" >&2
+  echo "Install linuxptp, iproute2, and ethtool before running this installer." >&2
+  exit 1
+fi
+
 # The observation service opens /dev/ptp* read-only through this conventional
 # udev-owned group. SupplementaryGroups applies it only to the service.
 getent group clock >/dev/null || groupadd --system clock
@@ -31,8 +41,11 @@ fi
 
 install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /etc/linuxptp /run/netns /run/ptpbox /var/log/ptpbox
 install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_agent.py"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox_research.py" "$INSTALL_DIR/agent/ptpbox_research.py"
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_kalman_servo.py" /usr/local/sbin/ptpbox-kalman-servo
+install -m 0755 "$SOURCE_DIR/scripts/ptpbox_event_monitor.py" /usr/local/sbin/ptpbox-event-monitor
+install -m 0755 "$SOURCE_DIR/scripts/ptpbox_pps_compare.py" /usr/local/sbin/ptpbox-pps-compare
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" /etc/tmpfiles.d/ptpbox.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/ptpbox.conf
@@ -68,8 +81,9 @@ chmod 0644 /etc/systemd/system/ptpbox-agent.service
 install -d -o "$PTPBOX_USER_NAME" -g "$PTPBOX_GROUP_NAME" -m 0755 "$PTPBOX_ROOT_DIR/runtime"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/config.json" "$ETC_DIR/config.json"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.json"
+ln -sfn "$PTPBOX_ROOT_DIR/runtime/fault-request.json" "$ETC_DIR/fault-request.json"
 
-printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo" > /etc/sudoers.d/ptpbox-web
+printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo, /usr/local/sbin/ptpboxctl fault" > /etc/sudoers.d/ptpbox-web
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 

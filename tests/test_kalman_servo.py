@@ -13,6 +13,18 @@ SPEC.loader.exec_module(KALMAN)
 
 
 class KalmanServoTests(unittest.TestCase):
+    def test_reacquisition_keeps_phase_samples_with_negative_delay_estimates(self) -> None:
+        sample = KALMAN.parse_log_sample(
+            "ptp4l[294783.152]: master offset 2386 s0 freq +1408 path delay -224"
+        )
+
+        self.assertEqual((2386.0, 294783.152, -224.0), sample)
+        self.assertIsNone(
+            KALMAN.parse_log_sample(
+                "ptp4l[294783.152]: master offset 2386 s0 freq +1408 path delay 1000001"
+            )
+        )
+
     def test_tracks_phase_and_oscillator_frequency_under_closed_loop_control(self) -> None:
         servo = KALMAN.KalmanServo(
             measurement_noise_ns=20.0,

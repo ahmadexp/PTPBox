@@ -52,8 +52,20 @@ and whether privileged lifecycle control is installed.
       }
     }
   },
+  "advanced_capabilities": {
+    "dpll": false,
+    "synce": false,
+    "path_monitor": true,
+    "temperature": true,
+    "pps_common_edge": false
+  },
+  "profile_compliance": {
+    "profile": "G.8275.1 Telecom",
+    "compliant": true,
+    "certification": false
+  },
   "observer_only": false,
-  "agent_version": "1.9.0"
+  "agent_version": "2.0.0"
 }
 ```
 
@@ -213,10 +225,13 @@ PTPBox actually applied, `measurement.linuxptp_frequency_ppb` preserves
 LinuxPTP's non-disciplining rate estimate, and `control_source` is
 `ptpbox-kalman`.
 
-The raw payload preserves invalid samples but marks them `valid: false`. For
-this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
-driver timestamp failure. Such samples are counted separately and excluded
-from RMS and charts; their original values remain available through the API.
+The raw payload preserves invalid samples but marks them `valid: false`.
+Non-finite offsets and absolute path-delay estimates above 1 ms are rejected.
+A small negative LinuxPTP path-delay estimate is retained during acquisition:
+it can result from inter-clock phase being larger than the physical link delay
+and is not, by itself, evidence of a driver timestamp failure. Invalid samples
+are counted separately and excluded from RMS and charts; their original values
+remain available through the API.
 Servo `rms_ns` uses only valid locked (`s2`) samples. Acquisition samples remain
 in `samples` but cannot inflate the steady-state stability metric.
 
@@ -250,7 +265,17 @@ Validates and atomically stages a complete configuration document.
       "measurement_noise_ns": 200.0,
       "process_noise_ppb": 10.0,
       "phase_time_constant_s": 4.0,
-      "innovation_gate_sigma": 6.0
+      "innovation_gate_sigma": 6.0,
+      "drift_noise_ppb_s2": 0.05
+    }
+  },
+  "security": {
+    "authentication": {
+      "enabled": false,
+      "spp": 0,
+      "active_key_id": 1,
+      "sa_file": "/etc/linuxptp/ptpbox-sa.cfg",
+      "allow_unauth": 0
     }
   },
   "pps": {
@@ -264,6 +289,12 @@ Validates and atomically stages a complete configuration document.
     "pulse_width_ns": 100000000,
     "perout_phase_ns": 0,
     "extts_correction_ns": 0,
+    "comparison": {
+      "enabled": false,
+      "measure_only": true,
+      "reference": "BC2",
+      "history": 256
+    },
     "ts2phc": {
       "servo": "pi",
       "kp": 0.7,
@@ -298,12 +329,22 @@ then generates `/etc/linuxptp/ptpbox-ts2phc.conf` and starts one tracked
 `ts2phc` process. With PPS disabled, it neither changes PHC pins nor starts
 `ts2phc`.
 
+Profile presets validate the transport, delay mechanism, domain range, and
+two-step compatibility that PTPBox implements. The API sets
+`certification: false`: passing these checks is not a claim of complete
+conformance testing. The G.8275.1 preset uses domains 24–43, G.8275.2 uses
+44–63, 802.1AS uses domain 0, and the C37.238 preset uses the profile exception
+domain 254. LinuxPTP Authentication TLVs require two-step operation and a
+root-owned Security Association file below `/etc/linuxptp`; its key material is
+never returned by the API.
+
 ## Servo and holdover control
 
 ### `GET /api/servo`
 
 Returns the supported on-box servo implementations and the current per-clock
-state. The safe built-in choices are `pi`, `linreg`, `kalman`, and `nullf`.
+state. Choices are `pi`, `linreg`, `nullf`, `kalman`, `adaptive-kalman`, and
+`imm`.
 
 ### `POST /api/servo/control`
 
@@ -341,25 +382,91 @@ Run BC7 under the PTPBox Kalman servo with:
 }
 ```
 
-Kalman uses the raw LinuxPTP master offset as its observation. `ptp4l` runs
-with `free_running 1`, so it cannot compete with the dedicated controller for
-the PHC. The worker estimates signed phase and required oscillator correction,
-propagates a 2×2 covariance matrix, gates outliers against predicted innovation
-uncertainty, and applies the clamped frequency correction through
-`clock_adjtime`. Telemetry exposes the phase/frequency estimates, sigmas,
-innovation, accepted and rejected sample counts, correction, and acquisition
-state in each clock's `kalman` object.
+Every PTPBox Kalman mode uses the raw LinuxPTP master offset as its observation.
+`ptp4l` runs with `free_running 1`, so it cannot compete with the dedicated
+controller for the PHC. Classic `kalman` estimates phase and frequency.
+`adaptive-kalman` adds oscillator drift and online measurement-noise
+adaptation. `imm` mixes quiet, dynamic, and holdover models and returns the
+posterior regime probabilities. All modes gate outliers, re-anchor after a
+persistent phase transition, clamp the applied `clock_adjtime` frequency
+correction, and expose estimates, uncertainty, innovations, sample counts,
+rejections, correction, and lock state in each clock's `kalman` object.
 
 Use `target: "all"` for BC2 through the final OC. Changing the servo requires a
 brief restart of only the selected `ptp4l` instance; the agent and PHC sampler
 do not restart. `nullf` deliberately commands zero frequency correction and is
 intended for SyncE-backed diagnostics, not ordinary oscillator discipline.
 
+## Research and metrology
+
+### `GET /api/research?history=900`
+
+Returns one aligned analysis snapshot. `history` is clamped to 30–7200 seconds.
+The main objects are:
+
+| Object | Contents |
+| --- | --- |
+| `stability` | Per-clock ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1 curves with τ and pair counts |
+| `fusion` | Fused offsets, 1σ uncertainty, residuals, χ², and degrees of freedom |
+| `ensemble` | Covariance-regularized clock weights, virtual offset, and 1σ |
+| `error_budget` | Per-clock components and covariance-aware cascade uncertainty |
+| `temperature_holdover` | Forecast horizon, phase, frequency, and 1σ when sensors are aligned |
+| `system_identification` | ARX coefficients, poles, spectral radius, fit, residual, and settling time |
+| `auto_tune` | Replay-only GP/EI PI recommendation, frontier, candidate counts, and `live_changes: 0` |
+| `change_detection` | Bounded BOCPD probability and detected change indices |
+| `recurrence` | Binary recurrence matrix, recurrence rate, determinism, and threshold |
+| `koopman` | Fitted snapshot operator, singular values, residual σ, and amplification label |
+| `capabilities` | Hardware-derived DPLL, SyncE, devlink, temperature, path-monitor, and PPS status |
+| `profiles` | Applied configuration checks; explicitly not standards certification |
+| `experiments` | Recent durable runs and the active run |
+
+Calculations report `waiting` or `learning` until enough real samples exist.
+No research endpoint adjusts a clock.
+
+Adaptive-Kalman and IMM controller state is returned per clock in
+`GET /api/telemetry` under `clocks[].kalman`, because it is the state of the
+actual selected servo rather than a parallel research-only estimate.
+
+### `GET /api/capabilities?refresh=1`
+
+Returns capability-gated hardware truth. `refresh=1` bypasses the short cache.
+An unavailable DPLL or SyncE API is reported as unsupported with a reason; PTP
+lock is never used as a substitute.
+
+### `GET /api/profiles`
+
+Returns the active profile preset, implemented configuration checks, supported
+presets, validation scope, and `certification: false`.
+
+## Raw path events
+
+### `GET /api/path-events?limit=128`
+
+Returns up to 2048 preserved LinuxPTP slave-event-monitor records. A record
+contains the hop, Sync and Delay sequence IDs, `t1`, `t2`, `t3`, `t4`,
+correction fields, receipt time, and derived apparent timestamp residuals.
+Timestamp values remain decimal strings to avoid JSON floating-point loss.
+
+Sync and Delay sequence IDs are tracked independently. The apparent
+forward/reverse residual is not labeled path asymmetry because two
+unsynchronized PHCs contribute twice their phase difference.
+
+## Hardware capability status
+
+### `GET /api/status`
+
+In addition to process state, `pps.comparison` reports the common-edge EXTS
+comparator when it is configured. This mode requires one external PPS connected
+to at least two PHC input pins and remains `measure_only`; it does not start a
+competing `ts2phc` servo.
+
 ## Experiments
 
 ### `POST /api/experiments/start`
 
-Stages experiment metadata under `PTPBOX_STATE_DIR/experiment.json`.
+Creates a durable run in `PTPBOX_STATE_DIR/experiments.sqlite3`, snapshots the
+applied configuration, and starts recording every raw PHC comparison in WAL
+mode.
 
 ```json
 {
@@ -371,8 +478,46 @@ Stages experiment metadata under `PTPBOX_STATE_DIR/experiment.json`.
 }
 ```
 
-This endpoint records the experiment definition. Hardware stimulus injection is
-kept separate from the HTTP agent until a target-specific actuator is installed.
+Starting a new run completes any currently active run. Hardware stimulus remains
+a separate, guarded action.
+
+### `POST /api/experiments/stop`
+
+```json
+{ "id": "run-20260723-153000" }
+```
+
+`id` is optional; without it the active run is completed.
+
+### `GET /api/experiments`
+
+Returns the active run and the most recent 100 runs with sample/event counts,
+metadata, captured configuration, and lifecycle timestamps.
+
+### `GET /api/experiments/<run-id>/export`
+
+Downloads raw samples as CSV. Run IDs are validated and database paths are
+never accepted from the request.
+
+## Bounded fault control
+
+### `POST /api/fault/control`
+
+```json
+{
+  "target": "BC3",
+  "enabled": true,
+  "delay_us": 250,
+  "jitter_us": 50,
+  "loss_pct": 0,
+  "duration_s": 30
+}
+```
+
+The controller applies `tc netem` only to the declared node's downstream
+egress. At least one impairment must be non-zero. Delay and jitter are capped at
+one second, loss at 100%, and duration at one hour. The qdisc is removed on
+expiry, explicit clear, or cascade stop.
 
 ## Lifecycle control
 
@@ -382,11 +527,12 @@ kept separate from the HTTP agent until a target-specific actuator is installed.
 { "action": "status" }
 ```
 
-Allowed actions are `start`, `stop`, `restart`, and `status`. Servo transitions
-use `/api/servo/control` so their request is validated and atomically staged
-before the internal fixed helper verb is invoked. The agent invokes the fixed
-installed helper through `sudo -n`. Unsupported actions return `400`;
-missing integration returns `503`; lifecycle conflicts return `409`.
+Allowed HTTP lifecycle actions are `start`, `stop`, `restart`, and `status`.
+Servo and fault transitions use their dedicated endpoints so requests are
+validated and atomically staged before the internal fixed helper verb is
+invoked. The agent invokes the installed helper through `sudo -n`. Unsupported
+actions return `400`; missing integration returns `503`; lifecycle conflicts
+return `409`.
 
 ## Static application
 

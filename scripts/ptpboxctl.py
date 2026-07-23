@@ -24,12 +24,18 @@ PIDS_FILE = STATE_DIR / "processes.json"
 PHC_MAP_FILE = STATE_DIR / "phcs.json"
 SERVO_STATE_FILE = STATE_DIR / "servo-state.json"
 SERVO_REQUEST_FILE = CONFIG_FILE.with_name("servo-request.json")
+FAULT_REQUEST_FILE = CONFIG_FILE.with_name("fault-request.json")
+FAULT_STATE_FILE = STATE_DIR / "fault-state.json"
 KALMAN_HELPER = Path(os.environ.get("PTPBOX_KALMAN_HELPER", "/usr/local/sbin/ptpbox-kalman-servo"))
-SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman"}
+EVENT_MONITOR_HELPER = Path(os.environ.get("PTPBOX_EVENT_MONITOR_HELPER", "/usr/local/sbin/ptpbox-event-monitor"))
+PPS_COMPARE_HELPER = Path(os.environ.get("PTPBOX_PPS_COMPARE_HELPER", "/usr/local/sbin/ptpbox-pps-compare"))
+PATH_EVENT_FILE = STATE_DIR / "path-events.jsonl"
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"}
 LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 PPS_CONFIG_FILE = LINUXPTP_CONFIG_DIR / "ptpbox-ts2phc.conf"
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "profile": "G.8275.1 Telecom",
     "domain": 24,
     "transport": "L2",
     "delay_mechanism": "E2E",
@@ -48,6 +54,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "process_noise_ppb": 10.0,
             "phase_time_constant_s": 4.0,
             "innovation_gate_sigma": 6.0,
+            "drift_noise_ppb_s2": 0.05,
+        },
+    },
+    "security": {
+        "authentication": {
+            "enabled": False,
+            "spp": 0,
+            "active_key_id": 1,
+            "sa_file": "/etc/linuxptp/ptpbox-sa.cfg",
+            "allow_unauth": 0,
         },
     },
     "pps": {
@@ -61,6 +77,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pulse_width_ns": 100_000_000,
         "perout_phase_ns": 0,
         "extts_correction_ns": 0,
+        "comparison": {
+            "enabled": False,
+            "measure_only": True,
+            "reference": "BC2",
+            "history": 256,
+        },
         "ts2phc": {
             "servo": "pi",
             "kp": 0.7,
@@ -277,7 +299,7 @@ def render_ptp_config(
     servo = {**values["servo"], **(servo_override or {})}
     if servo["type"] not in SUPPORTED_SERVOS:
         raise ValueError(f"unsupported servo type: {servo['type']}")
-    external_kalman = servo["type"] == "kalman"
+    external_kalman = servo["type"] in {"kalman", "adaptive-kalman", "imm"}
     linuxptp_servo = "nullf" if external_kalman else servo["type"]
     if linuxptp_servo not in LINUXPTP_NATIVE_SERVOS:
         raise ValueError(f"unsupported LinuxPTP servo type: {linuxptp_servo}")
@@ -298,10 +320,31 @@ def render_ptp_config(
     port_sections = f"\n[{ingress}]\n\n[{egress}]\nserverOnly 1\n" if role == "boundary" else ""
     uds_lines = (
         f"uds_address /run/ptpbox/ptp4l-{uds_label}\n"
-        f"uds_ro_address /run/ptpbox/ptp4l-{uds_label}-ro"
+        f"uds_ro_address /run/ptpbox/ptp4l-{uds_label}-ro\n"
+        f"slave_event_monitor /run/ptpbox/monitor-{uds_label}"
         if uds_label
         else ""
     )
+    profile = str(values.get("profile", "IEEE 1588 Default"))
+    profile_lines = ""
+    if profile in {"G.8275.1 Telecom", "G.8275.2 Telecom"}:
+        profile_lines = "dataset_comparison G.8275.x\nG.8275.defaultDS.localPriority 128\nG.8275.portDS.localPriority 128"
+    elif profile == "IEEE 802.1AS gPTP":
+        profile_lines = "transportSpecific 0x1\nptp_dst_mac 01:80:C2:00:00:0E\np2p_dst_mac 01:80:C2:00:00:0E\nfollow_up_info 1"
+    authentication = values.get("security", {}).get("authentication", {})
+    authentication_lines = ""
+    if isinstance(authentication, dict) and authentication.get("enabled"):
+        sa_file = str(authentication["sa_file"])
+        if not sa_file.startswith("/etc/linuxptp/") or ".." in Path(sa_file).parts:
+            raise ValueError("security association file must be below /etc/linuxptp")
+        if not Path(sa_file).is_file():
+            raise ValueError(f"security association file does not exist: {sa_file}")
+        authentication_lines = (
+            f"spp {int(authentication['spp'])}\n"
+            f"active_key_id {int(authentication['active_key_id'])}\n"
+            f"sa_file {sa_file}\n"
+            f"allow_unauth {int(authentication['allow_unauth'])}"
+        )
     text = f"""[global]
 domainNumber {int(values['domain'])}
 network_transport {transport}
@@ -322,6 +365,8 @@ sanity_freq_limit {int(servo['sanity_freq_limit_ppb'])}
 logging_level 6
 use_syslog 0
 verbose 1
+{profile_lines}
+{authentication_lines}
 {uds_lines}
 {role_line}
 {jbod_line}
@@ -442,6 +487,7 @@ def spawn_kalman(
     ptp_log: str,
     values: dict[str, Any],
     processes: list[dict[str, Any]],
+    mode: str = "kalman",
 ) -> None:
     if not measurement_phc or not re.fullmatch(r"ptp\d+", measurement_phc):
         raise RuntimeError(f"Kalman servo requires a mapped measurement PHC for {node}")
@@ -456,6 +502,8 @@ def spawn_kalman(
     state_path.unlink(missing_ok=True)
     args = [
         str(KALMAN_HELPER),
+        "--mode",
+        mode,
         "--node",
         node,
         "--phc",
@@ -468,6 +516,8 @@ def spawn_kalman(
         str(float(kalman["measurement_noise_ns"])),
         "--process-noise-ppb",
         str(float(kalman["process_noise_ppb"])),
+        "--drift-noise-ppb-s2",
+        str(float(kalman["drift_noise_ppb_s2"])),
         "--phase-time-constant-s",
         str(float(kalman["phase_time_constant_s"])),
         "--innovation-gate-sigma",
@@ -477,14 +527,55 @@ def spawn_kalman(
         "--first-step-threshold-ns",
         str(float(servo["first_step_threshold_ns"])),
     ]
-    spawn(f"{node}-KALMAN", args, processes)
+    spawn(f"{node}-{mode.upper()}", args, processes)
     processes[-1].update(
         {
             "kind": "kalman",
+            "servo_type": mode,
             "kalman_for": node,
             "phc": measurement_phc,
             "state": str(state_path),
             "observation_log": ptp_log,
+        }
+    )
+
+
+def spawn_event_monitor(
+    node: str,
+    processes: list[dict[str, Any]],
+    values: dict[str, Any] | None = None,
+) -> None:
+    if not EVENT_MONITOR_HELPER.exists():
+        return
+    label = node.lower()
+    values = values or config()
+    transport_specific = 1 if values.get("profile") == "IEEE 802.1AS gPTP" else 0
+    socket_path = STATE_DIR / f"monitor-{label}"
+    socket_path.unlink(missing_ok=True)
+    args = [
+        str(EVENT_MONITOR_HELPER),
+        "--node",
+        node,
+        "--socket",
+        str(socket_path),
+        "--server",
+        str(STATE_DIR / f"ptp4l-{label}"),
+        "--output",
+        str(PATH_EVENT_FILE),
+        "--domain",
+        str(int(values["domain"])),
+        "--transport-specific",
+        str(transport_specific),
+    ]
+    spawn(f"{node}-PATH", args, processes)
+    processes[-1].update(
+        {
+            "kind": "path-monitor",
+            "node": node,
+            "socket": str(socket_path),
+            "event_file": str(PATH_EVENT_FILE),
+            "domain": int(values["domain"]),
+            "transport_specific": transport_specific,
         }
     )
 
@@ -592,6 +683,45 @@ def start_pps(values: dict[str, Any], inventory: dict[str, dict[str, Any]], proc
     pps = values["pps"]
     if not pps["enabled"]:
         return
+    comparison = pps.get("comparison", {})
+    if comparison.get("enabled"):
+        if pps.get("source") != "external" or not comparison.get("measure_only"):
+            raise ValueError("PPS common-edge comparison requires an external source in measure-only mode")
+        if pps.get("polarity") == "both":
+            raise ValueError("PPS common-edge comparison requires a single edge polarity")
+        if not PPS_COMPARE_HELPER.exists():
+            raise RuntimeError(f"PPS comparison helper is not installed: {PPS_COMPARE_HELPER}")
+        validate_pps_hardware(values, inventory)
+        args = [
+            str(PPS_COMPARE_HELPER),
+            "--reference",
+            str(comparison["reference"]),
+            "--pin",
+            str(int(pps["input_pin"])),
+            "--channel",
+            str(int(pps["channel"])),
+            "--polarity",
+            str(pps["polarity"]),
+            "--correction-ns",
+            str(int(pps["extts_correction_ns"])),
+            "--state",
+            str(STATE_DIR / "pps-comparison.json"),
+            "--history",
+            str(int(comparison["history"])),
+        ]
+        for node in pps["sinks"]:
+            args.extend(["--clock", f"{node}={pps_device(inventory, node)}"])
+        spawn("PPS-COMPARE", args, processes)
+        processes[-1].update(
+            {
+                "kind": "pps-comparison",
+                "pps_source": "external",
+                "pps_sinks": list(pps["sinks"]),
+                "reference": comparison["reference"],
+                "measure_only": True,
+            }
+        )
+        return
     source_device, sink_devices = render_ts2phc_config(PPS_CONFIG_FILE, values, inventory)
     args = ["ts2phc", "-f", str(PPS_CONFIG_FILE)]
     if source_device is None:
@@ -617,6 +747,7 @@ def start() -> dict[str, Any]:
     setup_result = setup()
     prioritize_timestamp_workers()
     topo = topology()
+    values = config()
     phcs_by_id = {item["id"]: item for item in setup_result.get("phcs", [])}
     control_state = servo_state(topo)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -646,7 +777,18 @@ def start() -> dict[str, Any]:
                 free_running=not node_servo["enabled"] and not first,
             )
             interfaces = [node["egress"]] if first else [node["ingress"]] if last else [node["ingress"], node["egress"]]
-            args = ["ip", "netns", "exec", node["name"], "ptp4l", "-f", str(node_config)]
+            # Enter only the declared network namespace. ``ip netns exec``
+            # also creates a private mount namespace, which turns host UDS
+            # paths into disconnected AppArmor paths and prevents ptp4l from
+            # sending slave-event-monitor TLVs back to the observatory.
+            args = [
+                "nsenter",
+                f"--net=/run/netns/{node['name']}",
+                "--",
+                "ptp4l",
+                "-f",
+                str(node_config),
+            ]
             # Intermediate ports are declared in their config so the egress can
             # carry the static server role. Endpoints use the simpler CLI form.
             if role != "boundary":
@@ -655,9 +797,19 @@ def start() -> dict[str, Any]:
             args.extend(["-m", "-q"])
             spawn(label, args, processes)
             processes[-1].update({"node": node["name"], "servo": node_servo})
-            if not first and node_servo["enabled"] and node_servo["type"] == "kalman":
-                spawn_kalman(node["name"], inventory.get("measurement_phc"), str(processes[-1]["log"]), config(), processes)
-        start_pps(config(), phcs_by_id, processes)
+            ptp_log = str(processes[-1].get("log", LOG_DIR / f"{label}.log"))
+            if not first and node_servo["enabled"] and node_servo["type"] in {"kalman", "adaptive-kalman", "imm"}:
+                spawn_kalman(
+                    node["name"],
+                    inventory.get("measurement_phc"),
+                    ptp_log,
+                    values,
+                    processes,
+                    mode=node_servo["type"],
+                )
+            if not first:
+                spawn_event_monitor(node["name"], processes, values)
+        start_pps(values, phcs_by_id, processes)
     except Exception:
         for item in reversed(processes):
             try:
@@ -716,6 +868,15 @@ def servo_apply() -> dict[str, Any]:
     state = servo_state(topo)
     changed: list[str] = []
     for name in targets:
+        for monitor_index in reversed(
+            [
+                i
+                for i, process in enumerate(processes)
+                if process.get("kind") == "path-monitor" and process.get("node") == name
+            ]
+        ):
+            stop_process(processes[monitor_index])
+            processes.pop(monitor_index)
         for kalman_index in reversed(
             [
                 i
@@ -756,7 +917,7 @@ def servo_apply() -> dict[str, Any]:
             egress=node["egress"] if role == "boundary" else None,
             uds_label=name.lower(),
             servo_override={"type": servo_type},
-            free_running=not enabled or servo_type == "kalman",
+            free_running=not enabled or servo_type in {"kalman", "adaptive-kalman", "imm"},
         )
         stop_process(item)
         replacement: list[dict[str, Any]] = []
@@ -771,7 +932,8 @@ def servo_apply() -> dict[str, Any]:
         }
         replacement[0].update({"node": name, "servo": node_state})
         processes[index] = replacement[0]
-        if enabled and servo_type == "kalman":
+        inserted = 0
+        if enabled and servo_type in {"kalman", "adaptive-kalman", "imm"}:
             kalman_processes: list[dict[str, Any]] = []
             spawn_kalman(
                 name,
@@ -779,8 +941,14 @@ def servo_apply() -> dict[str, Any]:
                 str(replacement[0]["log"]),
                 config(),
                 kalman_processes,
+                mode=servo_type,
             )
             processes[index + 1:index + 1] = kalman_processes
+            inserted += len(kalman_processes)
+        monitor_processes: list[dict[str, Any]] = []
+        spawn_event_monitor(name, monitor_processes, config())
+        if monitor_processes:
+            processes[index + 1 + inserted:index + 1 + inserted] = monitor_processes
         state["nodes"][name] = node_state
         PIDS_FILE.write_text(json.dumps(processes, indent=2) + "\n", encoding="utf-8")
         save_servo_state(state)
@@ -800,11 +968,23 @@ def status() -> dict[str, Any]:
         "processes": processes,
         "namespaces": [node["name"] for node in topo["nodes"] if namespace_exists(node["name"])],
         "servo": servo_state(topo),
+        "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
     }
 
 
 def stop() -> dict[str, Any]:
     require_root()
+    fault = load_json(FAULT_STATE_FILE, {})
+    if isinstance(fault, dict) and fault.get("enabled") and isinstance(fault.get("target"), str):
+        fault_node = next((node for node in topology()["nodes"] if node["name"] == fault["target"]), None)
+        if fault_node:
+            command(
+                ["ip", "netns", "exec", fault["target"], "tc", "qdisc", "del", "dev", fault_node["egress"], "root"],
+                check=False,
+            )
+        fault.update({"enabled": False, "cleared_at": time.time(), "message": "cleared by cascade stop"})
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        FAULT_STATE_FILE.write_text(json.dumps(fault, indent=2) + "\n", encoding="utf-8")
     processes = load_json(PIDS_FILE, [])
     stopped: list[str] = []
     if isinstance(processes, list):
@@ -849,6 +1029,72 @@ def teardown() -> dict[str, Any]:
     return {"ok": True, "restored_interfaces": restored}
 
 
+def fault_apply() -> dict[str, Any]:
+    """Apply or clear one bounded netem fault on a declared cascade egress."""
+    require_root()
+    request = load_json(FAULT_REQUEST_FILE)
+    if not isinstance(request, dict):
+        raise ValueError("missing fault request")
+    target = request.get("target")
+    enabled = request.get("enabled")
+    topo = topology()
+    allowed = {node["name"]: node for node in topo["nodes"][:-1]}
+    if target not in allowed or not isinstance(enabled, bool):
+        raise ValueError("fault target must be an upstream topology clock")
+    node = allowed[str(target)]
+    interface = node["egress"]
+    previous = load_json(FAULT_STATE_FILE, {})
+    if isinstance(previous, dict) and previous.get("enabled") and previous.get("target") != target:
+        previous_node = allowed.get(str(previous.get("target")))
+        if previous_node:
+            command(
+                ["ip", "netns", "exec", str(previous["target"]), "tc", "qdisc", "del", "dev", previous_node["egress"], "root"],
+                check=False,
+            )
+    if not enabled:
+        result = command(
+            ["ip", "netns", "exec", str(target), "tc", "qdisc", "del", "dev", interface, "root"],
+            check=False,
+        )
+        state = {
+            "enabled": False,
+            "target": target,
+            "interface": interface,
+            "cleared_at": time.time(),
+            "message": result.stderr.strip() if result.returncode and "No such file" not in result.stderr else "cleared",
+        }
+    else:
+        delay_us = float(request.get("delay_us", 0.0))
+        jitter_us = float(request.get("jitter_us", 0.0))
+        loss_pct = float(request.get("loss_pct", 0.0))
+        duration_s = float(request.get("duration_s", 30.0))
+        if not 0 <= delay_us <= 1_000_000 or not 0 <= jitter_us <= 1_000_000 or not 0 <= loss_pct <= 100 or not 1 <= duration_s <= 3600:
+            raise ValueError("fault parameters are outside guarded limits")
+        if delay_us == 0 and jitter_us == 0 and loss_pct == 0:
+            raise ValueError("fault needs delay, jitter, or loss")
+        netem = ["delay", f"{delay_us:.3f}us"]
+        if jitter_us:
+            netem.append(f"{jitter_us:.3f}us")
+        if loss_pct:
+            netem.extend(["loss", f"{loss_pct:.4f}%"])
+        command(["ip", "netns", "exec", str(target), "tc", "qdisc", "replace", "dev", interface, "root", "netem", *netem])
+        started_at = time.time()
+        state = {
+            "enabled": True,
+            "target": target,
+            "interface": interface,
+            "delay_us": delay_us,
+            "jitter_us": jitter_us,
+            "loss_pct": loss_pct,
+            "started_at": started_at,
+            "expires_at": started_at + duration_s,
+        }
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    FAULT_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    FAULT_STATE_FILE.chmod(0o644)
+    return {"ok": True, "fault": state}
+
+
 def discover() -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for interface in sorted(Path("/sys/class/net").iterdir(), key=lambda item: item.name):
@@ -866,7 +1112,7 @@ def discover() -> dict[str, Any]:
 def main() -> None:
     enter_namespace_mount_context()
     parser = argparse.ArgumentParser(description="Manage the PTPBox namespace cascade")
-    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "teardown"])
+    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "fault", "teardown"])
     args = parser.parse_args()
     try:
         if args.action == "discover":
@@ -884,6 +1130,8 @@ def main() -> None:
             result = status()
         elif args.action == "servo":
             result = servo_apply()
+        elif args.action == "fault":
+            result = fault_apply()
         else:
             result = teardown()
         print(json.dumps(result))

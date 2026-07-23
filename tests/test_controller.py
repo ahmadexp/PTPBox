@@ -105,6 +105,29 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("/dev/ptp8", processes[0]["command"])
         self.assertIn("/tmp/BC7-OC.log", processes[0]["command"])
 
+    def test_adaptive_and_imm_workers_receive_the_requested_estimator_mode(self) -> None:
+        temporary = Path(self.temporary.name)
+        helper = temporary / "ptpbox-kalman-servo"
+        helper.touch()
+        values = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))
+
+        for mode in ("adaptive-kalman", "imm"):
+            processes = []
+
+            def fake_spawn(label, args, spawned):
+                spawned.append({"label": label, "pid": 42, "command": args, "log": "/tmp/worker.log"})
+
+            with (
+                patch.object(CONTROLLER, "KALMAN_HELPER", helper),
+                patch.object(CONTROLLER, "STATE_DIR", temporary),
+                patch.object(CONTROLLER, "spawn", side_effect=fake_spawn),
+            ):
+                CONTROLLER.spawn_kalman("BC4", "ptp5", "/tmp/BC4.log", values, processes, mode=mode)
+
+            command = processes[0]["command"]
+            self.assertEqual(mode, command[command.index("--mode") + 1])
+            self.assertEqual(mode, processes[0]["servo_type"])
+
     def test_ts2phc_config_maps_periodic_output_and_external_timestamp_pins(self) -> None:
         path = Path(self.temporary.name) / "ptpbox-ts2phc.conf"
         values = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))

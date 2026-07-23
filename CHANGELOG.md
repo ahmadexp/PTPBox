@@ -4,6 +4,31 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added the advanced Precision Observatory: overlapping
+  ADEV/MDEV/TDEV/HDEV/MTIE/Theo1, weighted factor-graph clock fusion,
+  covariance-regularized ensemble time, and correlated cascade error budgets.
+- Added raw LinuxPTP path microscopy with preserved `t1`/`t2`/`t3`/`t4`
+  decimal timestamps, independently paired Sync and Delay sequence IDs, and an
+  explicit apparent-residual interpretation that does not overclaim one-way
+  path asymmetry.
+- Added adaptive phase/frequency/drift Kalman and quiet/dynamic/holdover IMM
+  servo modes, persistent-step reacquisition, temperature-aware holdover
+  prediction, ARX loop identification, replay-only Gaussian-process PI tuning,
+  recurrence quantification, Koopman/DMD, and Bayesian online change detection.
+- Added a durable SQLite/WAL experiment recorder with applied configuration,
+  raw sample/event capture, run ledger, and validated per-run CSV export.
+- Added capability-gated DPLL, SyncE, devlink, temperature, and common-edge PPS
+  status; PTP lock is never presented as proof of physical-frequency lock.
+- Added profile configuration guardrails for default IEEE 1588, G.8275.1,
+  G.8275.2, 802.1AS, and C37.238 presets, plus LinuxPTP Authentication TLV
+  staging without API key exposure.
+- Added one-hop bounded netem fault injection with topology-only targeting and
+  mandatory automatic expiry.
+- Switched namespace daemon launch to `nsenter --net` so NIC isolation remains
+  intact while AppArmor-confined LinuxPTP processes retain working
+  host-visible management sockets.
+- Added live, current screenshots for Overview, Metrology, Path microscope,
+  Intelligence, and Resilience plus a new social preview.
 - Added a real per-clock Kalman servo alongside PI and linear regression:
   LinuxPTP supplies hardware-timestamped observations in non-disciplining mode,
   a root-owned two-state phase/frequency filter propagates covariance and gates

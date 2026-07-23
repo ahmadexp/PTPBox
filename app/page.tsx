@@ -38,11 +38,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
-type ServoType = NativeServoType | "kalman";
+type ServoType = NativeServoType | "kalman" | "adaptive-kalman" | "imm";
 type PpsPolarity = "rising" | "falling" | "both";
 type PpsNodeState = "active" | "starting" | "stopped" | "ready" | "external" | "unavailable";
 
@@ -82,6 +82,17 @@ type PpsStatus = {
   sinks: string[];
   servo: NativeServoType;
   pulse_width_ns: number;
+  mode?: "common-edge-measurement" | "ts2phc-discipline";
+  comparison?: {
+    enabled?: boolean;
+    measure_only?: boolean;
+    reference?: string;
+    state?: {
+      mode?: string;
+      latest?: { offsets_ns?: Record<string, number>; observed_at?: number };
+      samples?: Array<{ offsets_ns: Record<string, number>; observed_at: number }>;
+    };
+  };
   nodes: Record<string, PpsNodeStatus>;
 };
 
@@ -160,6 +171,11 @@ type AgentStatus = {
   phc_sample_rate_hz?: number;
   servo_control?: ServoControlState;
   pps?: PpsStatus;
+  agent_version?: string;
+  advanced_capabilities?: Record<string, boolean>;
+  active_experiment?: ResearchExperiment | null;
+  profile_compliance?: ResearchPayload["profiles"];
+  fault?: { enabled?: boolean; target?: string; expires_at?: number };
 };
 
 type HostInterface = {
@@ -204,6 +220,153 @@ type KalmanStatus = {
   measurement_noise_ns: number;
   process_noise_ppb: number;
   phase_time_constant_s: number;
+  drift_estimate_ppb_s?: number;
+  drift_sigma_ppb_s?: number;
+  adaptive_measurement_noise_ns?: number;
+  regime?: "quiet" | "dynamic" | "holdover" | string;
+  model_probabilities?: Record<string, number>;
+};
+
+type StabilityPoint = {
+  tau_s: number;
+  value: number;
+  pairs: number;
+  confidence: number | null;
+};
+
+type ResearchExperiment = {
+  id: string;
+  name: string;
+  kind: string;
+  state: "running" | "completed" | string;
+  started_at: number;
+  stopped_at: number | null;
+  sample_count?: number;
+  event_count?: number;
+};
+
+type PathEvent = {
+  node: string;
+  kind: "sync" | "delay";
+  observed_at: number;
+  sequence_id: number;
+  correction_ns: number;
+  t1_ns?: number | string;
+  t2_ns?: number | string;
+  t3_ns?: number | string;
+  t4_ns?: number | string;
+  forward_transit_ns?: number;
+  reverse_transit_ns?: number;
+  raw?: boolean;
+};
+
+type ResearchPayload = {
+  generated_at: number;
+  mode: "live" | "stale" | "waiting" | "simulation";
+  sample_count: number;
+  aligned_sample_count: number;
+  sample_rate_hz: number;
+  endpoint: string | null;
+  stability: Record<"adev" | "mdev" | "tdev" | "hdev" | "mtie" | "theo1", StabilityPoint[]>;
+  fusion: {
+    status?: string;
+    reference?: string;
+    nodes?: Record<string, { offset_ns: number; sigma_ns: number }>;
+    residuals?: Array<{ source: string; edge: string; residual_ns: number; normalized: number }>;
+    chi_square?: number;
+    degrees_of_freedom?: number;
+  };
+  ensemble: {
+    status: string;
+    samples?: number;
+    virtual_offset_ns?: number;
+    one_sigma_ns?: number;
+    weights?: Record<string, number>;
+  };
+  change_detection: {
+    status: string;
+    latest_probability?: number;
+    probabilities?: number[];
+    change_points?: number[];
+  };
+  recurrence: {
+    status: string;
+    matrix?: string[];
+    samples?: number;
+    recurrence_rate?: number;
+    determinism?: number;
+    diagonal_lines?: number;
+    threshold_sigma?: number;
+  };
+  koopman: {
+    status: string;
+    singular_values?: number[];
+    spectral_norm?: number;
+    residual_sigma_ns?: number;
+    interpretation?: string;
+  };
+  system_identification: {
+    status: string;
+    samples?: number;
+    spectral_radius?: number;
+    settling_time_s?: number | null;
+    dc_gain?: number;
+    r_squared?: number;
+    residual_sigma_ns?: number;
+    poles?: Array<{ real: number; imag: number; magnitude: number }>;
+  };
+  auto_tune: {
+    status: string;
+    samples?: number;
+    predicted_improvement_pct?: number;
+    safe_candidates?: number;
+    evaluated_candidates?: number;
+    recommendation?: { kp: number; ki: number; rms_ns: number; peak_ns: number; score: number; safe: boolean };
+    baseline?: { kp: number; ki: number; rms_ns: number; score: number };
+    frontier?: Array<{ kp: number; ki: number; score: number; rms_ns: number }>;
+  };
+  temperature_holdover: Record<string, {
+    status: string;
+    temperature_c?: number;
+    predicted_frequency_ppb?: number;
+    predicted_phase_ns?: number;
+    one_sigma_ns?: number;
+    horizon_s?: number;
+  }>;
+  error_budget: {
+    nodes: Record<string, {
+      rss_ns: number;
+      components_ns: Record<string, number>;
+      contribution_pct: Record<string, number>;
+    }>;
+    cascade?: {
+      hop_count: number;
+      samples: number;
+      independent_sigma_ns: number;
+      correlated_sigma_ns: number;
+      cross_covariance_ns2: number;
+      covariance_ns2?: number[][];
+    } | null;
+    method?: string;
+  };
+  capabilities: {
+    dpll?: { supported: boolean; devices?: unknown[] | Record<string, unknown>; reason?: string | null };
+    synce?: { supported: boolean; state?: string; reason?: string | null };
+    devlink_health?: { supported: boolean; reporters?: unknown };
+    temperature?: { supported: boolean; nodes?: Record<string, number> };
+    path_monitor?: { supported: boolean; events?: number; reason?: string | null };
+    pps_common_edge?: { supported: boolean; state?: { latest?: { offsets_ns?: Record<string, number> } } };
+  };
+  profiles: {
+    profile: string;
+    compliant: boolean;
+    available_profiles?: string[];
+    checks?: Array<{ name: string; actual: unknown; expected: unknown; pass: boolean }>;
+  };
+  path_microscope: { events: PathEvent[]; mode: "live" | "waiting" | "simulation"; provenance: string };
+  experiments: ResearchExperiment[];
+  active_experiment: ResearchExperiment | null;
+  security: { authentication: { enabled: boolean; spp: number; active_key_id: number; allow_unauth: number; key_material_exposed: false } };
 };
 
 type PhcSample = {
@@ -295,6 +458,22 @@ function agentBaseUrl() {
 }
 
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
+
+const SECTION_META: Record<Section, { title: string; description: string }> = {
+  Overview: { title: "Cascade overview", description: "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." },
+  "Multi-pendulum": { title: "Multi-pendulum", description: "Watch every previous-hop phase residual swing around its learned equilibrium." },
+  Covariance: { title: "Covariance lab", description: "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." },
+  "State space": { title: "State-space atlas", description: "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." },
+  Metrology: { title: "Metrology workbench", description: "Quantify stability, fuse clock states, build an ensemble timescale, and preserve reproducible raw experiments." },
+  "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
+  Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
+  Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
+  Analytics: { title: "Timing analytics", description: "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." },
+  Experiments: { title: "Experiments", description: "Design, run, and compare repeatable servo response tests." },
+  Interfaces: { title: "Interfaces & PHCs", description: "Map physical ports, PHCs, namespaces, and timestamping capability." },
+  Configuration: { title: "Configuration", description: "Shape protocol, servo, PPS I/O, authentication, and ts2phc behavior with guarded, reviewable changes." },
+  "Event log": { title: "Event log", description: "A precise account of state changes, measurements, and operator actions." },
+};
 
 const INITIAL_NODES: ClockNode[] = [
   { id: "BC1", label: "BC1 · GM", role: "Grandmaster", offset: 0, meanPathDelay: 0, rms: 0, frequencyPpb: 0, state: "REFERENCE", ingress: "enp25s0f0np0", egress: "enp25s0f1np1", phc: "ptp1", color: TRACE_COLORS[0], measured: true, sampleCount: 120, servoSampleCount: 120, phcReadSpan: 0, source: "simulation", lastSampleAt: null },
@@ -551,6 +730,128 @@ function mergeRawHistory(current: HistoryPoint[], incoming: HistoryPoint[], seco
   return [...unique.values()].sort((left, right) => left.t - right.t).slice(-30_000);
 }
 
+function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): ResearchPayload {
+  const endpoint = nodes[nodes.length - 1]?.id ?? null;
+  const endpointValues = endpoint ? history.map((point) => point.values[endpoint]).filter(Number.isFinite) : [];
+  const tauFactors = [1, 2, 4, 8, 16, 32].filter((factor) => endpointValues.length > factor * 3);
+  const stability: ResearchPayload["stability"] = { adev: [], mdev: [], tdev: [], hdev: [], mtie: [], theo1: [] };
+  tauFactors.forEach((factor) => {
+    const second = endpointValues.slice(0, -2 * factor).map((value, index) => endpointValues[index + 2 * factor] - 2 * endpointValues[index + factor] + value);
+    const adev = Math.sqrt(second.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * second.length)) * 1e-9 / factor;
+    const windows = endpointValues.slice(0, -factor).map((_value, index) => {
+      const values = endpointValues.slice(index, index + factor + 1);
+      return Math.max(...values) - Math.min(...values);
+    });
+    const confidence = Math.min(.99, 1 - 1 / Math.sqrt(second.length + 1));
+    stability.adev.push({ tau_s: factor, value: adev, pairs: second.length, confidence });
+    stability.mdev.push({ tau_s: factor, value: adev * (.86 + factor * .003), pairs: second.length, confidence });
+    stability.tdev.push({ tau_s: factor, value: factor * adev * 1e9 / Math.sqrt(3), pairs: second.length, confidence });
+    stability.hdev.push({ tau_s: factor, value: adev * .78, pairs: second.length, confidence });
+    stability.mtie.push({ tau_s: factor, value: Math.max(...windows, 0), pairs: windows.length, confidence: null });
+    stability.theo1.push({ tau_s: factor, value: Math.sqrt(second.reduce((sum, value) => sum + value * value, 0) / Math.max(1, second.length)), pairs: second.length, confidence });
+  });
+  const hopIds = nodes.slice(1).map((node) => node.id);
+  const hopSeries = hopIds.map((id) => history.map((point) => point.hopValues?.[id]).filter((value): value is number => Number.isFinite(value)));
+  const recurrenceLength = Math.min(64, ...hopSeries.map((series) => series.length));
+  const vectors = Array.from({ length: Math.max(0, recurrenceLength) }, (_, index) => hopSeries.map((series) => series[series.length - recurrenceLength + index]));
+  const distances = vectors.flatMap((left, row) => vectors.slice(0, row).map((right) => Math.sqrt(left.reduce((sum, value, index) => sum + (value - right[index]) ** 2, 0))));
+  const sortedDistances = [...distances].sort((left, right) => left - right);
+  const recurrenceThreshold = sortedDistances[Math.floor(sortedDistances.length * .14)] ?? 0;
+  const recurrenceMatrix = vectors.map((left) => vectors.map((right) => Math.sqrt(left.reduce((sum, value, index) => sum + (value - right[index]) ** 2, 0)) <= recurrenceThreshold ? "1" : "0").join(""));
+  const recurrenceCount = recurrenceMatrix.reduce((sum, row) => sum + [...row].filter((value) => value === "1").length, 0);
+  const variances = nodes.slice(1).map((node) => Math.max(1, node.rms ** 2));
+  const rawWeights = variances.map((value) => 1 / value);
+  const weightTotal = rawWeights.reduce((sum, value) => sum + value, 0);
+  const weights = Object.fromEntries(nodes.slice(1).map((node, index) => [node.id, rawWeights[index] / weightTotal]));
+  const virtualOffset = nodes.slice(1).reduce((sum, node) => sum + node.offset * (weights[node.id] ?? 0), 0);
+  const currentOffset = nodes[nodes.length - 1]?.offset ?? 0;
+  const pathEvents: PathEvent[] = nodes.slice(1).flatMap((node, index) => {
+    const base = 10_000_000_000 + index * 1_000_000;
+    const transit = Math.max(30, node.meanPathDelay / 2);
+    return [
+      { node: node.id, kind: "sync" as const, observed_at: Date.now() / 1000 - index * .04, sequence_id: 4100 + index, correction_ns: 8 + index, t1_ns: base, t2_ns: base + transit, forward_transit_ns: transit - 8 - index, raw: false },
+      { node: node.id, kind: "delay" as const, observed_at: Date.now() / 1000 - index * .04 + .01, sequence_id: 8200 + index, correction_ns: 5 + index, t3_ns: base + 600_000, t4_ns: base + 600_000 + transit + 12, reverse_transit_ns: transit + 7 - index, raw: false },
+    ];
+  });
+  const errorNodes = Object.fromEntries(nodes.map((node, index) => {
+    const components = {
+      cross_timestamp: node.phcUncertainty ?? (6 + index * 2),
+      servo: node.rms,
+      path: Math.max(0, node.meanPathDelay * .015),
+      holdover: index * 1.8,
+    };
+    const squared = Object.fromEntries(Object.entries(components).map(([key, value]) => [key, value * value]));
+    const total = Object.values(squared).reduce((sum, value) => sum + value, 0);
+    return [node.id, { rss_ns: Math.sqrt(total), components_ns: components, contribution_pct: Object.fromEntries(Object.entries(squared).map(([key, value]) => [key, 100 * value / Math.max(1e-9, total)])) }];
+  }));
+  return {
+    generated_at: Date.now() / 1000,
+    mode: "simulation",
+    sample_count: history.length,
+    aligned_sample_count: history.length,
+    sample_rate_hz: 1,
+    endpoint,
+    stability,
+    fusion: {
+      status: "solved",
+      reference: "BC1",
+      nodes: Object.fromEntries(nodes.map((node, index) => [node.id, { offset_ns: node.offset, sigma_ns: index === 0 ? 0 : 2 + index * 1.7 }])),
+      residuals: nodes.slice(1).map((node, index) => ({ source: "modeled PHC factor", edge: `BC1→${node.id}`, residual_ns: Math.sin(index) * 1.7, normalized: Math.sin(index) * .4 })),
+      chi_square: 1.86,
+      degrees_of_freedom: Math.max(0, nodes.length - 2),
+    },
+    ensemble: { status: "ready", samples: history.length, virtual_offset_ns: virtualOffset, one_sigma_ns: Math.sqrt(1 / weightTotal), weights },
+    change_detection: { status: "stable", latest_probability: .018, probabilities: history.map((_point, index) => .01 + .15 * Math.max(0, Math.sin(index * .12 - 2.5)) ** 8), change_points: [] },
+    recurrence: { status: "ready", matrix: recurrenceMatrix, samples: recurrenceLength, recurrence_rate: recurrenceCount / Math.max(1, recurrenceLength ** 2), determinism: .71, diagonal_lines: 18, threshold_sigma: recurrenceThreshold },
+    koopman: { status: "ready", singular_values: [1.014, .982, .941, .72, .38, .17], spectral_norm: 1.014, residual_sigma_ns: 2.84, interpretation: "amplifying" },
+    system_identification: { status: "stable", samples: history.length, spectral_radius: .921, settling_time_s: 48.6, dc_gain: .84, r_squared: .91, residual_sigma_ns: 4.2, poles: [{ real: .91, imag: .14, magnitude: .921 }, { real: .91, imag: -.14, magnitude: .921 }] },
+    auto_tune: {
+      status: "recommended",
+      samples: history.length,
+      predicted_improvement_pct: 22.4,
+      safe_candidates: 21,
+      evaluated_candidates: 36,
+      recommendation: { kp: .6, ki: .2, rms_ns: Math.max(1, (nodes[nodes.length - 1]?.rms ?? 20) * .776), peak_ns: Math.abs(currentOffset) * 1.2, score: 24.8, safe: true },
+      baseline: { kp: .7, ki: .3, rms_ns: nodes[nodes.length - 1]?.rms ?? 20, score: 31.9 },
+      frontier: [{ kp: .6, ki: .2, score: 24.8, rms_ns: 18.1 }, { kp: .8, ki: .2, score: 25.4, rms_ns: 18.6 }, { kp: .6, ki: .35, score: 27.1, rms_ns: 19.2 }],
+    },
+    temperature_holdover: Object.fromEntries(nodes.slice(1).map((node, index) => [node.id, { status: "ready", temperature_c: 42.8 + index * .7, predicted_frequency_ppb: node.frequencyPpb + index * .4, predicted_phase_ns: node.offset + node.frequencyPpb * 300, one_sigma_ns: 18 + index * 8, horizon_s: 300 }])),
+    error_budget: {
+      nodes: errorNodes,
+      cascade: {
+        hop_count: Math.max(0, nodes.length - 1),
+        samples: history.length,
+        independent_sigma_ns: Math.sqrt(nodes.slice(1).reduce((sum, node) => sum + node.rms ** 2, 0)),
+        correlated_sigma_ns: Math.sqrt(nodes.slice(1).reduce((sum, node, index) => sum + node.rms ** 2 * (1 + index * .08), 0)),
+        cross_covariance_ns2: nodes.slice(1).reduce((sum, node, index) => sum + node.rms ** 2 * index * .08, 0),
+      },
+      method: "modeled covariance propagation",
+    },
+    capabilities: {
+      dpll: { supported: false, reason: "Hardware-model mode does not invent DPLL state." },
+      synce: { supported: false, state: "not-reported", reason: "Hardware-model mode does not infer SyncE from PTP lock." },
+      devlink_health: { supported: false },
+      temperature: { supported: false, nodes: {} },
+      path_monitor: { supported: false, events: pathEvents.length, reason: "Modeled exchange shown for the hosted demo." },
+      pps_common_edge: { supported: false, state: {} },
+    },
+    profiles: {
+      profile: "G.8275.1 Telecom",
+      compliant: true,
+      available_profiles: ["IEEE 1588 Default", "G.8275.1 Telecom", "G.8275.2 Telecom", "IEEE 802.1AS gPTP", "IEEE C37.238 Power"],
+      checks: [
+        { name: "Transport", actual: "L2", expected: ["L2"], pass: true },
+        { name: "Delay mechanism", actual: "E2E", expected: ["E2E"], pass: true },
+        { name: "Two-step operation", actual: true, expected: true, pass: true },
+      ],
+    },
+    path_microscope: { events: pathEvents, mode: "simulation", provenance: "Deterministic modeled exchange; live mode uses LinuxPTP slave-event-monitor TLVs" },
+    experiments: [{ id: "run-model-024", name: "PI baseline / step response", kind: "step", state: "completed", started_at: Date.now() / 1000 - 1440, stopped_at: Date.now() / 1000 - 1320, sample_count: history.length * nodes.length, event_count: 6 }],
+    active_experiment: null,
+    security: { authentication: { enabled: false, spp: 0, active_key_id: 1, allow_unauth: 0, key_material_exposed: false } },
+  };
+}
+
 function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPoint[]; selected: string[]; nodes: ClockNode[]; compact?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -796,7 +1097,7 @@ function MultiPendulum({
   const links = useMemo(() => nodes.slice(1).map((node, index) => {
     const fullSeries = history.flatMap((point) => {
       const value = point.hopValues?.[node.id];
-      return Number.isFinite(value) ? [{ t: point.t, value }] : [];
+      return Number.isFinite(value) ? [{ t: point.t, value: value as number }] : [];
     });
     const series = zeroState.at === null ? fullSeries : fullSeries.filter((point) => point.t >= zeroState.at!);
     return analyzePendulumLink(node, index + 1, series, zeroState.baselines[node.id], autoZero);
@@ -942,7 +1243,7 @@ function eigenDecomposeSymmetric(input: number[][]) {
   const size = input.length;
   if (!size) return { values: [] as number[], vectors: [] as number[][] };
   const matrix = input.map((row) => [...row]);
-  const vectors = Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? 1 : 0));
+  const vectors: number[][] = Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? 1 : 0));
 
   for (let iteration = 0; iteration < size * size * 24; iteration += 1) {
     let pivotRow = 0;
@@ -1432,6 +1733,420 @@ function StateSpaceAtlas({
   );
 }
 
+function ResearchLineChart({ points, metric }: { points: StabilityPoint[]; metric: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap) return;
+    const bounds = wrap.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = bounds.width * dpr;
+    canvas.height = bounds.height * dpr;
+    canvas.style.width = `${bounds.width}px`;
+    canvas.style.height = `${bounds.height}px`;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.scale(dpr, dpr);
+    const width = bounds.width;
+    const height = bounds.height;
+    const padding = { left: 62, right: 22, top: 22, bottom: 38 };
+    context.clearRect(0, 0, width, height);
+    if (points.length < 2) {
+      context.fillStyle = "#69818a";
+      context.font = "11px ui-monospace, monospace";
+      context.textAlign = "center";
+      context.fillText("Collecting enough phase samples for stability statistics", width / 2, height / 2);
+      return;
+    }
+    const logX = points.map((point) => Math.log10(Math.max(1e-9, point.tau_s)));
+    const logY = points.map((point) => Math.log10(Math.max(1e-18, Math.abs(point.value))));
+    const xMin = Math.min(...logX);
+    const xMax = Math.max(...logX);
+    const yMin = Math.min(...logY) - .18;
+    const yMax = Math.max(...logY) + .18;
+    const x = (value: number) => padding.left + (value - xMin) / Math.max(.1, xMax - xMin) * (width - padding.left - padding.right);
+    const y = (value: number) => padding.top + (yMax - value) / Math.max(.1, yMax - yMin) * (height - padding.top - padding.bottom);
+    context.font = "9px ui-monospace, monospace";
+    context.textBaseline = "middle";
+    for (let index = 0; index <= 4; index += 1) {
+      const value = yMax - index / 4 * (yMax - yMin);
+      const py = y(value);
+      context.strokeStyle = "rgba(125,157,166,.12)";
+      context.beginPath();
+      context.moveTo(padding.left, py);
+      context.lineTo(width - padding.right, py);
+      context.stroke();
+      context.fillStyle = "#62777e";
+      context.textAlign = "right";
+      const displayed = 10 ** value;
+      context.fillText(metric === "ADEV" || metric === "MDEV" || metric === "HDEV" ? displayed.toExponential(1) : formatNanoseconds(displayed), padding.left - 9, py);
+    }
+    points.forEach((point, index) => {
+      const px = x(logX[index]);
+      context.strokeStyle = "rgba(125,157,166,.08)";
+      context.beginPath();
+      context.moveTo(px, padding.top);
+      context.lineTo(px, height - padding.bottom);
+      context.stroke();
+      context.fillStyle = "#62777e";
+      context.textAlign = "center";
+      context.fillText(`${point.tau_s < 1 ? point.tau_s.toFixed(2) : point.tau_s.toFixed(0)}s`, px, height - 16);
+    });
+    const gradient = context.createLinearGradient(padding.left, 0, width - padding.right, 0);
+    gradient.addColorStop(0, "#61dce3");
+    gradient.addColorStop(.55, "#77e2b3");
+    gradient.addColorStop(1, "#c4a0ef");
+    context.strokeStyle = gradient;
+    context.lineWidth = 2;
+    context.beginPath();
+    points.forEach((_point, index) => {
+      const px = x(logX[index]);
+      const py = y(logY[index]);
+      if (index === 0) context.moveTo(px, py);
+      else context.lineTo(px, py);
+    });
+    context.stroke();
+    points.forEach((_point, index) => {
+      context.fillStyle = "#0c171c";
+      context.strokeStyle = index === points.length - 1 ? "#c4a0ef" : "#77e2b3";
+      context.lineWidth = 1.4;
+      context.beginPath();
+      context.arc(x(logX[index]), y(logY[index]), index === points.length - 1 ? 4 : 3, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+    });
+  }, [metric, points]);
+  useEffect(() => {
+    draw();
+    const observer = new ResizeObserver(draw);
+    if (wrapRef.current) observer.observe(wrapRef.current);
+    return () => observer.disconnect();
+  }, [draw]);
+  return <div className="research-chart" ref={wrapRef}><canvas ref={canvasRef} aria-label={`${metric} stability chart`} /></div>;
+}
+
+function RecurrenceCanvas({ matrix }: { matrix: string[] }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !matrix.length) return;
+    const size = 320;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.scale(dpr, dpr);
+    context.fillStyle = "#071014";
+    context.fillRect(0, 0, size, size);
+    const cell = size / matrix.length;
+    matrix.forEach((row, y) => [...row].forEach((value, x) => {
+      if (value !== "1") return;
+      const distance = Math.abs(x - y);
+      context.fillStyle = distance < 2 ? "#77e2b3" : distance < 8 ? "#61dce3" : "rgba(196,160,239,.78)";
+      context.fillRect(x * cell, y * cell, Math.max(1, cell), Math.max(1, cell));
+    }));
+  }, [matrix]);
+  return <canvas className="recurrence-canvas" ref={canvasRef} width="320" height="320" aria-label="Recurrence matrix" />;
+}
+
+function MetrologyWorkbench({
+  research,
+  nodes,
+  metric,
+  setMetric,
+  experimentBusy,
+  toggleCapture,
+  exportRun,
+}: {
+  research: ResearchPayload;
+  nodes: ClockNode[];
+  metric: keyof ResearchPayload["stability"];
+  setMetric: (metric: keyof ResearchPayload["stability"]) => void;
+  experimentBusy: boolean;
+  toggleCapture: () => void;
+  exportRun: (id: string) => void;
+}) {
+  const endpoint = research.endpoint ?? nodes[nodes.length - 1]?.id;
+  const endpointBudget = research.error_budget.nodes[endpoint] ?? null;
+  const metricLabels: Array<[keyof ResearchPayload["stability"], string]> = [["adev", "ADEV"], ["mdev", "MDEV"], ["tdev", "TDEV"], ["hdev", "HDEV"], ["mtie", "MTIE"], ["theo1", "Theo1"]];
+  const metricLabel = metricLabels.find(([id]) => id === metric)?.[1] ?? metric.toUpperCase();
+  const latestMetric = research.stability[metric].at(-1);
+  const fusionNodes = research.fusion.nodes ?? {};
+  const ensembleWeights = research.ensemble.weights ?? {};
+  return (
+    <div className="research-layout">
+      <section className="instrument-panel research-hero">
+        <div>
+          <span className="section-kicker">TRACEABLE EXPERIMENT RECORD</span>
+          <h2>{research.active_experiment?.name ?? "Metrology recorder armed"}</h2>
+          <p>Raw PHC cycles, LinuxPTP observations, configuration, temperatures, controls, and events share one run identity. The database uses WAL commits so a browser disconnect does not erase the experiment.</p>
+          <div className="research-tags"><span>SQLITE / WAL</span><span>RAW + DERIVED</span><span>{research.sample_count.toLocaleString()} CYCLES</span><span>{research.mode.toUpperCase()}</span></div>
+        </div>
+        <div className="recorder-console">
+          <span>{research.active_experiment ? "CAPTURE ELAPSED" : "LAST COMPLETE RUN"}</span>
+          <strong>{research.active_experiment ? `${Math.max(0, Math.floor(research.generated_at - research.active_experiment.started_at))} s` : research.experiments[0]?.id ?? "NO RUN"}</strong>
+          <button className={research.active_experiment ? "danger-action" : "primary-action"} type="button" disabled={experimentBusy || research.mode === "simulation"} onClick={toggleCapture}>
+            {research.active_experiment ? <Square size={13} fill="currentColor" /> : <Radio size={14} />}
+            {experimentBusy ? "Transitioning…" : research.active_experiment ? "Stop & seal run" : "Start raw capture"}
+          </button>
+          {research.mode === "simulation" && <small>Recorder controls become active on the appliance.</small>}
+        </div>
+      </section>
+
+      <section className="instrument-panel stability-panel">
+        <div className="panel-heading">
+          <div><span className="section-kicker">IEEE 1139 / ITU-T G.810 METRICS</span><h2>Phase & frequency stability</h2></div>
+          <div className="segmented-control metrology-tabs">{metricLabels.map(([id, label]) => <button type="button" key={id} className={metric === id ? "active" : ""} onClick={() => setMetric(id)}>{label}</button>)}</div>
+        </div>
+        <div className="stability-summary">
+          <div><span>Endpoint</span><strong>{endpoint ?? "—"}</strong><small>relative to BC1</small></div>
+          <div><span>{metricLabel} at longest τ</span><strong>{latestMetric ? metric === "adev" || metric === "mdev" || metric === "hdev" ? latestMetric.value.toExponential(2) : formatNanoseconds(latestMetric.value) : "—"}</strong><small>τ {latestMetric?.tau_s.toFixed(1) ?? "—"} s</small></div>
+          <div><span>Effective pairs</span><strong>{latestMetric?.pairs.toLocaleString() ?? "—"}</strong><small>{latestMetric?.confidence ? `${(latestMetric.confidence * 100).toFixed(0)}% coverage proxy` : "max interval statistic"}</small></div>
+          <div><span>Cadence</span><strong>{research.sample_rate_hz.toFixed(1)} Hz</strong><small>{research.aligned_sample_count.toLocaleString()} aligned cycles</small></div>
+        </div>
+        <ResearchLineChart points={research.stability[metric]} metric={metricLabel} />
+        <div className="instrument-note"><Info size={13} /><span>ADEV, MDEV, and HDEV are fractional-frequency deviations. TDEV, MTIE, and Theo1 retain nanosecond units. No display smoothing is applied; each point states its effective pair count.</span></div>
+      </section>
+
+      <section className="instrument-panel fusion-panel">
+        <div className="panel-heading"><div><span className="section-kicker">WEIGHTED FACTOR GRAPH</span><h2>Clock-state fusion</h2></div><span className={`quality-badge ${research.fusion.status === "solved" ? "" : "pending"}`}>{research.fusion.status?.toUpperCase() ?? "WAITING"}</span></div>
+        <div className="fusion-chain">
+          {nodes.map((node) => {
+            const estimate = fusionNodes[node.id];
+            return <div key={node.id}><i style={{ background: node.color }} /><span>{node.id}</span><strong>{estimate ? formatNanoseconds(estimate.offset_ns, true) : "—"}</strong><small>{estimate ? `±${formatNanoseconds(estimate.sigma_ns)}` : "no factor"}</small></div>;
+          })}
+        </div>
+        <div className="fusion-residuals">
+          {(research.fusion.residuals ?? []).slice(0, 6).map((residual, index) => <div key={`${residual.edge}-${index}`}><span>{residual.edge}</span><strong>{formatNanoseconds(residual.residual_ns, true)}</strong><i><em style={{ width: `${Math.min(100, Math.abs(residual.normalized) * 20)}%` }} /></i><small>{residual.source}</small></div>)}
+        </div>
+      </section>
+
+      <section className="instrument-panel ensemble-panel">
+        <div className="panel-heading"><div><span className="section-kicker">AT1-STYLE ENSEMBLE</span><h2>Virtual lab timescale</h2></div><span className="quality-badge">COVARIANCE WEIGHTED</span></div>
+        <div className="ensemble-value"><span>VIRTUAL OFFSET</span><strong>{research.ensemble.virtual_offset_ns == null ? "—" : formatNanoseconds(research.ensemble.virtual_offset_ns, true)}</strong><small>{research.ensemble.one_sigma_ns == null ? "learning covariance" : `one sigma ${formatNanoseconds(research.ensemble.one_sigma_ns)}`}</small></div>
+        <div className="ensemble-weights">{Object.entries(ensembleWeights).map(([node, weight], index) => <div key={node}><span><i style={{ background: TRACE_COLORS[index + 1] }} />{node}</span><strong>{(weight * 100).toFixed(1)}%</strong><em><i style={{ width: `${weight * 100}%`, background: TRACE_COLORS[index + 1] }} /></em></div>)}</div>
+      </section>
+
+      <section className="instrument-panel budget-panel">
+        <div className="panel-heading"><div><span className="section-kicker">UNCERTAINTY LEDGER</span><h2>{endpoint} error budget</h2></div><span className="quality-badge">{endpointBudget ? `RSS ${formatNanoseconds(endpointBudget.rss_ns)}` : "LEARNING"}</span></div>
+        {endpointBudget ? <><div className="budget-bars">{Object.entries(endpointBudget.components_ns).map(([name, value]) => <div key={name}><span>{name.replace("_", " ")}</span><strong>{formatNanoseconds(value)}</strong><em><i style={{ width: `${endpointBudget.contribution_pct[name] ?? 0}%` }} /></em><small>{(endpointBudget.contribution_pct[name] ?? 0).toFixed(1)}%</small></div>)}</div>{research.error_budget.cascade && <div className="covariance-budget"><span>CASCADE COVARIANCE</span><strong>{formatNanoseconds(research.error_budget.cascade.correlated_sigma_ns)}</strong><small>vs {formatNanoseconds(research.error_budget.cascade.independent_sigma_ns)} if hops were independent · {research.error_budget.cascade.samples} aligned samples</small></div>}</> : <div className="empty-instrument">Waiting for uncertainty factors.</div>}
+      </section>
+
+      <section className="instrument-panel run-ledger-panel">
+        <div className="panel-heading"><div><span className="section-kicker">RUN LEDGER</span><h2>Reproducible captures</h2></div><span className="scan-time">{research.experiments.length} runs</span></div>
+        <div className="run-ledger">
+          {research.experiments.length ? research.experiments.slice(0, 5).map((run) => <div key={run.id}><i className={run.state === "running" ? "running" : ""} /><span><strong>{run.name}</strong><small>{run.id} · {run.kind} · {new Date(run.started_at * 1000).toLocaleString()}</small></span><em>{run.sample_count?.toLocaleString() ?? 0} samples</em><button type="button" disabled={research.mode === "simulation"} onClick={() => exportRun(run.id)}><Download size={13} /> CSV</button></div>) : <div className="empty-instrument">No captured experiments yet.</div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PathMicroscopeView({ research, nodes }: { research: ResearchPayload; nodes: ClockNode[] }) {
+  const events = research.path_microscope.events;
+  const latestByNode = Object.fromEntries(nodes.slice(1).map((node) => {
+    const nodeEvents = events.filter((event) => event.node === node.id);
+    return [node.id, { sync: [...nodeEvents].reverse().find((event) => event.kind === "sync"), delay: [...nodeEvents].reverse().find((event) => event.kind === "delay") }];
+  })) as Record<string, { sync?: PathEvent; delay?: PathEvent }>;
+  const comparison = research.capabilities.pps_common_edge?.state?.latest?.offsets_ns ?? {};
+  return (
+    <div className="path-layout">
+      <section className="instrument-panel path-hero">
+        <div><span className="section-kicker">RAW IEEE 1588 EXCHANGE</span><h2>The packet path, timestamp by timestamp</h2><p>LinuxPTP emits slave-event-monitor TLVs directly from the active port state machine. Sync and Delay records retain their independent sequence numbers; the Observatory never fabricates a four-timestamp exchange by pairing unrelated sequences.</p></div>
+        <div className={`path-capture-state ${research.path_microscope.mode}`}><Radio size={17} /><span><strong>{research.path_microscope.mode === "live" ? "TLV CAPTURE LIVE" : research.path_microscope.mode === "simulation" ? "MODELED DEMO" : "WAITING FOR TLVs"}</strong><small>{events.length} exchange records · {research.capabilities.path_monitor?.events ?? 0} hardware events</small></span></div>
+      </section>
+      <section className="instrument-panel exchange-rack">
+        <div className="panel-heading"><div><span className="section-kicker">HOP MICROSCOPES</span><h2>Origin, ingress, correction, response</h2></div><code>t1 / t2 · t3 / t4</code></div>
+        <div className="exchange-grid">
+          {nodes.slice(1).map((node, index) => {
+            const pair = latestByNode[node.id];
+            return (
+              <article className="exchange-card" key={node.id}>
+                <header><span style={{ color: node.color }}>H{index + 1}</span><strong>{nodes[index].id} → {node.id}</strong><em>{pair.sync || pair.delay ? "CAPTURED" : "WAITING"}</em></header>
+                <div className="timestamp-lane">
+                  <div><i>T1</i><span>Sync origin</span><strong>{pair.sync?.t1_ns == null ? "—" : `${String(pair.sync.t1_ns).slice(-9)} ns`}</strong></div>
+                  <b><ArrowRight size={14} /><small>{pair.sync?.forward_transit_ns == null ? "—" : `${formatNanoseconds(pair.sync.forward_transit_ns)} apparent`}</small></b>
+                  <div><i>T2</i><span>Sync ingress</span><strong>{pair.sync?.t2_ns == null ? "—" : `${String(pair.sync.t2_ns).slice(-9)} ns`}</strong></div>
+                </div>
+                <div className="timestamp-lane reverse">
+                  <div><i>T4</i><span>Delay response</span><strong>{pair.delay?.t4_ns == null ? "—" : `${String(pair.delay.t4_ns).slice(-9)} ns`}</strong></div>
+                  <b><ArrowRight size={14} /><small>{pair.delay?.reverse_transit_ns == null ? "—" : `${formatNanoseconds(pair.delay.reverse_transit_ns)} apparent`}</small></b>
+                  <div><i>T3</i><span>Delay origin</span><strong>{pair.delay?.t3_ns == null ? "—" : `${String(pair.delay.t3_ns).slice(-9)} ns`}</strong></div>
+                </div>
+                <footer><span>SYNC #{pair.sync?.sequence_id ?? "—"}</span><span>DELAY #{pair.delay?.sequence_id ?? "—"}</span><span>CF {formatNanoseconds((pair.sync?.correction_ns ?? 0) + (pair.delay?.correction_ns ?? 0))}</span></footer>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+      <section className="instrument-panel asymmetry-panel">
+        <div className="panel-heading"><div><span className="section-kicker">DIRECTIONAL TIMESTAMP RESIDUAL</span><h2>Forward minus reverse observation</h2><p>This raw difference contains twice the inter-clock offset plus any path asymmetry; it is not labeled as one-way delay.</p></div><span className="quality-badge">SEQUENCES KEPT SEPARATE</span></div>
+        <div className="asymmetry-rows">{nodes.slice(1).map((node, index) => {
+          const pair = latestByNode[node.id];
+          const directionalDelta = pair.sync?.forward_transit_ns != null && pair.delay?.reverse_transit_ns != null ? pair.sync.forward_transit_ns - pair.delay.reverse_transit_ns : null;
+          return <div key={node.id}><span>H{index + 1} · {node.id}</span><i><em style={{ width: directionalDelta == null ? "0%" : `${Math.min(100, Math.abs(directionalDelta))}%`, marginLeft: directionalDelta != null && directionalDelta < 0 ? `${50 - Math.min(50, Math.abs(directionalDelta) / 2)}%` : "50%" }} /></i><strong>{directionalDelta == null ? "—" : formatNanoseconds(directionalDelta, true)}</strong></div>;
+        })}</div>
+      </section>
+      <section className="instrument-panel pps-compare-panel">
+        <div className="panel-heading"><div><span className="section-kicker">COMMON-EDGE PHC COMPARISON</span><h2>PPS event timestamps</h2></div><span className={`quality-badge ${research.capabilities.pps_common_edge?.supported ? "" : "pending"}`}>{research.capabilities.pps_common_edge?.supported ? "LIVE EDGE" : "CAPABILITY GATED"}</span></div>
+        {Object.keys(comparison).length ? <div className="pps-comparison-values">{Object.entries(comparison).map(([node, value], index) => <div key={node}><i style={{ background: TRACE_COLORS[index + 1] }} /><span>{node}</span><strong>{formatNanoseconds(value, true)}</strong></div>)}</div> : <div className="capability-empty"><Zap size={20} /><div><strong>No common physical edge captured</strong><span>Select External PPS + measure-only comparison in Configuration. At least two PHCs must expose programmable EXTS pins; unsupported hardware remains explicitly unavailable.</span></div></div>}
+      </section>
+      <div className="instrument-note path-provenance"><ShieldCheck size={13} /><span>{research.path_microscope.provenance}</span></div>
+    </div>
+  );
+}
+
+function IntelligenceWorkbench({
+  research,
+  activeNode,
+  stageTune,
+}: {
+  research: ResearchPayload;
+  activeNode: ClockNode;
+  stageTune: (kp: number, ki: number) => void;
+}) {
+  const probabilities = activeNode.servoType === "imm" ? activeNode.kalman?.model_probabilities : undefined;
+  const temperature = research.temperature_holdover[activeNode.id];
+  const changeProbability = research.change_detection.latest_probability ?? 0;
+  return (
+    <div className="intelligence-layout">
+      <section className="instrument-panel estimator-hero">
+        <div><span className="section-kicker">ADAPTIVE THREE-STATE / IMM</span><h2>Phase · frequency · oscillator drift</h2><p>The adaptive filter estimates phase, fractional frequency, and aging rate. IMM mode runs quiet, dynamic, and holdover models together and changes their probabilities from measured innovations.</p></div>
+        <div className="state-vector">
+          <div><span>x₀ · PHASE</span><strong>{activeNode.kalman ? formatNanoseconds(activeNode.kalman.phase_estimate_ns, true) : formatNanoseconds(activeNode.offset, true)}</strong><small>σ {activeNode.kalman ? formatNanoseconds(activeNode.kalman.phase_sigma_ns) : "modeled"}</small></div>
+          <div><span>x₁ · FREQUENCY</span><strong>{(activeNode.kalman?.frequency_estimate_ppb ?? activeNode.frequencyPpb).toFixed(3)} ppb</strong><small>correction state</small></div>
+          <div><span>x₂ · DRIFT</span><strong>{activeNode.kalman?.drift_estimate_ppb_s == null ? "—" : `${activeNode.kalman.drift_estimate_ppb_s.toFixed(4)} ppb/s`}</strong><small>oscillator aging</small></div>
+        </div>
+      </section>
+      <section className="instrument-panel regime-panel">
+        <div className="panel-heading"><div><span className="section-kicker">INTERACTING MULTIPLE MODEL</span><h2>Regime probability</h2></div><span className={`quality-badge ${probabilities ? "" : "pending"}`}>{probabilities ? activeNode.kalman?.regime?.toUpperCase() ?? "ACQUIRING" : "NOT ACTIVE"}</span></div>
+        {probabilities ? <><div className="regime-bars">{Object.entries(probabilities).map(([name, probability], index) => <div key={name}><span><i style={{ background: TRACE_COLORS[index + 1] }} />{name}</span><strong>{(probability * 100).toFixed(1)}%</strong><em><i style={{ width: `${probability * 100}%`, background: TRACE_COLORS[index + 1] }} /></em></div>)}</div>
+        <div className="innovation-ledger"><div><span>Innovation</span><strong>{activeNode.kalman ? formatNanoseconds(activeNode.kalman.innovation_ns, true) : "—"}</strong></div><div><span>Adaptive R</span><strong>{activeNode.kalman?.adaptive_measurement_noise_ns ? formatNanoseconds(activeNode.kalman.adaptive_measurement_noise_ns) : "learning"}</strong></div><div><span>Rejected</span><strong>{activeNode.kalman?.rejected_count ?? 0}</strong></div></div></> : <div className="capability-empty"><Gauge size={20} /><div><strong>IMM is not controlling {activeNode.id}</strong><span>Select the IMM servo to observe measured quiet, dynamic, and holdover model probabilities. No modeled probabilities are substituted into a live session.</span></div></div>}
+      </section>
+      <section className="instrument-panel holdover-predictor">
+        <div className="panel-heading"><div><span className="section-kicker">TEMPERATURE-AWARE HOLDOVER</span><h2>{activeNode.id} forecast</h2></div><span className={`quality-badge ${temperature?.status === "ready" ? "" : "pending"}`}>{temperature?.status?.toUpperCase() ?? "NO SENSOR"}</span></div>
+        {temperature?.status === "ready" ? <><div className="forecast-dial"><span>+{temperature.horizon_s?.toFixed(0)} s</span><strong>{formatNanoseconds(temperature.predicted_phase_ns ?? 0, true)}</strong><small>±{formatNanoseconds(temperature.one_sigma_ns ?? 0)} · {(temperature.predicted_frequency_ppb ?? 0).toFixed(3)} ppb</small></div><div className="temperature-strip"><ThermometerFallback /><span>{temperature.temperature_c?.toFixed(1)} °C</span><em><i style={{ width: `${Math.min(100, Math.max(0, ((temperature.temperature_c ?? 20) - 20) / 60 * 100))}%` }} /></em></div></> : <div className="capability-empty"><TimerReset size={20} /><div><strong>Learning thermal coefficients</strong><span>A prediction is published only after aligned temperature and phase samples are available.</span></div></div>}
+      </section>
+      <section className="instrument-panel system-id-panel">
+        <div className="panel-heading"><div><span className="section-kicker">ARX SYSTEM IDENTIFICATION</span><h2>Measured loop dynamics</h2></div><span className={`quality-badge ${research.system_identification.status === "stable" ? "" : "pending"}`}>{research.system_identification.status.toUpperCase()}</span></div>
+        <div className="system-id-metrics"><div><span>Spectral radius</span><strong>{research.system_identification.spectral_radius?.toFixed(3) ?? "—"}</strong></div><div><span>Settling time</span><strong>{research.system_identification.settling_time_s == null ? "—" : `${research.system_identification.settling_time_s.toFixed(1)} s`}</strong></div><div><span>Model fit</span><strong>{research.system_identification.r_squared == null ? "—" : `${(research.system_identification.r_squared * 100).toFixed(1)}%`}</strong></div><div><span>Residual</span><strong>{research.system_identification.residual_sigma_ns == null ? "—" : formatNanoseconds(research.system_identification.residual_sigma_ns)}</strong></div></div>
+        <div className="pole-plane">{(research.system_identification.poles ?? []).map((pole, index) => <i key={index} style={{ left: `${50 + pole.real * 42}%`, top: `${50 - pole.imag * 42}%`, borderColor: TRACE_COLORS[index + 2] }}><span>{index + 1}</span></i>)}<span className="unit-circle" /><b className="axis-x" /><b className="axis-y" /></div>
+      </section>
+      <section className="instrument-panel tuner-panel">
+        <div className="panel-heading"><div><span className="section-kicker">REPLAY-SAFE OPTIMIZATION</span><h2>Constrained gain recommendation</h2></div><span className={`quality-badge ${research.auto_tune.status === "recommended" ? "" : "pending"}`}>{research.auto_tune.status.toUpperCase()}</span></div>
+        {research.auto_tune.recommendation ? <><div className="tune-recommendation"><div><span>RECOMMENDED PI</span><strong>Kp {research.auto_tune.recommendation.kp.toFixed(2)} · Ki {research.auto_tune.recommendation.ki.toFixed(2)}</strong><small>{research.auto_tune.safe_candidates}/{research.auto_tune.evaluated_candidates} replay-safe candidates</small></div><em><strong>{research.auto_tune.predicted_improvement_pct?.toFixed(1)}%</strong><span>predicted RMS improvement</span></em></div><div className="frontier-row">{research.auto_tune.frontier?.slice(0, 5).map((candidate, index) => <div key={`${candidate.kp}-${candidate.ki}`} style={{ height: `${35 + (1 - index / 5) * 45}%` }}><span>{candidate.score.toFixed(1)}</span></div>)}</div><button type="button" className="full-secondary" onClick={() => stageTune(research.auto_tune.recommendation!.kp, research.auto_tune.recommendation!.ki)}><SlidersHorizontal size={14} /> Stage recommendation for review</button></> : <div className="capability-empty"><Gauge size={20} /><div><strong>More samples required</strong><span>Optimization never explores gains on live hardware. It ranks candidates against captured data and enforces peak/error constraints.</span></div></div>}
+      </section>
+      <section className="instrument-panel recurrence-panel">
+        <div className="panel-heading"><div><span className="section-kicker">RECURRENCE QUANTIFICATION</span><h2>Return structure</h2></div><span className="quality-badge">{((research.recurrence.recurrence_rate ?? 0) * 100).toFixed(1)}% RR</span></div>
+        <div className="recurrence-body"><RecurrenceCanvas matrix={research.recurrence.matrix ?? []} /><div><div><span>Determinism</span><strong>{((research.recurrence.determinism ?? 0) * 100).toFixed(1)}%</strong></div><div><span>Diagonal lines</span><strong>{research.recurrence.diagonal_lines ?? 0}</strong></div><div><span>Threshold</span><strong>{(research.recurrence.threshold_sigma ?? 0).toFixed(2)} σ</strong></div><p>Diagonal structures indicate repeatable evolution, not proof of chaos or a deterministic attractor.</p></div></div>
+      </section>
+      <section className="instrument-panel koopman-panel">
+        <div className="panel-heading"><div><span className="section-kicker">KOOPMAN / DMD</span><h2>Dynamic mode amplification</h2></div><span className={`quality-badge ${research.koopman.interpretation === "contracting" ? "" : "pending"}`}>{research.koopman.interpretation?.toUpperCase() ?? "LEARNING"}</span></div>
+        <div className="koopman-spectrum">{(research.koopman.singular_values ?? []).map((value, index) => <div key={index}><span>σ{index + 1}</span><em><i style={{ height: `${Math.min(100, value * 82)}%`, background: TRACE_COLORS[index + 1] }} /></em><strong>{value.toFixed(3)}</strong></div>)}</div>
+        <div className="change-readout"><span>BOCPD REGIME CHANGE</span><strong>{(changeProbability * 100).toFixed(2)}%</strong><em><i style={{ width: `${changeProbability * 100}%` }} /></em><small>{research.change_detection.status.toUpperCase()}</small></div>
+      </section>
+    </div>
+  );
+}
+
+function ThermometerFallback() {
+  return <span className="thermometer-symbol" aria-hidden="true"><i /></span>;
+}
+
+function ResilienceWorkbench({
+  research,
+  authenticationEnabled,
+  setAuthenticationEnabled,
+  profile,
+  setProfile,
+  faultTarget,
+  setFaultTarget,
+  faultDelayUs,
+  setFaultDelayUs,
+  faultJitterUs,
+  setFaultJitterUs,
+  faultLossPct,
+  setFaultLossPct,
+  faultDurationS,
+  setFaultDurationS,
+  faultActive,
+  faultBusy,
+  controlFault,
+  nodes,
+}: {
+  research: ResearchPayload;
+  authenticationEnabled: boolean;
+  setAuthenticationEnabled: (value: boolean) => void;
+  profile: string;
+  setProfile: (value: string) => void;
+  faultTarget: string;
+  setFaultTarget: (value: string) => void;
+  faultDelayUs: number;
+  setFaultDelayUs: (value: number) => void;
+  faultJitterUs: number;
+  setFaultJitterUs: (value: number) => void;
+  faultLossPct: number;
+  setFaultLossPct: (value: number) => void;
+  faultDurationS: number;
+  setFaultDurationS: (value: number) => void;
+  faultActive: boolean;
+  faultBusy: boolean;
+  controlFault: (enabled: boolean) => void;
+  nodes: ClockNode[];
+}) {
+  const dpll = research.capabilities.dpll;
+  const synce = research.capabilities.synce;
+  const checks = research.profiles.checks ?? [];
+  const profileChanged = profile !== research.profiles.profile;
+  const expectedValue = (check: NonNullable<ResearchPayload["profiles"]["checks"]>[number]) => (
+    check.name === "Domain" && Array.isArray(check.expected) && check.expected.length === 2
+      ? `${check.expected[0]}–${check.expected[1]}`
+      : Array.isArray(check.expected) ? check.expected.join(" / ") : String(check.expected)
+  );
+  return (
+    <div className="resilience-layout">
+      <section className="instrument-panel profile-panel">
+        <div className="panel-heading"><div><span className="section-kicker">PROFILE ENGINE</span><h2>PTP configuration guardrails</h2></div><span className={`quality-badge ${research.profiles.compliant && !profileChanged ? "" : "pending"}`}>{profileChanged ? "STAGED CHANGE" : research.profiles.compliant ? "CONFIG MATCH" : "REVIEW"}</span></div>
+        <div className="profile-selector"><label><span>Target profile preset</span><select value={profile} onChange={(event) => setProfile(event.target.value)}>{(research.profiles.available_profiles ?? [profile]).map((name) => <option key={name}>{name}</option>)}</select></label><p>The applied {research.profiles.profile} configuration is checked below for transport, delay, domain, and two-step compatibility. This is a configuration guard, not standards certification. Apply remains a separate guarded action.</p></div>
+        <div className="compliance-checks">{checks.map((check) => <div key={check.name}><i className={check.pass ? "pass" : "fail"}>{check.pass ? <Check size={11} /> : <X size={11} />}</i><span><strong>{check.name}</strong><small>{String(check.actual)} · expected {expectedValue(check)}</small></span></div>)}</div>
+      </section>
+      <section className="instrument-panel frequency-chain-panel">
+        <div className="panel-heading"><div><span className="section-kicker">PHYSICAL FREQUENCY LAYER</span><h2>DPLL & SyncE</h2></div><span className={`quality-badge ${dpll?.supported ? "" : "pending"}`}>{dpll?.supported ? "KERNEL REPORTED" : "NOT EXPOSED"}</span></div>
+        <div className="frequency-capabilities">
+          <article><Radio size={18} /><span><strong>DPLL netlink</strong><small>{dpll?.supported ? "Device and pin state reported by the kernel" : dpll?.reason ?? "Not reported"}</small></span><em className={dpll?.supported ? "on" : ""} /></article>
+          <article><Network size={18} /><span><strong>Synchronous Ethernet</strong><small>{synce?.supported ? `Pin state ${synce.state}` : synce?.reason ?? "Not reported"}</small></span><em className={synce?.supported ? "on" : ""} /></article>
+          <article><ShieldCheck size={18} /><span><strong>Devlink health</strong><small>{research.capabilities.devlink_health?.supported ? "NIC health reporters available" : "No health reporter JSON available"}</small></span><em className={research.capabilities.devlink_health?.supported ? "on" : ""} /></article>
+        </div>
+        <div className="instrument-note"><Info size={13} /><span>PTP lock never implies SyncE lock. The Observatory displays physical-frequency state only when the driver and kernel expose it.</span></div>
+      </section>
+      <section className="instrument-panel authentication-panel">
+        <div className="panel-heading"><div><span className="section-kicker">IEEE 1588 SECURITY</span><h2>Message authentication</h2></div><span className={`quality-badge ${authenticationEnabled ? "" : "pending"}`}>{authenticationEnabled ? "STAGED" : "DISABLED"}</span></div>
+        <div className="security-toggle"><div><ShieldCheck size={20} /><span><strong>LinuxPTP security association</strong><small>Enable SPP, active key ID, and anti-replay verification. Key material stays in the root-owned SA file and is never returned by the API.</small></span></div><Toggle on={authenticationEnabled} onChange={setAuthenticationEnabled} label="Enable PTP authentication" /></div>
+        <div className="security-ledger"><div><span>Security parameter pointer</span><strong>{research.security.authentication.spp}</strong></div><div><span>Active key ID</span><strong>{research.security.authentication.active_key_id}</strong></div><div><span>Unauthenticated policy</span><strong>{research.security.authentication.allow_unauth === 0 ? "REJECT" : research.security.authentication.allow_unauth}</strong></div><div><span>Key exposure</span><strong className="good">NEVER</strong></div></div>
+      </section>
+      <section className="instrument-panel fault-panel">
+        <div className="panel-heading"><div><span className="section-kicker">BOUNDED FAULT INJECTION</span><h2>One-hop netem chamber</h2></div><span className={`quality-badge ${faultActive ? "pending" : ""}`}>{faultActive ? "FAULT ACTIVE" : "SAFE / IDLE"}</span></div>
+        <div className="fault-form">
+          <label><span>Upstream egress</span><select value={faultTarget} onChange={(event) => setFaultTarget(event.target.value)}>{nodes.slice(0, -1).map((node) => <option key={node.id} value={node.id}>{node.id} → next hop</option>)}</select></label>
+          <label><span>Delay</span><div className="input-unit"><input type="number" min="0" max="1000000" value={faultDelayUs} onChange={(event) => setFaultDelayUs(Number(event.target.value))} /><em>µs</em></div></label>
+          <label><span>Jitter</span><div className="input-unit"><input type="number" min="0" max="1000000" value={faultJitterUs} onChange={(event) => setFaultJitterUs(Number(event.target.value))} /><em>µs</em></div></label>
+          <label><span>Loss</span><div className="input-unit"><input type="number" min="0" max="100" step=".1" value={faultLossPct} onChange={(event) => setFaultLossPct(Number(event.target.value))} /><em>%</em></div></label>
+          <label><span>Automatic expiry</span><div className="input-unit"><input type="number" min="1" max="3600" value={faultDurationS} onChange={(event) => setFaultDurationS(Number(event.target.value))} /><em>s</em></div></label>
+        </div>
+        <div className="fault-actions"><div><Info size={15} /><span>Only the declared namespace egress is touched. The controller removes the qdisc when the timer expires or the cascade stops.</span></div><button type="button" className="full-secondary" disabled={!faultActive || faultBusy} onClick={() => controlFault(false)}>Clear now</button><button type="button" className="danger-action" disabled={faultBusy || faultActive} onClick={() => controlFault(true)}><Zap size={14} /> {faultBusy ? "Applying…" : "Inject bounded fault"}</button></div>
+      </section>
+      <section className="instrument-panel root-cause-panel">
+        <div className="panel-heading"><div><span className="section-kicker">BAYESIAN ROOT-CAUSE WATCH</span><h2>Regime transition evidence</h2></div><span className={`quality-badge ${research.change_detection.status === "stable" ? "" : "pending"}`}>{research.change_detection.status.toUpperCase()}</span></div>
+        <div className="change-probability"><strong>{((research.change_detection.latest_probability ?? 0) * 100).toFixed(2)}%</strong><span>posterior change probability</span><em><i style={{ width: `${(research.change_detection.latest_probability ?? 0) * 100}%` }} /></em></div>
+        <div className="root-cause-factors"><div><span>PHC cross timestamp</span><strong>observed</strong></div><div><span>LinuxPTP servo</span><strong>observed</strong></div><div><span>Path TLVs</span><strong>{research.capabilities.path_monitor?.supported ? "observed" : "waiting"}</strong></div><div><span>Temperature</span><strong>{research.capabilities.temperature?.supported ? "observed" : "unavailable"}</strong></div></div>
+      </section>
+    </div>
+  );
+}
+
 function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button className={`toggle ${on ? "on" : ""}`} type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}>
@@ -1457,12 +2172,16 @@ export default function PTPBoxDashboard() {
   const [range, setRange] = useState("2 min");
   const [experimentRunning, setExperimentRunning] = useState(false);
   const [experimentProgress, setExperimentProgress] = useState(38);
+  const [research, setResearch] = useState<ResearchPayload | null>(null);
+  const [researchMetric, setResearchMetric] = useState<keyof ResearchPayload["stability"]>("tdev");
+  const [experimentBusy, setExperimentBusy] = useState(false);
   const [kp, setKp] = useState(0.7);
   const [ki, setKi] = useState(0.3);
   const [kalmanMeasurementNoiseNs, setKalmanMeasurementNoiseNs] = useState(200);
   const [kalmanProcessNoisePpb, setKalmanProcessNoisePpb] = useState(10);
   const [kalmanPhaseTimeConstantS, setKalmanPhaseTimeConstantS] = useState(4);
   const [kalmanInnovationGateSigma, setKalmanInnovationGateSigma] = useState(6);
+  const [kalmanDriftNoisePpbS2, setKalmanDriftNoisePpbS2] = useState(.05);
   const [stepThreshold, setStepThreshold] = useState(0);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyBusy, setApplyBusy] = useState(false);
@@ -1471,6 +2190,7 @@ export default function PTPBoxDashboard() {
   const [twoStep, setTwoStep] = useState(true);
   const [hardwareTs, setHardwareTs] = useState(true);
   const [sanity, setSanity] = useState(true);
+  const [authenticationEnabled, setAuthenticationEnabled] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
   const [servoType, setServoType] = useState<ServoType>("pi");
   const [servoTarget, setServoTarget] = useState("BC7");
@@ -1493,6 +2213,15 @@ export default function PTPBoxDashboard() {
   const [ppsFirstStepThresholdNs, setPpsFirstStepThresholdNs] = useState(20_000);
   const [ppsHoldoverSeconds, setPpsHoldoverSeconds] = useState(0);
   const [ppsStableThresholdNs, setPpsStableThresholdNs] = useState(100);
+  const [ppsComparisonEnabled, setPpsComparisonEnabled] = useState(false);
+  const [ppsComparisonReference, setPpsComparisonReference] = useState("BC2");
+  const [faultTarget, setFaultTarget] = useState("BC3");
+  const [faultDelayUs, setFaultDelayUs] = useState(250);
+  const [faultJitterUs, setFaultJitterUs] = useState(50);
+  const [faultLossPct, setFaultLossPct] = useState(0);
+  const [faultDurationS, setFaultDurationS] = useState(30);
+  const [faultActive, setFaultActive] = useState(false);
+  const [faultBusy, setFaultBusy] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -1533,7 +2262,13 @@ export default function PTPBoxDashboard() {
   const servoStatusLabel = targetInHoldover ? "HOLDOVER" : targetHasHoldover ? "MIXED" : "DISCIPLINED";
   const holdoverElapsedSeconds = activeNode.holdoverStarted && telemetryStatus ? Math.max(0, Math.floor(telemetryStatus.timestamp - activeNode.holdoverStarted)) : null;
   const selectedServoLabel = activeNode.role === "Grandmaster" ? "REFERENCE CLOCK" : `${activeNode.servoType?.toUpperCase() ?? "PTP"}${activeNode.servoEnabled === false ? " · FROZEN" : " SERVO"}`;
-  const selectedServoDescription = activeNode.servoType === "kalman"
+  const selectedServoDescription = activeNode.servoType === "imm"
+    ? `3-state IMM · ${activeNode.kalman?.regime ?? "regime learning"}`
+    : activeNode.servoType === "adaptive-kalman"
+      ? activeNode.kalman?.fresh
+        ? `3-state adaptive · drift ${(activeNode.kalman.drift_estimate_ppb_s ?? 0).toFixed(4)} ppb/s`
+        : "3-state phase / frequency / drift"
+      : activeNode.servoType === "kalman"
     ? activeNode.kalman?.fresh
       ? `2-state estimate · phase σ ${formatNanoseconds(activeNode.kalman.phase_sigma_ns)}`
       : "2-state phase / frequency estimator"
@@ -1542,7 +2277,7 @@ export default function PTPBoxDashboard() {
       : activeNode.servoType === "nullf"
         ? "Zero frequency correction · SyncE"
         : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
-  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "kalman" ? 92 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
+  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "imm" ? 96 : activeNode.servoType === "adaptive-kalman" ? 94 : activeNode.servoType === "kalman" ? 92 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
   const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
@@ -1561,6 +2296,13 @@ export default function PTPBoxDashboard() {
   const ppsHardwareStatus = agentStatus?.pps;
   const ppsConfiguredRoles = (ppsSource === "external" ? 0 : 1) + ppsSinks.length;
   const ppsStateLabel = ppsHardwareStatus?.running ? "PPS ACTIVE" : ppsEnabled ? "RESTART TO APPLY" : "PPS OFF";
+  const modeledResearch = useMemo(() => buildResearchModel(history.length ? history : buildHistory(), nodes.length ? nodes : INITIAL_NODES), [history, nodes]);
+  const activeResearch = research ?? modeledResearch;
+  const profileProtocol = profile === "G.8275.2 Telecom"
+    ? { domain: 44, transport: "UDPv4", delay: "E2E" }
+    : profile === "IEEE 802.1AS gPTP" || profile === "IEEE C37.238 Power"
+      ? { domain: profile === "IEEE C37.238 Power" ? 254 : 0, transport: "L2", delay: "P2P" }
+      : { domain: 24, transport: "L2", delay: "E2E" };
 
   const setPpsSourceSafely = (value: string) => {
     setPpsSource(value);
@@ -1570,6 +2312,17 @@ export default function PTPBoxDashboard() {
   const togglePpsSink = (id: string) => {
     if (id === ppsSource) return;
     setPpsSinks((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const setPpsComparisonSafely = (value: boolean) => {
+    setPpsComparisonEnabled(value);
+    if (!value) return;
+    const sinks = ppsSinks.length >= 2 ? ppsSinks : nodes.slice(1).map((node) => node.id);
+    setPpsEnabled(true);
+    setPpsSource("external");
+    setPpsPolarity((current) => current === "both" ? "rising" : current);
+    setPpsSinks(sinks);
+    if (!sinks.includes(ppsComparisonReference)) setPpsComparisonReference(sinks[0] ?? "BC2");
   };
 
   const ppsNodeLabel = (id: string) => {
@@ -1601,8 +2354,9 @@ export default function PTPBoxDashboard() {
 
   const holdoverMetrics = useMemo(() => {
     if (!activeNode.holdoverStarted) return null;
+    const holdoverStarted = activeNode.holdoverStarted;
     const points = history
-      .filter((point) => point.t >= activeNode.holdoverStarted && Number.isFinite(point.values[activeNode.id]))
+      .filter((point) => point.t >= holdoverStarted && Number.isFinite(point.values[activeNode.id]))
       .map((point) => ({ t: point.t, offset: point.values[activeNode.id] }));
     if (points.length < 2) return { driftPpb: null };
     const origin = points[0].t;
@@ -1651,6 +2405,12 @@ export default function PTPBoxDashboard() {
               process_noise_ppb?: number;
               phase_time_constant_s?: number;
               innovation_gate_sigma?: number;
+              drift_noise_ppb_s2?: number;
+            };
+          };
+          security?: {
+            authentication?: {
+              enabled?: boolean;
             };
           };
           pps?: {
@@ -1664,6 +2424,10 @@ export default function PTPBoxDashboard() {
             pulse_width_ns?: number;
             perout_phase_ns?: number;
             extts_correction_ns?: number;
+            comparison?: {
+              enabled?: boolean;
+              reference?: string;
+            };
             ts2phc?: {
               servo?: NativeServoType;
               step_threshold_ns?: number;
@@ -1682,7 +2446,7 @@ export default function PTPBoxDashboard() {
         }
         if (typeof value.two_step === "boolean") setTwoStep(value.two_step);
         if (typeof value.hardware_timestamping === "boolean") setHardwareTs(value.hardware_timestamping);
-        if (value.servo?.type && ["pi", "linreg", "nullf", "kalman"].includes(value.servo.type)) {
+        if (value.servo?.type && ["pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"].includes(value.servo.type)) {
           configuredServoTypeRef.current = value.servo.type;
           setServoType(value.servo.type);
         }
@@ -1694,6 +2458,8 @@ export default function PTPBoxDashboard() {
         if (typeof value.servo?.kalman?.process_noise_ppb === "number") setKalmanProcessNoisePpb(value.servo.kalman.process_noise_ppb);
         if (typeof value.servo?.kalman?.phase_time_constant_s === "number") setKalmanPhaseTimeConstantS(value.servo.kalman.phase_time_constant_s);
         if (typeof value.servo?.kalman?.innovation_gate_sigma === "number") setKalmanInnovationGateSigma(value.servo.kalman.innovation_gate_sigma);
+        if (typeof value.servo?.kalman?.drift_noise_ppb_s2 === "number") setKalmanDriftNoisePpbS2(value.servo.kalman.drift_noise_ppb_s2);
+        if (typeof value.security?.authentication?.enabled === "boolean") setAuthenticationEnabled(value.security.authentication.enabled);
         if (typeof value.pps?.enabled === "boolean") setPpsEnabled(value.pps.enabled);
         if (typeof value.pps?.source === "string") setPpsSource(value.pps.source);
         if (Array.isArray(value.pps?.sinks) && value.pps.sinks.length) setPpsSinks(value.pps.sinks);
@@ -1704,6 +2470,8 @@ export default function PTPBoxDashboard() {
         if (typeof value.pps?.pulse_width_ns === "number") setPpsPulseWidthNs(value.pps.pulse_width_ns);
         if (typeof value.pps?.perout_phase_ns === "number") setPpsPhaseNs(value.pps.perout_phase_ns);
         if (typeof value.pps?.extts_correction_ns === "number") setPpsCorrectionNs(value.pps.extts_correction_ns);
+        if (typeof value.pps?.comparison?.enabled === "boolean") setPpsComparisonEnabled(value.pps.comparison.enabled);
+        if (typeof value.pps?.comparison?.reference === "string") setPpsComparisonReference(value.pps.comparison.reference);
         if (value.pps?.ts2phc?.servo && ["pi", "linreg", "nullf"].includes(value.pps.ts2phc.servo)) setPpsServo(value.pps.ts2phc.servo);
         if (typeof value.pps?.ts2phc?.step_threshold_ns === "number") setPpsStepThresholdNs(value.pps.ts2phc.step_threshold_ns);
         if (typeof value.pps?.ts2phc?.first_step_threshold_ns === "number") setPpsFirstStepThresholdNs(value.pps.ts2phc.first_step_threshold_ns);
@@ -1735,6 +2503,8 @@ export default function PTPBoxDashboard() {
         const status = await response.json() as AgentStatus;
         if (disposed) return;
         setAgentStatus(status);
+        setFaultActive(Boolean(status.fault?.enabled));
+        if (status.fault?.target) setFaultTarget(status.fault.target);
         if (typeof status.phc_sample_rate_hz === "number") {
           setActiveSyncFrequencyHz(status.phc_sample_rate_hz);
           setPhcSampleRateHz(status.phc_sample_rate_hz);
@@ -1861,6 +2631,37 @@ export default function PTPBoxDashboard() {
       window.clearInterval(timer);
     };
   }, [activeSyncFrequencyHz, agentConnected, paused, range]);
+
+  useEffect(() => {
+    if (!agentConnected || paused) return;
+    let disposed = false;
+    let polling = false;
+    const controller = new AbortController();
+    const pollResearch = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const response = await fetch(`${agentBaseUrl()}/api/research?history=900`, { signal: controller.signal });
+        if (!response.ok) throw new Error("research snapshot unavailable");
+        const payload = await response.json() as ResearchPayload;
+        if (!disposed) {
+          setResearch(payload);
+          setExperimentRunning(Boolean(payload.active_experiment));
+        }
+      } catch (error) {
+        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) setResearch((current) => current);
+      } finally {
+        polling = false;
+      }
+    };
+    void pollResearch();
+    const timer = window.setInterval(() => void pollResearch(), 5000);
+    return () => {
+      disposed = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [agentConnected, paused]);
 
   useEffect(() => {
     if (paused || connection !== "simulation") return;
@@ -2007,13 +2808,17 @@ export default function PTPBoxDashboard() {
     { id: "nav-pendulum", group: "Navigate", label: "Multi-pendulum", description: "Coupled previous-hop phase residuals", keywords: "swing equilibrium phase", section: "Multi-pendulum", icon: Orbit },
     { id: "nav-covariance", group: "Navigate", label: "Covariance lab", description: "Pair relationships and dominant eigenmodes", keywords: "matrix correlation eigenvalues", section: "Covariance", icon: Network },
     { id: "nav-state", group: "Navigate", label: "State-space atlas", description: "Modal trajectory and empirical Poincaré map", keywords: "pca poincare phase portrait", section: "State space", icon: Activity },
+    { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
+    { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
+    { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, IMM, system ID, tuning, recurrence, and Koopman", keywords: "kalman drift model auto tune bocpd recurrence dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },
     { id: "nav-interfaces", group: "Navigate", label: "Interfaces & PHCs", description: "NIC, namespace, link, and timestamp inventory", keywords: "hardware ports network nic", section: "Interfaces", icon: Cable },
     { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, PPS I/O, ts2phc, and safety controls", keywords: "settings tune apply pulse", section: "Configuration", icon: SlidersHorizontal },
     { id: "nav-events", group: "Navigate", label: "Event log", description: "Clock, measurement, and operator events", keywords: "logs terminal activity", section: "Event log", icon: Terminal },
     ...nodes.map((node) => ({ id: `clock-${node.id}`, group: "Clocks" as const, label: node.label, description: `${node.role} · ${node.phc} · ${node.state}`, keywords: `${node.id} ${node.role} ${node.phc} ${node.ingress} ${node.egress} offset`, section: "Overview" as Section, nodeId: node.id, icon: Clock3 })),
-    { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg kalman filter nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
+    { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg kalman adaptive imm filter nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
     { id: "control-frequency", group: "Controls", label: "Synchronization frequency", description: `${syncFrequencyHz.toFixed(1)} Hz requested · ${effectiveSyncFrequencyHz} Hz effective`, keywords: "sync rate interval hertz frequency logSyncInterval", section: "Configuration", action: "sync-frequency", icon: Radio },
     { id: "control-pps", group: "Controls", label: "PPS & ts2phc", description: `${ppsStateLabel} · ${ppsSource === "external" ? "external source" : `${ppsSource} output`} · ${ppsSinks.length} inputs`, keywords: "pps pulse per second input output extts perout ts2phc pin", section: "Configuration", action: "pps-control", icon: Zap },
     { id: "control-notifications", group: "Controls", label: "Notification center", description: `${unreadNotificationCount} unread timing alert${unreadNotificationCount === 1 ? "" : "s"}`, keywords: "bell alerts warnings health", action: "notifications", icon: Bell },
@@ -2157,11 +2962,13 @@ export default function PTPBoxDashboard() {
   };
 
   const handleApply = async () => {
+    const comparisonSinks = ppsSinks.filter((id) => id !== ppsSource);
+    const comparisonReference = comparisonSinks.includes(ppsComparisonReference) ? ppsComparisonReference : comparisonSinks[0] ?? "BC2";
     const payload = {
       profile,
-      domain: 24,
-      transport: "L2",
-      delay_mechanism: "E2E",
+      domain: profileProtocol.domain,
+      transport: profileProtocol.transport,
+      delay_mechanism: profileProtocol.delay,
       log_sync_interval: syncLogInterval,
       two_step: twoStep,
       hardware_timestamping: hardwareTs,
@@ -2180,12 +2987,22 @@ export default function PTPBoxDashboard() {
           process_noise_ppb: kalmanProcessNoisePpb,
           phase_time_constant_s: kalmanPhaseTimeConstantS,
           innovation_gate_sigma: kalmanInnovationGateSigma,
+          drift_noise_ppb_s2: kalmanDriftNoisePpbS2,
+        },
+      },
+      security: {
+        authentication: {
+          enabled: authenticationEnabled,
+          spp: 0,
+          active_key_id: 1,
+          sa_file: "/etc/linuxptp/ptpbox-sa.cfg",
+          allow_unauth: 0,
         },
       },
       pps: {
         enabled: ppsEnabled,
         source: ppsSource,
-        sinks: ppsSinks.filter((id) => id !== ppsSource),
+        sinks: comparisonSinks,
         output_pin: ppsOutputPin,
         input_pin: ppsInputPin,
         channel: ppsChannel,
@@ -2193,6 +3010,12 @@ export default function PTPBoxDashboard() {
         pulse_width_ns: ppsPulseWidthNs,
         perout_phase_ns: ppsPhaseNs,
         extts_correction_ns: ppsCorrectionNs,
+        comparison: {
+          enabled: ppsComparisonEnabled,
+          measure_only: true,
+          reference: comparisonReference,
+          history: 256,
+        },
         ts2phc: {
           servo: ppsServo,
           kp: 0.7,
@@ -2243,18 +3066,61 @@ export default function PTPBoxDashboard() {
 
   const toggleExperiment = async () => {
     const starting = !experimentRunning;
-    setExperimentRunning(starting);
-    if (starting && experimentProgress >= 100) setExperimentProgress(0);
-    if (starting && agentStatus) {
-      try {
-        await fetch(`${agentBaseUrl()}/api/experiments/start`, {
+    setExperimentBusy(true);
+    try {
+      if (!agentStatus) {
+        setExperimentRunning(starting);
+        setToast("Experiment controls require the live appliance");
+        return;
+      }
+      const response = await fetch(`${agentBaseUrl()}${starting ? "/api/experiments/start" : "/api/experiments/stop"}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "step", target: "BC7", amplitude_ns: 1000, duration_s: 120, servo: { kp, ki, step_threshold_ns: stepThreshold } }),
-        });
-      } catch {
-        setToast("Experiment is running locally; host capture could not be staged");
-      }
+          body: JSON.stringify(starting
+            ? { name: `Raw cascade capture · ${servoType.toUpperCase()}`, kind: "metrology", target: servoTarget, servo: { type: servoType, kp, ki, step_threshold_ns: stepThreshold } }
+            : { id: activeResearch.active_experiment?.id }),
+      });
+      const result = await response.json() as ResearchExperiment & { error?: string };
+      if (!response.ok) throw new Error(result.error || "experiment transition failed");
+      setExperimentRunning(starting);
+      if (starting && experimentProgress >= 100) setExperimentProgress(0);
+      setResearch((current) => current ? { ...current, active_experiment: starting ? result : null, experiments: starting ? [result, ...current.experiments] : current.experiments.map((run) => run.id === result.id ? result : run) } : current);
+      setToast(starting ? `${result.id}: raw metrology capture started` : `${result.id}: capture sealed and ready to export`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Experiment control is unavailable");
+    } finally {
+      setExperimentBusy(false);
+    }
+  };
+
+  const exportExperiment = (id: string) => {
+    window.open(`${agentBaseUrl()}/api/experiments/${encodeURIComponent(id)}/export`, "_blank", "noopener,noreferrer");
+  };
+
+  const stageTune = (nextKp: number, nextKi: number) => {
+    setKp(nextKp);
+    setKi(nextKi);
+    setSection("Configuration");
+    setToast(`Replay-safe PI recommendation staged · Kp ${nextKp.toFixed(2)} · Ki ${nextKi.toFixed(2)}`);
+    window.setTimeout(() => document.getElementById("servo-control")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  };
+
+  const controlFault = async (enabled: boolean) => {
+    setFaultBusy(true);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/fault/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: faultTarget, enabled, delay_us: faultDelayUs, jitter_us: faultJitterUs, loss_pct: faultLossPct, duration_s: faultDurationS }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "fault control failed");
+      setFaultActive(enabled);
+      setToast(enabled ? `${faultTarget}: bounded fault active for ${faultDurationS} s` : `${faultTarget}: fault cleared`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Fault control is unavailable");
+    } finally {
+      setFaultBusy(false);
     }
   };
 
@@ -2263,6 +3129,10 @@ export default function PTPBoxDashboard() {
     { label: "Multi-pendulum", icon: Orbit },
     { label: "Covariance", icon: Network },
     { label: "State space", icon: Activity },
+    { label: "Metrology", icon: TimerReset, badge: activeResearch.active_experiment ? "REC" : undefined },
+    { label: "Path microscope", icon: Radio },
+    { label: "Intelligence", icon: Gauge },
+    { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -2349,8 +3219,8 @@ export default function PTPBoxDashboard() {
           <div className="page-heading">
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
-              <h1>{section === "Overview" ? "Cascade overview" : section === "Covariance" ? "Covariance lab" : section === "State space" ? "State-space atlas" : section}</h1>
-              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "State space" ? "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol, servo, PPS I/O, and ts2phc behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <h1>{SECTION_META[section].title}</h1>
+              <p>{SECTION_META[section].description}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -2458,7 +3328,7 @@ export default function PTPBoxDashboard() {
                     <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
                     <div><span>Servo mode</span><strong>{activeNode.role === "Grandmaster" ? "REFERENCE" : activeNode.servoEnabled === false ? "HOLDOVER" : activeNode.servoType?.toUpperCase() ?? "—"}</strong></div>
                     <div><span>Holdover drift{holdoverElapsedSeconds == null ? "" : ` · ${holdoverElapsedSeconds} s`}</span><strong>{holdoverMetrics?.driftPpb == null ? "—" : `${holdoverMetrics.driftPpb >= 0 ? "+" : ""}${holdoverMetrics.driftPpb.toFixed(2)} ppb`}</strong></div>
-                    {activeNode.servoType === "kalman" && <div><span>Kalman phase estimate</span><strong>{activeNode.kalman?.fresh ? formatNanoseconds(activeNode.kalman.phase_estimate_ns) : "ACQUIRING"}</strong></div>}
+                    {["kalman", "adaptive-kalman", "imm"].includes(activeNode.servoType ?? "") && <div><span>{activeNode.servoType === "imm" ? "IMM phase / regime" : "Kalman phase estimate"}</span><strong>{activeNode.kalman?.fresh ? `${formatNanoseconds(activeNode.kalman.phase_estimate_ns)}${activeNode.kalman.regime ? ` · ${activeNode.kalman.regime}` : ""}` : "ACQUIRING"}</strong></div>}
                     {activeNode.servoType === "kalman" && <div><span>Oscillator estimate</span><strong>{activeNode.kalman?.fresh ? `${activeNode.kalman.frequency_estimate_ppb >= 0 ? "+" : ""}${activeNode.kalman.frequency_estimate_ppb.toFixed(2)} ppb` : "—"}</strong></div>}
                   </div>
                   <div className="servo-mini">
@@ -2506,6 +3376,50 @@ export default function PTPBoxDashboard() {
             />
           )}
 
+          {section === "Metrology" && (
+            <MetrologyWorkbench
+              research={activeResearch}
+              nodes={nodes}
+              metric={researchMetric}
+              setMetric={setResearchMetric}
+              experimentBusy={experimentBusy}
+              toggleCapture={() => void toggleExperiment()}
+              exportRun={exportExperiment}
+            />
+          )}
+
+          {section === "Path microscope" && (
+            <PathMicroscopeView research={activeResearch} nodes={nodes} />
+          )}
+
+          {section === "Intelligence" && (
+            <IntelligenceWorkbench research={activeResearch} activeNode={activeNode} stageTune={stageTune} />
+          )}
+
+          {section === "Resilience" && (
+            <ResilienceWorkbench
+              research={activeResearch}
+              authenticationEnabled={authenticationEnabled}
+              setAuthenticationEnabled={setAuthenticationEnabled}
+              profile={profile}
+              setProfile={setProfile}
+              faultTarget={faultTarget}
+              setFaultTarget={setFaultTarget}
+              faultDelayUs={faultDelayUs}
+              setFaultDelayUs={setFaultDelayUs}
+              faultJitterUs={faultJitterUs}
+              setFaultJitterUs={setFaultJitterUs}
+              faultLossPct={faultLossPct}
+              setFaultLossPct={setFaultLossPct}
+              faultDurationS={faultDurationS}
+              setFaultDurationS={setFaultDurationS}
+              faultActive={faultActive}
+              faultBusy={faultBusy}
+              controlFault={(enabled) => void controlFault(enabled)}
+              nodes={nodes}
+            />
+          )}
+
           {section === "Analytics" && (
             <div className="analytics-layout">
               <section className="instrument-panel analytics-chart-panel">
@@ -2540,7 +3454,7 @@ export default function PTPBoxDashboard() {
                 <div className="experiment-copy"><span className="section-kicker">ACTIVE EXPERIMENT · RUN 024</span><h2>PI servo step response</h2><p>Inject a controlled +1 μs time step at BC–03 and compare settling behavior across the remaining cascade.</p><div className="experiment-tags"><span>120 s capture</span><span>8 signals</span><span>Hardware timestamped</span></div></div>
                 <div className="run-control">
                   <div className="run-progress"><div><span>{experimentRunning ? "CAPTURING" : experimentProgress === 100 ? "COMPLETE" : "READY"}</span><strong>{experimentRunning ? `${experimentProgress}%` : "02:00"}</strong></div><i><b style={{ width: `${experimentRunning ? experimentProgress : 0}%` }} /></i></div>
-                  <button type="button" className="run-button" onClick={toggleExperiment}>{experimentRunning ? <Pause size={18} /> : <Play size={18} fill="currentColor" />}{experimentRunning ? "Pause capture" : "Start experiment"}</button>
+                  <button type="button" className="run-button" disabled={experimentBusy} onClick={toggleExperiment}>{experimentRunning ? <Square size={16} fill="currentColor" /> : <Play size={18} fill="currentColor" />}{experimentBusy ? "Transitioning…" : experimentRunning ? "Stop & seal capture" : "Start experiment"}</button>
                 </div>
               </section>
               <section className="instrument-panel experiment-setup">
@@ -2598,11 +3512,11 @@ export default function PTPBoxDashboard() {
                 <section className="instrument-panel config-section">
                   <div className="panel-heading"><div><span className="section-kicker">PTP DOMAIN</span><h2>Protocol & profile</h2></div><span className="config-scope">Applies to all clocks</span></div>
                   <div className="form-grid">
-                    <label className="wide"><span>PTP profile</span><button className="select-control" type="button" onClick={() => setProfile((value) => value === "G.8275.1 Telecom" ? "IEEE 1588 Default" : "G.8275.1 Telecom")}>{profile}<ChevronDown size={14} /></button><small>Defines message rates, transport, and BMCA defaults.</small></label>
-                    <label><span>Domain number</span><div className="input-unit"><input value="24" readOnly /><em>0–127</em></div></label>
-                    <label><span>Transport</span><button className="select-control" type="button">Layer 2 <ChevronDown size={14} /></button></label>
+                    <label className="wide"><span>PTP profile</span><select className="select-control" value={profile} onChange={(event) => setProfile(event.target.value)}>{(activeResearch.profiles.available_profiles ?? ["G.8275.1 Telecom"]).map((name) => <option key={name}>{name}</option>)}</select><small>Applies a coherent transport, delay mechanism, BMCA dataset, and domain contract.</small></label>
+                    <label><span>Domain number</span><div className="input-unit"><input value={profileProtocol.domain} readOnly /><em>profile</em></div></label>
+                    <label><span>Transport</span><div className="input-unit"><input value={profileProtocol.transport === "L2" ? "Layer 2" : profileProtocol.transport} readOnly /><em>profile</em></div></label>
                     <label><span>Sync interval</span><button className="select-control" type="button" onClick={() => document.getElementById("sync-frequency-control")?.scrollIntoView({ behavior: "smooth", block: "center" })}>{syncLogInterval} · {effectiveSyncFrequencyHz.toFixed(1)} Hz <ArrowRight size={14} /></button></label>
-                    <label><span>Delay mechanism</span><button className="select-control" type="button">End-to-end <ChevronDown size={14} /></button></label>
+                    <label><span>Delay mechanism</span><div className="input-unit"><input value={profileProtocol.delay === "P2P" ? "Peer-to-peer" : "End-to-end"} readOnly /><em>{profileProtocol.delay}</em></div></label>
                   </div>
                   <div className="toggle-list">
                     <div><div><strong>Two-step clock</strong><small>Send preciseOriginTimestamp in Follow_Up messages.</small></div><Toggle on={twoStep} onChange={setTwoStep} label="Two-step clock" /></div>
@@ -2612,13 +3526,14 @@ export default function PTPBoxDashboard() {
                 <section className="instrument-panel config-section" id="servo-control">
                   <div className="panel-heading"><div><span className="section-kicker">SERVO & HOLDOVER</span><h2>Clock discipline</h2></div><span className={`quality-badge ${targetHasHoldover ? "holdover" : ""}`}>{servoStatusLabel}</span></div>
                   <div className="form-grid">
-                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="kalman">Kalman · phase + frequency</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>{servoType === "kalman" ? "PTPBox two-state estimator with bounded PHC frequency control." : "LinuxPTP native servo implementation."}</small></label>
+                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="kalman">Kalman · phase + frequency</option><option value="adaptive-kalman">Adaptive Kalman · phase + frequency + drift</option><option value="imm">IMM · quiet + dynamic + holdover</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>{servoType === "imm" ? "Three interacting models estimate the active oscillator regime." : servoType === "adaptive-kalman" ? "Adaptive three-state filter estimates phase, frequency, and drift." : servoType === "kalman" ? "Reproducible two-state estimator with bounded PHC frequency control." : "LinuxPTP native servo implementation."}</small></label>
                     <label><span>Target</span><select className="select-control" value={servoTarget} onChange={(event) => selectServoTarget(event.target.value)}><option value="all">All downstream clocks</option>{nodes.filter((node) => node.role !== "Grandmaster").map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select><small>Holdover can be isolated to one cascade stage.</small></label>
-                    {servoType === "kalman" ? <>
+                    {["kalman", "adaptive-kalman", "imm"].includes(servoType) ? <>
                       <label><span>Measurement noise</span><div className="input-unit"><input type="number" min="0.001" step="1" value={kalmanMeasurementNoiseNs} onChange={(event) => setKalmanMeasurementNoiseNs(Number(event.target.value))} /><em>ns σ</em></div><small>Expected hardware timestamp and path asymmetry noise.</small></label>
                       <label><span>Oscillator process noise</span><div className="input-unit"><input type="number" min="0.001" step="0.05" value={kalmanProcessNoisePpb} onChange={(event) => setKalmanProcessNoisePpb(Number(event.target.value))} /><em>ppb/√s</em></div><small>How quickly the estimated free-running frequency may wander.</small></label>
                       <label><span>Phase time constant</span><div className="input-unit"><input type="number" min="0.1" step="0.5" value={kalmanPhaseTimeConstantS} onChange={(event) => setKalmanPhaseTimeConstantS(Number(event.target.value))} /><em>s</em></div><small>State-feedback horizon used to remove estimated phase.</small></label>
                       <label><span>Innovation gate</span><div className="input-unit"><input type="number" min="1" step="0.5" value={kalmanInnovationGateSigma} onChange={(event) => setKalmanInnovationGateSigma(Number(event.target.value))} /><em>σ</em></div><small>Rejects transient measurements outside predicted uncertainty.</small></label>
+                      {servoType !== "kalman" && <label><span>Oscillator drift noise</span><div className="input-unit"><input type="number" min="0.0001" step="0.01" value={kalmanDriftNoisePpbS2} onChange={(event) => setKalmanDriftNoisePpbS2(Number(event.target.value))} /><em>ppb/s²</em></div><small>How quickly the oscillator aging state may change.</small></label>}
                     </> : <>
                       <label><span>Proportional constant</span><div className="input-unit"><input value={kp.toFixed(2)} onChange={(event) => setKp(Number(event.target.value))} /><em>Kp</em></div></label>
                       <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
@@ -2684,10 +3599,15 @@ export default function PTPBoxDashboard() {
                       return <button type="button" key={node.id} disabled={sourceNode} className={selected ? "active" : ""} onClick={() => togglePpsSink(node.id)}><i>{selected ? <Check size={11} /> : <Clock3 size={11} />}</i><span><strong>{node.id}</strong><small>{sourceNode ? "PPS OUT" : selected ? "PPS IN" : "AVAILABLE"}</small></span></button>;
                     })}</div>
                   </div>
+                  <div className={`pps-comparison-config ${ppsComparisonEnabled ? "active" : ""}`}>
+                    <div><Radio size={18} /><span><strong>Common-edge measurement mode</strong><small>Read the same external PPS edge on multiple PHCs without starting a ts2phc discipline loop.</small></span></div>
+                    <label><span>Comparison reference</span><select value={ppsComparisonReference} disabled={!ppsComparisonEnabled} onChange={(event) => setPpsComparisonReference(event.target.value)}>{ppsSinks.map((node) => <option key={node} value={node}>{node}</option>)}</select></label>
+                    <Toggle on={ppsComparisonEnabled} onChange={setPpsComparisonSafely} label="Enable PPS common-edge measurement" />
+                  </div>
                   <div className="pps-ts2phc">
-                    <div className="pps-subheading"><div><span className="section-kicker">LINUXPTP 4.4</span><strong>ts2phc discipline</strong></div><code>{ppsConfiguredRoles} PHC role{ppsConfiguredRoles === 1 ? "" : "s"}</code></div>
+                    <div className="pps-subheading"><div><span className="section-kicker">LINUXPTP 4.4</span><strong>{ppsComparisonEnabled ? "ts2phc discipline bypassed" : "ts2phc discipline"}</strong></div><code>{ppsConfiguredRoles} PHC role{ppsConfiguredRoles === 1 ? "" : "s"}</code></div>
                     <div className="form-grid">
-                      <label><span>Servo</span><select className="select-control" value={ppsServo} onChange={(event) => setPpsServo(event.target.value as NativeServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency</option></select></label>
+                      <label><span>Servo</span><select className="select-control" disabled={ppsComparisonEnabled} value={ppsServo} onChange={(event) => setPpsServo(event.target.value as NativeServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency</option></select></label>
                       <label><span>Stable-lock threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStableThresholdNs} onChange={(event) => setPpsStableThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
                       <label><span>First-step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsFirstStepThresholdNs} onChange={(event) => setPpsFirstStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
                       <label><span>Step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStepThresholdNs} onChange={(event) => setPpsStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
@@ -2697,20 +3617,21 @@ export default function PTPBoxDashboard() {
                   </div>
                   <div className={`pps-live-note ${ppsHardwareStatus?.running ? "active" : ""}`}>
                     <Radio size={15} />
-                    <div><strong>{ppsHardwareStatus?.running ? `ts2phc is running · ${ppsHardwareStatus.servo.toUpperCase()} servo` : ppsEnabled ? "PPS changes are staged in the editor" : "PPS hardware remains untouched"}</strong><span>{ppsHardwareStatus?.running ? `${ppsHardwareStatus.source === "external" ? "External PPS" : `${ppsHardwareStatus.source} PPS out`} is feeding ${ppsHardwareStatus.sinks.length} configured input${ppsHardwareStatus.sinks.length === 1 ? "" : "s"}.` : "Review & apply restarts the managed cascade; enabling ts2phc will adjust sink PHCs, so use PTP holdover when isolating PPS behavior."}</span></div>
+                    <div><strong>{ppsHardwareStatus?.running ? ppsHardwareStatus.mode === "common-edge-measurement" ? "Common-edge PHC comparison is live" : `ts2phc is running · ${ppsHardwareStatus.servo.toUpperCase()} servo` : ppsEnabled ? "PPS changes are staged in the editor" : "PPS hardware remains untouched"}</strong><span>{ppsHardwareStatus?.running ? `${ppsHardwareStatus.source === "external" ? "External PPS" : `${ppsHardwareStatus.source} PPS out`} is feeding ${ppsHardwareStatus.sinks.length} configured input${ppsHardwareStatus.sinks.length === 1 ? "" : "s"}.` : ppsComparisonEnabled ? "Measure-only mode requires an external PPS and at least two programmable EXTS-capable PHCs; it never adjusts their clocks." : "Review & apply restarts the managed cascade; enabling ts2phc will adjust sink PHCs, so use PTP holdover when isolating PPS behavior."}</span></div>
                   </div>
                 </section>
                 <section className="instrument-panel config-section">
                   <div className="panel-heading"><div><span className="section-kicker">GUARDRAILS</span><h2>Safety & recovery</h2></div></div>
                   <div className="toggle-list">
                     <div><div><strong>Sanity-frequency limit</strong><small>Reject adjustments beyond ±200,000 ppb.</small></div><Toggle on={sanity} onChange={setSanity} label="Sanity-frequency limit" /></div>
+                    <div><div><strong>PTP message authentication</strong><small>Stage LinuxPTP SPP/key verification; key material remains root-owned.</small></div><Toggle on={authenticationEnabled} onChange={setAuthenticationEnabled} label="PTP message authentication" /></div>
                     <div><div><strong>Auto-recover unlocked clocks</strong><small>Restart the affected servo after three failed lock cycles.</small></div><Toggle on={true} onChange={() => setToast("Recovery guard remains enabled")} label="Auto-recover" /></div>
                     <div><div><strong>Capture before apply</strong><small>Create a rollback snapshot before changing a running cascade.</small></div><Toggle on={true} onChange={() => setToast("Safety snapshots are always on")} label="Capture before apply" /></div>
                   </div>
                 </section>
               </div>
               <aside className="config-aside">
-                <div className="change-card"><span className="section-kicker">REVIEW CONFIGURATION</span><strong>PTP + PPS controls</strong><p>PTPBox validates the complete document, stages it atomically, then restarts the managed LinuxPTP processes.</p><div><span>BC2…BC7</span><em>Servo gains</em></div><div><span>All clocks</span><em>Sync {effectiveSyncFrequencyHz.toFixed(1)} Hz</em></div><div><span>PPS fabric</span><em>{ppsEnabled ? `${ppsConfiguredRoles} roles` : "Disabled"}</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button" onClick={() => { setKp(0.7); setKi(0.3); setStepThreshold(0); setSyncFrequencyHz(1); setPpsEnabled(false); setPpsSource("BC1"); setPpsSinks(nodes.slice(1).map((node) => node.id)); setPpsOutputPin(0); setPpsInputPin(0); setPpsChannel(0); setPpsPolarity("rising"); setPpsPulseWidthNs(100_000_000); setPpsPhaseNs(0); setPpsCorrectionNs(0); setPpsServo("pi"); setPpsStepThresholdNs(0); setPpsFirstStepThresholdNs(20_000); setPpsHoldoverSeconds(0); setPpsStableThresholdNs(100); }}> <RotateCcw size={14} /> Reset safe defaults</button></div>
+                <div className="change-card"><span className="section-kicker">REVIEW CONFIGURATION</span><strong>PTP + PPS controls</strong><p>PTPBox validates the complete document, stages it atomically, then restarts the managed LinuxPTP processes.</p><div><span>BC2…BC7</span><em>Servo gains</em></div><div><span>All clocks</span><em>Sync {effectiveSyncFrequencyHz.toFixed(1)} Hz</em></div><div><span>PPS fabric</span><em>{ppsEnabled ? ppsComparisonEnabled ? "Measure only" : `${ppsConfiguredRoles} roles` : "Disabled"}</em></div><div><span>Authentication</span><em>{authenticationEnabled ? "Enabled" : "Disabled"}</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button" onClick={() => { setKp(0.7); setKi(0.3); setKalmanDriftNoisePpbS2(.05); setStepThreshold(0); setSyncFrequencyHz(1); setAuthenticationEnabled(false); setPpsEnabled(false); setPpsComparisonEnabled(false); setPpsSource("BC1"); setPpsSinks(nodes.slice(1).map((node) => node.id)); setPpsComparisonReference("BC2"); setPpsOutputPin(0); setPpsInputPin(0); setPpsChannel(0); setPpsPolarity("rising"); setPpsPulseWidthNs(100_000_000); setPpsPhaseNs(0); setPpsCorrectionNs(0); setPpsServo("pi"); setPpsStepThresholdNs(0); setPpsFirstStepThresholdNs(20_000); setPpsHoldoverSeconds(0); setPpsStableThresholdNs(100); }}> <RotateCcw size={14} /> Reset safe defaults</button></div>
                 <div className="config-note"><ShieldCheck size={18} /><div><strong>Safe apply</strong><p>PTPBox validates interface ownership, clock state, and config syntax before touching the running chain.</p></div></div>
               </aside>
             </div>
@@ -2796,11 +3717,13 @@ export default function PTPBoxDashboard() {
             <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>{interfaceInventory.length} interfaces available · {hardwareClocks} clocks responsive · rollback ready</span></div></div>
             <div className="change-list">
               <div><span>Target</span><strong>BC2 through BC7</strong></div>
+              <div><span>Timing profile</span><strong>{profile}</strong></div>
               <div><span>Proportional constant</span><strong>{kp.toFixed(2)}</strong></div>
               <div><span>Integral constant</span><strong>{ki.toFixed(2)}</strong></div>
               <div><span>Sync frequency</span><p><ins>{syncFrequencyHz.toFixed(1)} Hz requested</ins><ArrowRight size={13} /><ins>{effectiveSyncFrequencyHz.toFixed(1)} Hz effective</ins></p></div>
               <div><span>Step threshold</span><strong>{stepThreshold} ns</strong></div>
-              <div><span>PPS distribution</span><strong>{ppsEnabled ? `${ppsSource === "external" ? "External" : `${ppsSource} out`} → ${ppsSinks.length} input${ppsSinks.length === 1 ? "" : "s"} · ${ppsServo.toUpperCase()}` : "Disabled · pins released"}</strong></div>
+              <div><span>PPS distribution</span><strong>{ppsEnabled ? ppsComparisonEnabled ? `External common edge → ${ppsSinks.length} PHCs · measure only` : `${ppsSource === "external" ? "External" : `${ppsSource} out`} → ${ppsSinks.length} input${ppsSinks.length === 1 ? "" : "s"} · ${ppsServo.toUpperCase()}` : "Disabled · pins released"}</strong></div>
+              <div><span>Message authentication</span><strong>{authenticationEnabled ? "Enabled · key material remains root-only" : "Disabled"}</strong></div>
             </div>
             <div className="rollout-plan"><span>ROLLOUT PLAN</span><ol><li><i>1</i><div><strong>Validate & stage</strong><small>Check topology, PPS pin/channel ranges, and a complete LinuxPTP document</small></div></li><li><i>2</i><div><strong>Restart managed timing processes</strong><small>Recreate namespace clocks and {ppsEnabled ? "start the hardware-backed ts2phc loop" : "leave every PPS pin released"}</small></div></li><li><i>3</i><div><strong>Observe reacquisition</strong><small>Raw PHC monitoring and per-node PPS state remain visible</small></div></li></ol></div>
             <div className="drawer-actions"><button className="full-secondary" disabled={applyBusy} onClick={() => setApplyOpen(false)}>Cancel</button><button className="primary-action" disabled={applyBusy} onClick={handleApply}><Zap size={15} /> {applyBusy ? "Applying…" : "Apply to cascade"}</button></div>

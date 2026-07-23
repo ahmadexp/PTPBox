@@ -17,8 +17,12 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import socket
+import sqlite3
+import statistics
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -28,6 +32,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ptpbox_research import ExperimentStore, RollingResearchEngine  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -42,6 +49,9 @@ LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", Path(__file__).with_name("topology.json")))
 PHC_MAP_FILE = Path(os.environ.get("PTPBOX_PHC_MAP", "/run/ptpbox/phcs.json"))
 PPS_PROCESS_FILE = Path(os.environ.get("PTPBOX_PROCESS_STATE", "/run/ptpbox/processes.json"))
+PATH_EVENT_FILE = Path(os.environ.get("PTPBOX_PATH_EVENTS", "/run/ptpbox/path-events.jsonl"))
+FAULT_REQUEST_FILE = STATE_DIR / "fault-request.json"
+FAULT_STATE_FILE = Path(os.environ.get("PTPBOX_FAULT_STATE", "/run/ptpbox/fault-state.json"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
@@ -50,7 +60,7 @@ TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 PHC_HISTORY_MAX_SAMPLES = 7200
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
-SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman"}
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"}
 LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
@@ -81,6 +91,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "process_noise_ppb": 10.0,
             "phase_time_constant_s": 4.0,
             "innovation_gate_sigma": 6.0,
+            "drift_noise_ppb_s2": 0.05,
+        },
+    },
+    "security": {
+        "authentication": {
+            "enabled": False,
+            "spp": 0,
+            "active_key_id": 1,
+            "sa_file": "/etc/linuxptp/ptpbox-sa.cfg",
+            "allow_unauth": 0,
         },
     },
     "pps": {
@@ -94,6 +114,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pulse_width_ns": 100_000_000,
         "perout_phase_ns": 0,
         "extts_correction_ns": 0,
+        "comparison": {
+            "enabled": False,
+            "measure_only": True,
+            "reference": "BC2",
+            "history": 256,
+        },
         "ts2phc": {
             "servo": "pi",
             "kp": 0.7,
@@ -106,6 +132,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "logging_level": 6,
         },
     },
+}
+
+PROFILE_RULES: dict[str, dict[str, Any]] = {
+    "IEEE 1588 Default": {"transport": {"L2", "UDPv4", "UDPv6"}, "delay": {"E2E", "P2P"}, "domain": (0, 127), "two_step": None},
+    "G.8275.1 Telecom": {"transport": {"L2"}, "delay": {"E2E"}, "domain": (24, 43), "two_step": None},
+    "G.8275.2 Telecom": {"transport": {"UDPv4", "UDPv6"}, "delay": {"E2E"}, "domain": (44, 63), "two_step": None},
+    "IEEE 802.1AS gPTP": {"transport": {"L2"}, "delay": {"P2P"}, "domain": (0, 0), "two_step": True},
+    "IEEE C37.238 Power": {"transport": {"L2"}, "delay": {"P2P"}, "domain": (254, 254), "two_step": None},
 }
 
 
@@ -154,6 +188,11 @@ PHC_HISTORY_LOCK = threading.Lock()
 PHC_FDS: dict[str, int] = {}
 PHC_FDS_LOCK = threading.Lock()
 PHC_CROSS_TIMESTAMP_METHODS: dict[str, str] = {}
+RESEARCH_ENGINE = RollingResearchEngine(PHC_HISTORY_MAX_SAMPLES)
+_EXPERIMENT_STORES: dict[str, ExperimentStore] = {}
+_EXPERIMENT_STORES_LOCK = threading.Lock()
+_TEMPERATURE_CACHE: tuple[float, dict[str, float]] = (0.0, {})
+_CAPABILITY_CACHE: tuple[float, dict[str, Any]] = (0.0, {})
 
 
 @dataclass
@@ -331,6 +370,130 @@ def load_json(path: Path, fallback: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return fallback
+
+
+def experiment_store() -> ExperimentStore:
+    path = STATE_DIR / "experiments.sqlite3"
+    key = str(path)
+    with _EXPERIMENT_STORES_LOCK:
+        store = _EXPERIMENT_STORES.get(key)
+        if store is None:
+            store = ExperimentStore(path)
+            _EXPERIMENT_STORES[key] = store
+        return store
+
+
+def clock_temperatures(force: bool = False) -> dict[str, float]:
+    """Read NIC-adjacent hwmon sensors and map them to topology clocks."""
+    global _TEMPERATURE_CACHE
+    now = time.time()
+    if not force and now - _TEMPERATURE_CACHE[0] < 1.0:
+        return dict(_TEMPERATURE_CACHE[1])
+    values: dict[str, float] = {}
+    for item in phc_inventory():
+        candidates: list[Path] = []
+        for direction in ("ingress_interface", "egress_interface"):
+            details = item.get(direction)
+            bus = details.get("bus") if isinstance(details, dict) else None
+            if isinstance(bus, str) and bus:
+                candidates.extend(Path("/sys/bus/pci/devices", bus, "hwmon").glob("hwmon*/temp*_input"))
+        readings: list[float] = []
+        for path in candidates:
+            try:
+                reading = float(path.read_text(encoding="utf-8").strip()) / 1000.0
+                if -40.0 <= reading <= 150.0:
+                    readings.append(reading)
+            except (OSError, ValueError):
+                continue
+        if readings:
+            values[str(item["id"])] = statistics.median(readings)
+    _TEMPERATURE_CACHE = (now, values)
+    return dict(values)
+
+
+def _command_json(command: list[str], timeout: float = 2.0) -> Any:
+    try:
+        result = run(command, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def hardware_capabilities(force: bool = False) -> dict[str, Any]:
+    """Probe optional timing hardware without turning unsupported data into zero."""
+    global _CAPABILITY_CACHE
+    now = time.time()
+    if not force and now - _CAPABILITY_CACHE[0] < 10.0:
+        return _CAPABILITY_CACHE[1]
+    dpll_binary = shutil.which("dpll")
+    devlink_binary = shutil.which("devlink")
+    dpll_devices = _command_json([dpll_binary, "-j", "device", "show"]) if dpll_binary else None
+    dpll_pins = _command_json([dpll_binary, "-j", "pin", "show"]) if dpll_binary else None
+    devlink_health = _command_json([devlink_binary, "-j", "health", "show"]) if devlink_binary else None
+    temperatures = clock_temperatures(force=True)
+    path_events = raw_path_events(32)
+    pps_common_edge = load_json(STATE_DIR / "pps-comparison.json", {})
+    if not isinstance(pps_common_edge, dict):
+        pps_common_edge = {}
+    value = {
+        "dpll": {
+            "supported": dpll_devices is not None,
+            "binary": bool(dpll_binary),
+            "devices": dpll_devices or [],
+            "pins": dpll_pins or [],
+            "reason": None if dpll_devices is not None else "Kernel DPLL userspace reporting is unavailable on this host.",
+        },
+        "synce": {
+            "supported": dpll_devices is not None and bool(dpll_pins),
+            "state": "reported" if dpll_devices is not None and bool(dpll_pins) else "not-reported",
+            "reason": None if dpll_devices is not None and bool(dpll_pins) else "No DPLL pin state is exposed; SyncE status is not inferred from PTP lock.",
+        },
+        "devlink_health": {
+            "supported": devlink_health is not None,
+            "reporters": devlink_health or {},
+        },
+        "temperature": {
+            "supported": bool(temperatures),
+            "nodes": temperatures,
+        },
+        "path_monitor": {
+            "supported": bool(path_events),
+            "events": len(path_events),
+            "reason": None if path_events else "No LinuxPTP slave-event-monitor records have arrived yet.",
+        },
+        "pps_common_edge": {
+            "supported": bool(pps_common_edge.get("samples")),
+            "state": pps_common_edge,
+        },
+        "timestamp": now,
+    }
+    _CAPABILITY_CACHE = (now, value)
+    return value
+
+
+def raw_path_events(limit: int = 128) -> list[dict[str, Any]]:
+    try:
+        with PATH_EVENT_FILE.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = min(handle.tell(), 1_000_000)
+            handle.seek(-size, os.SEEK_END)
+            lines = handle.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines[-max(1, min(2048, limit * 3)):]:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("observed_at"), (int, float)):
+            events.append(event)
+    return events[-max(1, min(2048, limit)):]
 
 
 def phc_fd(device: str) -> int:
@@ -575,6 +738,12 @@ def record_phc_sample() -> dict[str, Any] | None:
     if sample is not None:
         with PHC_HISTORY_LOCK:
             PHC_HISTORY.append(sample)
+        temperatures = clock_temperatures()
+        RESEARCH_ENGINE.add(sample, temperatures)
+        try:
+            experiment_store().record_phc(sample, temperatures)
+        except (OSError, sqlite3.Error):
+            pass
     return sample
 
 
@@ -666,14 +835,72 @@ def configured_phc_sample_rate_hz() -> float:
     return float(2 ** -log_interval)
 
 
+def profile_compliance(value: dict[str, Any] | None = None) -> dict[str, Any]:
+    config_value = value or load_config()
+    name = str(config_value.get("profile", ""))
+    rule = PROFILE_RULES.get(name)
+    if not rule:
+        return {"profile": name, "compliant": False, "checks": [], "error": "unknown profile"}
+    checks = [
+        {
+            "name": "Transport",
+            "actual": config_value.get("transport"),
+            "expected": sorted(rule["transport"]),
+            "pass": config_value.get("transport") in rule["transport"],
+        },
+        {
+            "name": "Delay mechanism",
+            "actual": config_value.get("delay_mechanism"),
+            "expected": sorted(rule["delay"]),
+            "pass": config_value.get("delay_mechanism") in rule["delay"],
+        },
+        {
+            "name": "Domain",
+            "actual": config_value.get("domain"),
+            "expected": list(rule["domain"]),
+            "pass": isinstance(config_value.get("domain"), int) and rule["domain"][0] <= config_value["domain"] <= rule["domain"][1],
+        },
+    ]
+    if rule["two_step"] is not None:
+        checks.append(
+            {
+                "name": "Two-step operation",
+                "actual": config_value.get("two_step"),
+                "expected": rule["two_step"],
+                "pass": config_value.get("two_step") is rule["two_step"],
+            }
+        )
+    return {
+        "profile": name,
+        "compliant": all(check["pass"] for check in checks),
+        "checks": checks,
+        "available_profiles": list(PROFILE_RULES),
+        "scope": "transport, delay mechanism, domain, and two-step compatibility",
+        "certification": False,
+    }
+
+
 def validate_config(value: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if not isinstance(value.get("domain"), int) or not 0 <= value["domain"] <= 127:
-        errors.append("domain must be an integer from 0 through 127")
+    profile = value.get("profile")
+    if profile not in PROFILE_RULES:
+        errors.append(f"profile must be one of: {', '.join(PROFILE_RULES)}")
+    if not isinstance(value.get("domain"), int) or isinstance(value.get("domain"), bool) or not 0 <= value["domain"] <= 255:
+        errors.append("domain must be an integer from 0 through 255")
     if value.get("transport") not in {"L2", "UDPv4", "UDPv6"}:
         errors.append("transport must be L2, UDPv4, or UDPv6")
     if value.get("delay_mechanism") not in {"P2P", "E2E"}:
         errors.append("delay_mechanism must be P2P or E2E")
+    if profile in PROFILE_RULES:
+        rules = PROFILE_RULES[profile]
+        if value.get("transport") not in rules["transport"]:
+            errors.append(f"{profile} requires transport: {', '.join(sorted(rules['transport']))}")
+        if value.get("delay_mechanism") not in rules["delay"]:
+            errors.append(f"{profile} requires delay mechanism: {', '.join(sorted(rules['delay']))}")
+        if isinstance(value.get("domain"), int) and not rules["domain"][0] <= value["domain"] <= rules["domain"][1]:
+            errors.append(f"{profile} requires domain {rules['domain'][0]} through {rules['domain'][1]}")
+        if rules["two_step"] is not None and value.get("two_step") is not rules["two_step"]:
+            errors.append(f"{profile} requires two_step={str(rules['two_step']).lower()}")
     log_sync_interval = value.get("log_sync_interval")
     if isinstance(log_sync_interval, bool) or not isinstance(log_sync_interval, int) or not -3 <= log_sync_interval <= 1:
         errors.append("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)")
@@ -682,7 +909,7 @@ def validate_config(value: dict[str, Any]) -> list[str]:
         errors.append("servo settings are required")
     else:
         if servo.get("type") not in SUPPORTED_SERVOS:
-            errors.append("servo.type must be pi, linreg, nullf, or kalman")
+            errors.append("servo.type must be pi, linreg, nullf, kalman, adaptive-kalman, or imm")
         for key in ("kp", "ki"):
             if not isinstance(servo.get(key), (int, float)) or not 0 <= float(servo[key]) <= 10:
                 errors.append(f"servo.{key} must be between 0 and 10")
@@ -692,9 +919,25 @@ def validate_config(value: dict[str, Any]) -> list[str]:
         if not isinstance(kalman, dict):
             errors.append("servo.kalman settings are required")
         else:
-            for key in ("measurement_noise_ns", "process_noise_ppb", "phase_time_constant_s", "innovation_gate_sigma"):
+            for key in ("measurement_noise_ns", "process_noise_ppb", "phase_time_constant_s", "innovation_gate_sigma", "drift_noise_ppb_s2"):
                 if not isinstance(kalman.get(key), (int, float)) or isinstance(kalman.get(key), bool) or not 0 < float(kalman[key]) <= 1_000_000:
                     errors.append(f"servo.kalman.{key} must be positive and no greater than 1000000")
+    security = value.get("security")
+    authentication = security.get("authentication") if isinstance(security, dict) else None
+    if not isinstance(authentication, dict):
+        errors.append("security.authentication settings are required")
+    else:
+        if not isinstance(authentication.get("enabled"), bool):
+            errors.append("security.authentication.enabled must be boolean")
+        for key, minimum, maximum in (("spp", 0, 255), ("active_key_id", 1, 2**32 - 1), ("allow_unauth", 0, 2)):
+            item = authentication.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or not minimum <= item <= maximum:
+                errors.append(f"security.authentication.{key} must be an integer from {minimum} through {maximum}")
+        sa_file = authentication.get("sa_file")
+        if not isinstance(sa_file, str) or not sa_file.startswith("/etc/linuxptp/") or ".." in Path(sa_file).parts:
+            errors.append("security.authentication.sa_file must be an absolute path below /etc/linuxptp")
+        if authentication.get("enabled") and value.get("two_step") is not True:
+            errors.append("LinuxPTP Authentication TLVs require two_step=true")
     pps = value.get("pps")
     node_ids = [node["name"] for node in topology_nodes()]
     if not isinstance(pps, dict):
@@ -733,6 +976,26 @@ def validate_config(value: dict[str, Any]) -> list[str]:
             errors.append("pps.perout_phase_ns must be an integer from 0 through 999999999")
         if isinstance(pps.get("extts_correction_ns"), bool) or not isinstance(pps.get("extts_correction_ns"), int):
             errors.append("pps.extts_correction_ns must be an integer")
+        comparison = pps.get("comparison")
+        if not isinstance(comparison, dict):
+            errors.append("pps.comparison settings are required")
+        else:
+            if not isinstance(comparison.get("enabled"), bool) or not isinstance(comparison.get("measure_only"), bool):
+                errors.append("pps.comparison enabled and measure_only must be boolean")
+            if comparison.get("enabled"):
+                if not pps.get("enabled") or source != "external":
+                    errors.append("PPS common-edge comparison requires enabled PPS with an external source")
+                if pps.get("polarity") == "both":
+                    errors.append("PPS common-edge comparison requires a single edge polarity (rising or falling)")
+                if not comparison.get("measure_only"):
+                    errors.append("PPS common-edge comparison must be measure-only so no competing ts2phc servo consumes events")
+                if not isinstance(sinks, list) or len(sinks) < 2:
+                    errors.append("PPS common-edge comparison requires at least two sink clocks")
+                if comparison.get("reference") not in (sinks or []):
+                    errors.append("pps.comparison.reference must be one of the sink clocks")
+            history = comparison.get("history")
+            if isinstance(history, bool) or not isinstance(history, int) or not 8 <= history <= 4096:
+                errors.append("pps.comparison.history must be an integer from 8 through 4096")
         ts2phc = pps.get("ts2phc")
         if not isinstance(ts2phc, dict):
             errors.append("pps.ts2phc settings are required")
@@ -778,7 +1041,7 @@ def load_kalman_status(name: str, now: float | None = None) -> dict[str, Any] | 
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         return None
     value = load_json(KALMAN_STATE_DIR / f"kalman-{name.lower()}.json")
-    if not isinstance(value, dict) or value.get("node") != name or value.get("servo") != "kalman":
+    if not isinstance(value, dict) or value.get("node") != name or value.get("servo") not in {"kalman", "adaptive-kalman", "imm"}:
         return None
     observed_at = value.get("observed_at")
     if not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool):
@@ -920,7 +1183,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         node_control = controlled_nodes.get(node["name"], {}) if isinstance(controlled_nodes, dict) else {}
         kalman_status = (
             load_kalman_status(node["name"], now)
-            if isinstance(node_control, dict) and node_control.get("type") == "kalman" and node_control.get("enabled")
+            if isinstance(node_control, dict) and node_control.get("type") in {"kalman", "adaptive-kalman", "imm"} and node_control.get("enabled")
             else None
         )
         if measurement and kalman_status and kalman_status["fresh"]:
@@ -1004,6 +1267,42 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
     }
 
 
+def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
+    telemetry_payload = telemetry(history_seconds=history_seconds, limit=TELEMETRY_MAX_SAMPLES)
+    config_value = load_config()
+    servo = config_value.get("servo", {})
+    snapshot = RESEARCH_ENGINE.snapshot(
+        telemetry_payload["clocks"],
+        float(telemetry_payload.get("phc_sample_rate_hz") or configured_phc_sample_rate_hz()),
+        float(servo.get("kp", 0.7)),
+        float(servo.get("ki", 0.3)),
+    )
+    snapshot.update(
+        {
+            "mode": telemetry_payload["phc_mode"],
+            "capabilities": hardware_capabilities(),
+            "profiles": profile_compliance(config_value),
+            "path_microscope": {
+                "events": raw_path_events(128),
+                "mode": "live" if raw_path_events(1) else "waiting",
+                "provenance": "LinuxPTP slave-event-monitor TLVs; no exchange timestamps are synthesized",
+            },
+            "experiments": experiment_store().list(20),
+            "active_experiment": experiment_store().active(),
+            "security": {
+                "authentication": {
+                    "enabled": bool(config_value.get("security", {}).get("authentication", {}).get("enabled")),
+                    "spp": config_value.get("security", {}).get("authentication", {}).get("spp"),
+                    "active_key_id": config_value.get("security", {}).get("authentication", {}).get("active_key_id"),
+                    "allow_unauth": config_value.get("security", {}).get("authentication", {}).get("allow_unauth"),
+                    "key_material_exposed": False,
+                },
+            },
+        }
+    )
+    return snapshot
+
+
 def read_integer(path: Path) -> int:
     try:
         return int(path.read_text(encoding="utf-8").strip())
@@ -1071,20 +1370,23 @@ def pps_status(processes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     }
     managed_value = load_json(PPS_PROCESS_FILE, [])
     managed = managed_value if isinstance(managed_value, list) else []
-    managed_ts2phc = next(
+    managed_pps = next(
         (
             item
             for item in managed
             if isinstance(item, dict)
-            and (item.get("kind") == "ts2phc" or item.get("label") == "PPS-ts2phc")
+            and (item.get("kind") in {"ts2phc", "pps-comparison"} or item.get("label") in {"PPS-ts2phc", "PPS-COMPARE"})
         ),
         None,
     )
-    managed_pid = managed_ts2phc.get("pid") if isinstance(managed_ts2phc, dict) else None
+    managed_pid = managed_pps.get("pid") if isinstance(managed_pps, dict) else None
     managed_running = isinstance(managed_pid, int) and process_is_alive(managed_pid)
     if not managed_running and processes:
         managed_running = any(
-            item.get("name") == "ts2phc" and "ptpbox-ts2phc.conf" in str(item.get("command", ""))
+            (
+                item.get("name") == "ts2phc" and "ptpbox-ts2phc.conf" in str(item.get("command", ""))
+            )
+            or "ptpbox-pps-compare" in str(item.get("command", ""))
             for item in processes
         )
 
@@ -1147,6 +1449,11 @@ def pps_status(processes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         "source": source,
         "sinks": list(pps["sinks"]),
         "servo": pps["ts2phc"]["servo"],
+        "mode": "common-edge-measurement" if pps.get("comparison", {}).get("enabled") else "ts2phc-discipline",
+        "comparison": {
+            **pps.get("comparison", {}),
+            "state": load_json(STATE_DIR / "pps-comparison.json", {}),
+        },
         "pulse_width_ns": int(pps["pulse_width_ns"]),
         "nodes": nodes,
         "timestamp": time.time(),
@@ -1156,6 +1463,7 @@ def pps_status(processes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     ports = interfaces()
     processes = running_processes()
+    capabilities = hardware_capabilities()
     return {
         "hostname": socket.gethostname(),
         "linuxptp": linuxptp_version(),
@@ -1167,15 +1475,23 @@ def status() -> dict[str, Any]:
         "phc_sample_rate_hz": configured_phc_sample_rate_hz(),
         "servo_control": load_servo_state(),
         "pps": pps_status(processes),
+        "advanced_capabilities": {
+            name: bool(details.get("supported"))
+            for name, details in capabilities.items()
+            if isinstance(details, dict) and "supported" in details
+        },
+        "active_experiment": experiment_store().active(),
+        "profile_compliance": profile_compliance(),
+        "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.9.0",
+        "agent_version": "2.0.0",
         "timestamp": time.time(),
     }
 
 
 def control(action: str) -> tuple[int, dict[str, Any]]:
-    if action not in {"start", "stop", "restart", "status", "servo"}:
+    if action not in {"start", "stop", "restart", "status", "servo", "fault"}:
         return HTTPStatus.BAD_REQUEST, {"error": "unsupported control action"}
     if not CONTROL.exists():
         return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "privileged control helper is not installed", "observer_only": True}
@@ -1190,6 +1506,22 @@ def control(action: str) -> tuple[int, dict[str, Any]]:
     except json.JSONDecodeError:
         payload = {"message": result.stdout.strip() or f"{action} completed"}
     return HTTPStatus.OK, payload
+
+
+def fault_expiry_loop(stop: threading.Event) -> None:
+    while not stop.wait(0.5):
+        state = load_json(FAULT_STATE_FILE, {})
+        expires_at = state.get("expires_at") if isinstance(state, dict) and state.get("enabled") else None
+        if not isinstance(expires_at, (int, float)) or time.time() < float(expires_at):
+            continue
+        target = state.get("target")
+        if not isinstance(target, str):
+            continue
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        pending = FAULT_REQUEST_FILE.with_suffix(".json.tmp")
+        pending.write_text(json.dumps({"target": target, "enabled": False}, indent=2) + "\n", encoding="utf-8")
+        pending.replace(FAULT_REQUEST_FILE)
+        control("fault")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1210,6 +1542,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, body: bytes, content_type: str, filename: str | None = None) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -1277,6 +1618,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(load_config())
             elif route == "/api/servo":
                 self.send_json({"supported": sorted(SUPPORTED_SERVOS), "state": load_servo_state(), "timestamp": time.time()})
+            elif route == "/api/research":
+                try:
+                    history_seconds = float(query.get("history", ["900"])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(research_snapshot(max(30.0, min(7200.0, history_seconds))))
+            elif route == "/api/capabilities":
+                self.send_json(hardware_capabilities(force=query.get("refresh") == ["1"]))
+            elif route == "/api/path-events":
+                try:
+                    limit = int(query.get("limit", ["128"])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "limit must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json({"events": raw_path_events(limit), "timestamp": time.time()})
+            elif route == "/api/profiles":
+                self.send_json(profile_compliance())
+            elif route == "/api/experiments":
+                self.send_json({"active": experiment_store().active(), "runs": experiment_store().list(100), "timestamp": time.time()})
+            elif route.startswith("/api/experiments/") and route.endswith("/export"):
+                identifier = route.removeprefix("/api/experiments/").removesuffix("/export").strip("/")
+                if not re.fullmatch(r"run-[0-9A-Za-z-]+", identifier) or not experiment_store().get(identifier):
+                    self.send_json({"error": "experiment not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                body = experiment_store().export_csv(identifier).encode("utf-8")
+                self.send_bytes(body, "text/csv; charset=utf-8", f"{identifier}.csv")
             elif route == "/healthz":
                 self.send_json({"ok": True, "timestamp": time.time()})
             else:
@@ -1312,7 +1680,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "target must be all or a downstream clock"}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
             if not isinstance(enabled, bool) or servo_type not in SUPPORTED_SERVOS:
-                self.send_json({"error": "enabled must be boolean and type must be pi, linreg, nullf, or kalman"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json({"error": "enabled must be boolean and type must be pi, linreg, nullf, kalman, adaptive-kalman, or imm"}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             pending = SERVO_REQUEST_FILE.with_suffix(".json.tmp")
@@ -1322,10 +1690,56 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(response, code)
             return
         if route == "/api/experiments/start":
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            experiment = {"id": f"run-{int(time.time())}", "state": "staged", "created_at": time.time(), **body}
-            (STATE_DIR / "experiment.json").write_text(json.dumps(experiment, indent=2) + "\n", encoding="utf-8")
+            try:
+                experiment = experiment_store().start(body, load_config())
+                experiment_store().event("experiment", "info", f"Started {experiment.get('kind', 'capture')} capture", {"id": experiment.get("id")})
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                return
             self.send_json(experiment, HTTPStatus.CREATED)
+            return
+        if route == "/api/experiments/stop":
+            identifier = body.get("id")
+            if identifier is not None and not isinstance(identifier, str):
+                self.send_json({"error": "id must be a string"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            experiment = experiment_store().stop(identifier)
+            if not experiment:
+                self.send_json({"error": "no running experiment"}, HTTPStatus.NOT_FOUND)
+                return
+            experiment_store().event("experiment", "info", f"Completed capture {experiment['id']}", {"id": experiment["id"]})
+            self.send_json(experiment)
+            return
+        if route == "/api/fault/control":
+            target = body.get("target")
+            enabled = body.get("enabled")
+            node_ids = [node["name"] for node in topology_nodes()[:-1]]
+            if target not in node_ids or not isinstance(enabled, bool):
+                self.send_json({"error": "target must be an upstream topology clock and enabled must be boolean"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            normalized = {"target": target, "enabled": enabled}
+            for key, minimum, maximum in (
+                ("delay_us", 0.0, 1_000_000.0),
+                ("jitter_us", 0.0, 1_000_000.0),
+                ("loss_pct", 0.0, 100.0),
+                ("duration_s", 1.0, 3600.0),
+            ):
+                value = body.get(key, 0 if key != "duration_s" else 30)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= float(value) <= maximum:
+                    self.send_json({"error": f"{key} must be between {minimum} and {maximum}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                    return
+                normalized[key] = float(value)
+            if enabled and normalized["delay_us"] == 0 and normalized["jitter_us"] == 0 and normalized["loss_pct"] == 0:
+                self.send_json({"error": "an enabled fault needs delay, jitter, or loss"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            pending = FAULT_REQUEST_FILE.with_suffix(".json.tmp")
+            pending.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
+            pending.replace(FAULT_REQUEST_FILE)
+            code, response = control("fault")
+            if code == HTTPStatus.OK:
+                experiment_store().event("fault", "warning" if enabled else "info", f"{'Applied' if enabled else 'Cleared'} guarded netem on {target}", normalized)
+            self.send_json(response, code)
             return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -1338,7 +1752,9 @@ def main() -> None:
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     stop_sampler = threading.Event()
     sampler = threading.Thread(target=phc_sampler_loop, args=(stop_sampler,), name="ptpbox-phc-sampler", daemon=True)
+    fault_expirer = threading.Thread(target=fault_expiry_loop, args=(stop_sampler,), name="ptpbox-fault-expirer", daemon=True)
     sampler.start()
+    fault_expirer.start()
     print(f"PTPBox agent listening on http://{args.bind}:{args.port} (root={ROOT})")
     try:
         server.serve_forever()
@@ -1347,6 +1763,7 @@ def main() -> None:
     finally:
         stop_sampler.set()
         sampler.join(timeout=2)
+        fault_expirer.join(timeout=2)
         server.server_close()
 
 

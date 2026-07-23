@@ -16,7 +16,7 @@
 [![Node](https://img.shields.io/badge/Node-%E2%89%A522.13-61dce3?style=flat-square)](package.json)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-61dce3?style=flat-square)](agent/ptpbox_agent.py)
 
-[Hosted demo](https://ptpbox-precision-lab.turbalance-3786.chatgpt.site) · [Install](docs/INSTALLATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware guide](docs/HARDWARE.md) · [Experiments](docs/EXPERIMENTS.md) · [API](docs/API.md)
+[Hosted demo](https://ptpbox-precision-lab.turbalance-3786.chatgpt.site) · [Install](docs/INSTALLATION.md) · [Research](docs/RESEARCH.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware](docs/HARDWARE.md) · [Experiments](docs/EXPERIMENTS.md) · [API](docs/API.md)
 
 </div>
 
@@ -54,7 +54,7 @@ animated values are live measurements, not a prerecorded simulation dataset.
 
 ## See timing error grow, hop by hop
 
-<img src="docs/images/overview.jpg" alt="PTPBox Observatory overview showing a seven-clock cascade and accumulated offset traces" width="100%">
+<img src="docs/screenshots/overview-live.png" alt="Live PTPBox Observatory overview showing the ordered seven-clock cascade, locked LinuxPTP receivers, and raw BC1-relative PHC traces" width="100%">
 
 The first viewport is the experiment: BC1 grandmaster to BC7 ordinary clock,
 with five boundary clocks in between. Select a node to inspect its direct PHC
@@ -117,6 +117,48 @@ periodic orbit or deterministic attractor without supporting evidence. Modal
 time traces and rolling covariance eigenvalues keep the evolving geometry tied
 to the original measurements.
 
+## Go beyond an offset graph
+
+<img src="docs/screenshots/metrology-live.png" alt="Live PTPBox metrology workbench with TDEV, factor-graph fusion, ensemble time, covariance-aware error budget, and durable run ledger" width="100%">
+
+The metrology workbench calculates overlapping ADEV, MDEV, TDEV, HDEV, MTIE,
+and Theo1 at power-of-two averaging intervals. It reports the number of usable
+pairs with every point and never fills missing live samples. A weighted
+least-squares factor graph fuses direct BC1 comparisons, adjacent-hop
+constraints, and a common PPS edge when the hardware exposes one. The ensemble
+clock uses covariance-regularized inverse weighting, while the error budget
+separates cross-timestamp uncertainty, servo noise, observed path motion, and
+holdover prediction. Cascade uncertainty is propagated through the measured
+hop covariance instead of assuming that every stage is independent.
+
+<img src="docs/screenshots/path-microscope-live.png" alt="Live PTPBox path microscope showing raw LinuxPTP t1, t2, t3, and t4 timestamps for every measured hop" width="100%">
+
+The path microscope records LinuxPTP slave-event-monitor TLVs for every
+adjacent Sync/Follow_Up and Delay_Req/Delay_Resp exchange. `t1` through `t4`,
+both sequence IDs, and correction fields are retained as decimal strings so
+nanosecond precision is not lost to JSON floating point. The directional
+timestamp residual is intentionally labeled **apparent**: without a common
+external timebase, it contains twice the inter-clock phase offset as well as
+path asymmetry. PTPBox does not mislabel that observable as calibrated one-way
+delay.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/intelligence-live.png" alt="Live PTPBox control intelligence workbench"></td>
+    <td width="50%"><img src="docs/screenshots/resilience-live.png" alt="Live PTPBox resilience workbench"></td>
+  </tr>
+  <tr>
+    <td><strong>Control intelligence</strong><br>Three-state adaptive Kalman, interacting multiple models, temperature-aware holdover, ARX identification, replay-only Gaussian-process tuning, recurrence quantification, Koopman/DMD, and Bayesian online change detection.</td>
+    <td><strong>Resilience lab</strong><br>Profile configuration guardrails, capability-gated DPLL/SyncE truth, LinuxPTP Authentication TLVs, and one-hop netem faults with mandatory automatic expiry.</td>
+  </tr>
+</table>
+
+These panels are estimators and diagnostic instruments, not autonomous
+decision makers. Gain optimization evaluates captured samples only and stages a
+recommendation for operator review; it never explores gains on the live
+cascade. Hardware claims remain capability-gated, and profile checks are
+configuration guardrails rather than standards certification.
+
 ## What you can do
 
 | Surface | Purpose |
@@ -125,10 +167,14 @@ to the original measurements.
 | **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
 | **Covariance lab** | Compare synchronized phase-change rates as covariance or correlation, follow every pair through time, and inspect eigenvalues plus dominant-mode loadings. |
 | **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
+| **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
+| **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
+| **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, and rank replay-safe PI gains. |
+| **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
-| **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
-| **Servo & holdover control** | Select PI, linear-regression, two-state Kalman, or null-frequency discipline per clock, tune Kalman measurement/process noise and phase response, request a 0.5–10 Hz Sync cadence with the effective IEEE 1588 rate shown explicitly, enter holdover without stopping observation, and measure live drift before resuming. |
-| **PPS & `ts2phc` control** | Select a PHC or external PPS source, assign PPS inputs, configure pins, channel, edge, pulse width, phase, correction, servo, and holdover, then see the actual PPS role and kernel pin state beneath every overview node. |
+| **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |
+| **Servo & holdover control** | Select native PI/linear-regression/null-frequency discipline, classic Kalman, adaptive phase/frequency/drift Kalman, or quiet/dynamic/holdover IMM per clock; change discipline while read-only monitoring stays live. |
+| **PPS & `ts2phc` control** | Select a PHC or external PPS source, configure pins and `ts2phc`, or compare two or more PHCs against one physical PPS edge in strictly measurement-only mode. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Notifications & event stream** | Follow measurement health, lock state, active servo mix, threshold events, and operator actions. |
@@ -154,7 +200,7 @@ to the original measurements.
     <td width="50%"><img src="docs/images/notifications.jpg" alt="PTPBox live notification center over the cascade overview"></td>
   </tr>
   <tr>
-    <td><strong>Servo and holdover control</strong><br>Choose PI, linear regression, a PTPBox two-state Kalman estimator, or null-frequency operation for one stage or the downstream chain. Enter holdover while raw monitoring continues.</td>
+    <td><strong>Servo and holdover control</strong><br>Choose PI, linear regression, null frequency, classic Kalman, adaptive phase/frequency/drift Kalman, or IMM for one stage or the downstream chain. Enter holdover while raw monitoring continues.</td>
     <td><strong>Live notification center</strong><br>See PHC freshness, receiver lock health, and the active servo mix, then jump directly to the relevant control-room surface.</td>
   </tr>
 </table>
@@ -220,7 +266,10 @@ flowchart LR
     Logs["LinuxPTP logs\ntelemetry parser"]
     PHCs["/dev/ptp*\nread-only comparisons"]
     Helper["ptpboxctl\nfixed privileged verbs"]
-    Kalman["PTPBox Kalman servo\nphase + frequency state"]
+    Research["Metrology engine\nstability · fusion · modes"]
+    Store["SQLite/WAL\nruns + raw samples"]
+    Events["LinuxPTP monitor TLVs\nt1 · t2 · t3 · t4"]
+    Kalman["PTPBox servo worker\nclassic · adaptive · IMM"]
     NS["BC1 … BC7\nnetwork namespaces"]
     PTP["one ptp4l per NIC\nhardware boundary clocks"]
 
@@ -228,6 +277,9 @@ flowchart LR
     Agent --> Inventory
     Agent --> Logs
     Agent --> PHCs
+    Agent --> Events
+    Agent --> Research
+    Agent --> Store
     Agent -. "sudo: fixed lifecycle + servo verbs" .-> Helper
     Helper --> NS
     NS --> PTP
@@ -237,8 +289,8 @@ flowchart LR
 ```
 
 The agent runs as the operator, not root. Observation stays unprivileged.
-Lifecycle and servo control cross a narrow sudo boundary that accepts five
-fixed operations and no arbitrary command line. See
+Lifecycle, servo, and bounded-fault control cross a narrow sudo boundary that
+accepts six fixed operations and no arbitrary command line. See
 [Architecture](docs/ARCHITECTURE.md) and [Security](SECURITY.md).
 
 The Configuration page also exposes a safe-off-by-default PPS lab: select a PHC
@@ -255,18 +307,31 @@ state from sysfs and the managed process table.
   the applied 0.5–8 Hz protocol-valid Sync cadence
 - Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC comparison
   dispersion and its reported error bound
+- Overlapping ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1 across supported
+  averaging intervals, including usable-pair counts
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
-- Kalman phase/frequency estimates, covariance-derived uncertainty, innovation
-  acceptance, rejected-sample count, and applied bounded correction
+- Preserved `t1`/`t2`/`t3`/`t4` timestamp-exchange records and qualified
+  apparent directional residuals
+- Classic and adaptive Kalman phase/frequency/drift estimates,
+  covariance-derived uncertainty, innovation acceptance, rejected-sample
+  count, and applied bounded correction
+- IMM quiet/dynamic/holdover probabilities and the active regime
+- Temperature-aware holdover prediction with uncertainty
+- ARX loop model, poles, spectral radius, fit, residual, and settling estimate
+- Replay-only Gaussian-process PI recommendation with the evaluated safe
+  frontier and zero live exploratory changes
 - Lock/tracking state and recovery events
 - Holdover elapsed time and frequency drift from the continuing raw PHC trace
-- MTIE windows and mask verdicts
 - Offset distribution, P95, skew, and contribution share
+- Weighted factor-graph residuals, covariance-regularized ensemble weights,
+  and correlated-versus-independent cascade uncertainty
 - Rolling phase-change covariance/correlation, full pair timelines, eigenvalues,
   explained trace, effective rank, and dominant eigenvector loadings
 - Six-dimensional state-space projections, covariance ellipses, empirical
   Poincaré crossings, modal coordinates, and rolling eigenvalue shares
+- Recurrence rate/determinism, Koopman/DMD amplification, and Bayesian online
+  change probability
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
 - Per-node PPS availability, configured in/out role, live PHC pin function,
   channel, connector, and managed `ts2phc` state
@@ -289,6 +354,13 @@ reported by `ptp4l`. The UI never substitutes PHC-comparison dispersion for
 servo RMS. During holdover, observation continues while only the selected clock
 discipline is disabled, so drift remains measurable. If either raw source is
 missing or stale, the interface says so instead of manufacturing a live value.
+
+The path microscope is raw in a different sense: it preserves the exchange
+timestamps exported by LinuxPTP's event monitor. Its apparent forward/reverse
+residual is not a one-way path calibration because the two PHCs are not already
+on a common timebase. A shared external PPS edge can provide an independent
+multi-PHC comparison when the NICs expose external-timestamp pins, but it also
+remains read-only.
 
 ## Hardware
 
@@ -324,7 +396,7 @@ app/                 Precision Observatory UI
 agent/               Read-only host API, topology, systemd template
 scripts/             Safe lifecycle, install, and uninstall helpers
 standalone/          Static-host entrypoint for the on-box agent
-docs/                Installation, architecture, API, hardware, experiments
+docs/                Installation, research, architecture, API, hardware, experiments
 tests/               Rendered-product checks
 .github/workflows/   CI for UI, Python, shell, and standalone builds
 ```
@@ -342,15 +414,42 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory is running on the reference hardware with selectable PI,
-linear-regression, Kalman, and null-frequency servos, measured holdover,
-common-epoch PHC comparison, raw LinuxPTP telemetry,
-the multi-pendulum phase view, covariance and eigenmode analysis, notifications,
-the state-space and Poincaré atlas, a standalone host bundle, live inventory,
-configuration staging, and guarded lifecycle control. The next milestones are
-durable experiment storage, PPS edge/offset datasets, automated
-MTIE/TDEV/Allan deviation, and reusable topology presets. See
-[CHANGELOG.md](CHANGELOG.md).
+The complete Precision Observatory is running on the seven-NIC reference host:
+the ordered namespace cascade, common-epoch PHC comparison, raw LinuxPTP
+telemetry, selectable native/Kalman/adaptive/IMM servos, measured holdover,
+packet-path capture, stability metrology, factor fusion, ensemble time,
+covariance-aware error budgets, nonlinear-dynamics diagnostics, guarded
+profiles/security/faults, PPS common-edge comparison, and durable experiment
+storage are implemented. Hardware-dependent instruments say **not exposed**
+instead of inferring state when the driver or kernel lacks the required API.
+See [CHANGELOG.md](CHANGELOG.md).
+
+## Research foundations
+
+The implementations are dependency-free and intentionally compact so they can
+run on the appliance, but their definitions and operational boundaries follow
+primary references:
+
+- [NIST SP 1065, *Handbook of Frequency Stability Analysis*](https://www.nist.gov/publications/handbook-frequency-stability-analysis)
+  for Allan-family, time-deviation, MTIE, and Theo statistics;
+- [Linux kernel PTP hardware clock infrastructure](https://docs.kernel.org/driver-api/ptp.html)
+  for PHC clocks, cross timestamps, EXTS, and periodic outputs;
+- [Linux kernel DPLL subsystem](https://docs.kernel.org/driver-api/dpll.html)
+  for capability-gated physical-frequency state;
+- [LinuxPTP servo configuration](https://www.linuxptp.org/documentation/default/)
+  and [`ts2phc`](https://www.linuxptp.org/documentation/ts2phc/) for native
+  servos, PPS, and Authentication TLVs;
+- [NIST, *Steering a Time Scale*](https://www.nist.gov/publications/steering-time-scale)
+  for weighted ensemble-clock design;
+- [Adams and MacKay, *Bayesian Online Changepoint Detection*](https://arxiv.org/abs/0710.3742)
+  for causal regime-change probability;
+- [Schmid, *Dynamic Mode Decomposition of Numerical and Experimental Data*](https://doi.org/10.1017/S0022112010001217)
+  for the snapshot-based dynamics operator;
+- [Snoek, Larochelle, and Adams, *Practical Bayesian Optimization*](https://papers.nips.cc/paper_files/paper/2012/hash/05311655a15b75fab86956663e1819cd-Abstract.html)
+  for Gaussian-process expected-improvement search.
+
+See [Architecture](docs/ARCHITECTURE.md) for the exact implementation and
+interpretation limits.
 
 ## Heritage
 

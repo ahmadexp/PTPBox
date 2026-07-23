@@ -24,13 +24,16 @@ The optional installer grants that account passwordless sudo for exactly:
 /usr/local/sbin/ptpboxctl restart
 /usr/local/sbin/ptpboxctl status
 /usr/local/sbin/ptpboxctl servo
+/usr/local/sbin/ptpboxctl fault
 ```
 
 The helper accepts fixed verbs and validates topology data before moving any
-interface. The `servo` verb reads an atomically staged, schema-validated request
-from a fixed path; it accepts no command-line target or configuration path.
-Arbitrary commands and arbitrary command-line paths are not allowed by the
-sudoers rule.
+interface. The `servo` and `fault` verbs read atomically staged,
+schema-validated requests from fixed paths; neither accepts a command-line
+target or configuration path. Fault control resolves the target only through
+the installed topology, touches one downstream namespace egress, and installs
+an expiry timer. Arbitrary commands and arbitrary command-line paths are not
+allowed by the sudoers rule.
 
 The agent shares the host filesystem mount view because Linux named network
 namespaces are persistent `nsfs` mount handles under `/run/netns`. It remains an
@@ -46,3 +49,8 @@ limited to the exact commands above.
 - Keep management interfaces listed in `management_interfaces`.
 - Review `/etc/ptpbox/topology.json` after every NIC rename or hardware change.
 - Treat experiment logs and clock identities as operational data.
+- Keep LinuxPTP Security Association files root-owned and outside the web
+  state directory. The API accepts only paths below `/etc/linuxptp`, requires
+  the file to exist before start, and never reads key material into a response.
+- Keep bounded fault injection on the isolated timing fabric. It is not a
+  general traffic-control API and must never target a management interface.
