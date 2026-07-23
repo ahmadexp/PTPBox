@@ -24,7 +24,9 @@ PIDS_FILE = STATE_DIR / "processes.json"
 PHC_MAP_FILE = STATE_DIR / "phcs.json"
 SERVO_STATE_FILE = STATE_DIR / "servo-state.json"
 SERVO_REQUEST_FILE = CONFIG_FILE.with_name("servo-request.json")
-SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
+KALMAN_HELPER = Path(os.environ.get("PTPBOX_KALMAN_HELPER", "/usr/local/sbin/ptpbox-kalman-servo"))
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman"}
+LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 PPS_CONFIG_FILE = LINUXPTP_CONFIG_DIR / "ptpbox-ts2phc.conf"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -41,6 +43,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
+        "kalman": {
+            "measurement_noise_ns": 200.0,
+            "process_noise_ppb": 10.0,
+            "phase_time_constant_s": 4.0,
+            "innovation_gate_sigma": 6.0,
+        },
     },
     "pps": {
         "enabled": False,
@@ -269,6 +277,10 @@ def render_ptp_config(
     servo = {**values["servo"], **(servo_override or {})}
     if servo["type"] not in SUPPORTED_SERVOS:
         raise ValueError(f"unsupported servo type: {servo['type']}")
+    external_kalman = servo["type"] == "kalman"
+    linuxptp_servo = "nullf" if external_kalman else servo["type"]
+    if linuxptp_servo not in LINUXPTP_NATIVE_SERVOS:
+        raise ValueError(f"unsupported LinuxPTP servo type: {linuxptp_servo}")
     transport = {"L2": "L2", "UDPv4": "UDPv4", "UDPv6": "UDPv6"}[values["transport"]]
     if role == "boundary" and (not ingress or not egress):
         raise ValueError("a boundary clock requires ingress and egress interfaces")
@@ -298,9 +310,10 @@ time_stamping {'hardware' if values['hardware_timestamping'] else 'software'}
 twoStepFlag {1 if values['two_step'] else 0}
 logSyncInterval {int(values['log_sync_interval'])}
 summary_interval {int(values['log_sync_interval'])}
+freq_est_interval {int(values['log_sync_interval'])}
 tx_timestamp_timeout 100
-free_running {1 if free_running else 0}
-clock_servo {servo['type']}
+free_running {1 if free_running or external_kalman else 0}
+clock_servo {linuxptp_servo}
 pi_proportional_const {float(servo['kp'])}
 pi_integral_const {float(servo['ki'])}
 step_threshold {float(servo['step_threshold_ns']) / 1_000_000_000:.9f}
@@ -414,12 +427,66 @@ def spawn(label: str, args: list[str], processes: list[dict[str, Any]]) -> None:
     log_path = LOG_DIR / f"{label}.log"
     handle = log_path.open("ab", buffering=0)
     log_path.chmod(0o644)
+    handle.write(f"\nPTPBox session start [{time.monotonic():.3f}]\n".encode())
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(0.12)
     if process.poll() is not None:
         handle.close()
         raise RuntimeError(f"{label} exited during startup; inspect {log_path}")
     processes.append({"label": label, "pid": process.pid, "command": args, "log": str(log_path)})
+
+
+def spawn_kalman(
+    node: str,
+    measurement_phc: str | None,
+    ptp_log: str,
+    values: dict[str, Any],
+    processes: list[dict[str, Any]],
+) -> None:
+    if not measurement_phc or not re.fullmatch(r"ptp\d+", measurement_phc):
+        raise RuntimeError(f"Kalman servo requires a mapped measurement PHC for {node}")
+    if not KALMAN_HELPER.exists():
+        raise RuntimeError(f"Kalman servo helper is not installed: {KALMAN_HELPER}")
+    servo = values["servo"]
+    kalman = servo["kalman"]
+    max_frequency = float(servo["sanity_freq_limit_ppb"])
+    if max_frequency <= 0:
+        max_frequency = 500_000.0
+    state_path = STATE_DIR / f"kalman-{node.lower()}.json"
+    state_path.unlink(missing_ok=True)
+    args = [
+        str(KALMAN_HELPER),
+        "--node",
+        node,
+        "--phc",
+        f"/dev/{measurement_phc}",
+        "--log",
+        ptp_log,
+        "--state",
+        str(state_path),
+        "--measurement-noise-ns",
+        str(float(kalman["measurement_noise_ns"])),
+        "--process-noise-ppb",
+        str(float(kalman["process_noise_ppb"])),
+        "--phase-time-constant-s",
+        str(float(kalman["phase_time_constant_s"])),
+        "--innovation-gate-sigma",
+        str(float(kalman["innovation_gate_sigma"])),
+        "--max-frequency-ppb",
+        str(max_frequency),
+        "--first-step-threshold-ns",
+        str(float(servo["first_step_threshold_ns"])),
+    ]
+    spawn(f"{node}-KALMAN", args, processes)
+    processes[-1].update(
+        {
+            "kind": "kalman",
+            "kalman_for": node,
+            "phc": measurement_phc,
+            "state": str(state_path),
+            "observation_log": ptp_log,
+        }
+    )
 
 
 def phc_capability(phc: str, field: str) -> int:
@@ -477,6 +544,8 @@ def render_ts2phc_config(
     """Render a hardware-backed PPS distribution and ts2phc servo."""
     pps = values["pps"]
     ts2phc = pps["ts2phc"]
+    if ts2phc["servo"] not in LINUXPTP_NATIVE_SERVOS:
+        raise ValueError(f"unsupported ts2phc servo type: {ts2phc['servo']}")
     source_device, sink_devices = validate_pps_hardware(values, inventory)
     sections: list[str] = []
     if source_device:
@@ -586,6 +655,8 @@ def start() -> dict[str, Any]:
             args.extend(["-m", "-q"])
             spawn(label, args, processes)
             processes[-1].update({"node": node["name"], "servo": node_servo})
+            if not first and node_servo["enabled"] and node_servo["type"] == "kalman":
+                spawn_kalman(node["name"], inventory.get("measurement_phc"), str(processes[-1]["log"]), config(), processes)
         start_pps(config(), phcs_by_id, processes)
     except Exception:
         for item in reversed(processes):
@@ -645,7 +716,24 @@ def servo_apply() -> dict[str, Any]:
     state = servo_state(topo)
     changed: list[str] = []
     for name in targets:
-        index = next((i for i, item in enumerate(processes) if item.get("node") == name or str(item.get("label", "")).startswith(f"{name}-")), None)
+        for kalman_index in reversed(
+            [
+                i
+                for i, process in enumerate(processes)
+                if process.get("kind") == "kalman" and process.get("kalman_for") == name
+            ]
+        ):
+            stop_process(processes[kalman_index])
+            processes.pop(kalman_index)
+        index = next(
+            (
+                i
+                for i, item in enumerate(processes)
+                if item.get("kind") != "kalman"
+                and (item.get("node") == name or str(item.get("label", "")).startswith(f"{name}-"))
+            ),
+            None,
+        )
         if index is None:
             raise RuntimeError(f"no managed ptp4l process for {name}")
         item = processes[index]
@@ -668,7 +756,7 @@ def servo_apply() -> dict[str, Any]:
             egress=node["egress"] if role == "boundary" else None,
             uds_label=name.lower(),
             servo_override={"type": servo_type},
-            free_running=not enabled,
+            free_running=not enabled or servo_type == "kalman",
         )
         stop_process(item)
         replacement: list[dict[str, Any]] = []
@@ -683,6 +771,16 @@ def servo_apply() -> dict[str, Any]:
         }
         replacement[0].update({"node": name, "servo": node_state})
         processes[index] = replacement[0]
+        if enabled and servo_type == "kalman":
+            kalman_processes: list[dict[str, Any]] = []
+            spawn_kalman(
+                name,
+                inventory.get("measurement_phc"),
+                str(replacement[0]["log"]),
+                config(),
+                kalman_processes,
+            )
+            processes[index + 1:index + 1] = kalman_processes
         state["nodes"][name] = node_state
         PIDS_FILE.write_text(json.dumps(processes, indent=2) + "\n", encoding="utf-8")
         save_servo_state(state)

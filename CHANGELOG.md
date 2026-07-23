@@ -4,6 +4,13 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a real per-clock Kalman servo alongside PI and linear regression:
+  LinuxPTP supplies hardware-timestamped observations in non-disciplining mode,
+  a root-owned two-state phase/frequency filter propagates covariance and gates
+  outliers, and a bounded `clock_adjtime` correction disciplines the mapped PHC.
+  The Observatory exposes measurement noise, oscillator process noise, phase
+  time constant, innovation gate, estimates, uncertainty, and lock state while
+  preserving the existing start/stop and measured-holdover workflow.
 - Added a safe-off-by-default PPS and `ts2phc` control surface with selectable
   PHC or external source, per-clock PPS inputs, Mellanox pin/channel selection,
   edge, pulse, phase, correction, servo, stable-lock, step, and ToD-holdover

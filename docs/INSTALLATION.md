@@ -113,7 +113,8 @@ sudo \
 The installer:
 
 1. copies the dependency-free web agent to `/opt/ptpbox-web`;
-2. installs `ptpboxctl` as `/usr/local/sbin/ptpboxctl`;
+2. installs `ptpboxctl` as `/usr/local/sbin/ptpboxctl` and its dedicated
+   `/usr/local/sbin/ptpbox-kalman-servo` PHC worker;
 3. copies the topology to `/etc/ptpbox/topology.json`;
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
@@ -174,6 +175,11 @@ downstream clocks) and choose one of:
 
 - **PI controller** — LinuxPTP's standard proportional-integral servo;
 - **Linear regression** — LinuxPTP's adaptive regression servo;
+- **Kalman** — a PTPBox two-state phase/frequency estimator. LinuxPTP remains
+  the hardware-timestamped observation engine in `free_running` mode while the
+  dedicated worker applies a bounded PHC frequency correction. Measurement
+  noise, oscillator process noise, phase time constant, and innovation gate are
+  configurable from the Observatory;
 - **Null frequency** — forces zero frequency correction for a SyncE-backed
   diagnostic setup.
 
@@ -181,8 +187,10 @@ downstream clocks) and choose one of:
 LinuxPTP keeps receiving PTP messages and logging raw master offsets, while the
 PHC comparison sampler keeps measuring every clock at the applied Sync cadence. The UI derives
 holdover drift from those real PHC samples. **Resume servo** applies the chosen
-implementation with `free_running 0` and shows acquisition through `s0`, `s1`,
-and `s2` lock states.
+implementation and shows acquisition through tracking and lock states. PI,
+linear regression, and null frequency use LinuxPTP's native controller path.
+Kalman intentionally keeps LinuxPTP `free_running 1` to prevent competing clock
+control and reports its own acquisition, estimate uncertainty, and lock state.
 
 This is clock-servo holdover, not a simulated graph and not a stopped timing
 process. A servo transition causes a brief restart of the selected `ptp4l`

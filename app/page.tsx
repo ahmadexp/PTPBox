@@ -41,7 +41,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
-type ServoType = "pi" | "linreg" | "nullf";
+type NativeServoType = "pi" | "linreg" | "nullf";
+type ServoType = NativeServoType | "kalman";
 type PpsPolarity = "rising" | "falling" | "both";
 type PpsNodeState = "active" | "starting" | "stopped" | "ready" | "external" | "unavailable";
 
@@ -79,7 +80,7 @@ type PpsStatus = {
   running: boolean;
   source: string;
   sinks: string[];
-  servo: ServoType;
+  servo: NativeServoType;
   pulse_width_ns: number;
   nodes: Record<string, PpsNodeStatus>;
 };
@@ -132,6 +133,7 @@ type ClockNode = {
   servoType?: ServoType | null;
   servoEnabled?: boolean;
   holdoverStarted?: number | null;
+  kalman?: KalmanStatus | null;
   source: string;
   lastSampleAt: number | null;
 };
@@ -188,6 +190,22 @@ type TelemetrySample = {
   validation_error: string | null;
 };
 
+type KalmanStatus = {
+  state: "acquiring" | "locked" | "innovation-gated" | "invalid-interval" | string;
+  fresh: boolean;
+  phase_estimate_ns: number;
+  frequency_estimate_ppb: number;
+  correction_ppb: number;
+  innovation_ns: number;
+  phase_sigma_ns: number;
+  frequency_sigma_ppb: number;
+  accepted_count: number;
+  rejected_count: number;
+  measurement_noise_ns: number;
+  process_noise_ppb: number;
+  phase_time_constant_s: number;
+};
+
 type PhcSample = {
   offset_ns: number | null;
   previous_hop_offset_ns: number | null;
@@ -220,6 +238,7 @@ type TelemetryClock = {
   phc_samples: PhcSample[];
   phc_window_sample_count: number;
   phc_rms_ns: number | null;
+  kalman?: KalmanStatus | null;
 };
 
 type TelemetryPayload = {
@@ -427,6 +446,7 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
       servoType: servoControl?.type ?? (clock.role === "grandmaster" ? null : "pi"),
       servoEnabled: servoControl?.enabled ?? clock.role !== "grandmaster",
       holdoverStarted: servoControl?.holdover_started ?? null,
+      kalman: clock.kalman ?? null,
       source: phcMeasurement?.error ?? (clock.measurement_phc ? `direct /dev/${clock.measurement_phc} read` : "No PHC mapping"),
       lastSampleAt: phcMeasurement?.observed_at ?? null,
     };
@@ -1439,6 +1459,10 @@ export default function PTPBoxDashboard() {
   const [experimentProgress, setExperimentProgress] = useState(38);
   const [kp, setKp] = useState(0.7);
   const [ki, setKi] = useState(0.3);
+  const [kalmanMeasurementNoiseNs, setKalmanMeasurementNoiseNs] = useState(200);
+  const [kalmanProcessNoisePpb, setKalmanProcessNoisePpb] = useState(10);
+  const [kalmanPhaseTimeConstantS, setKalmanPhaseTimeConstantS] = useState(4);
+  const [kalmanInnovationGateSigma, setKalmanInnovationGateSigma] = useState(6);
   const [stepThreshold, setStepThreshold] = useState(0);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyBusy, setApplyBusy] = useState(false);
@@ -1464,7 +1488,7 @@ export default function PTPBoxDashboard() {
   const [ppsPulseWidthNs, setPpsPulseWidthNs] = useState(100_000_000);
   const [ppsPhaseNs, setPpsPhaseNs] = useState(0);
   const [ppsCorrectionNs, setPpsCorrectionNs] = useState(0);
-  const [ppsServo, setPpsServo] = useState<ServoType>("pi");
+  const [ppsServo, setPpsServo] = useState<NativeServoType>("pi");
   const [ppsStepThresholdNs, setPpsStepThresholdNs] = useState(0);
   const [ppsFirstStepThresholdNs, setPpsFirstStepThresholdNs] = useState(20_000);
   const [ppsHoldoverSeconds, setPpsHoldoverSeconds] = useState(0);
@@ -1509,8 +1533,16 @@ export default function PTPBoxDashboard() {
   const servoStatusLabel = targetInHoldover ? "HOLDOVER" : targetHasHoldover ? "MIXED" : "DISCIPLINED";
   const holdoverElapsedSeconds = activeNode.holdoverStarted && telemetryStatus ? Math.max(0, Math.floor(telemetryStatus.timestamp - activeNode.holdoverStarted)) : null;
   const selectedServoLabel = activeNode.role === "Grandmaster" ? "REFERENCE CLOCK" : `${activeNode.servoType?.toUpperCase() ?? "PTP"}${activeNode.servoEnabled === false ? " · FROZEN" : " SERVO"}`;
-  const selectedServoDescription = activeNode.servoType === "linreg" ? "Adaptive frequency regression" : activeNode.servoType === "nullf" ? "Zero frequency correction · SyncE" : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
-  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
+  const selectedServoDescription = activeNode.servoType === "kalman"
+    ? activeNode.kalman?.fresh
+      ? `2-state estimate · phase σ ${formatNanoseconds(activeNode.kalman.phase_sigma_ns)}`
+      : "2-state phase / frequency estimator"
+    : activeNode.servoType === "linreg"
+      ? "Adaptive frequency regression"
+      : activeNode.servoType === "nullf"
+        ? "Zero frequency correction · SyncE"
+        : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
+  const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "kalman" ? 92 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
   const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
   const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
@@ -1608,7 +1640,19 @@ export default function PTPBoxDashboard() {
           log_sync_interval?: number;
           two_step?: boolean;
           hardware_timestamping?: boolean;
-          servo?: { type?: ServoType; kp?: number; ki?: number; step_threshold_ns?: number; sanity_freq_limit_ppb?: number };
+          servo?: {
+            type?: ServoType;
+            kp?: number;
+            ki?: number;
+            step_threshold_ns?: number;
+            sanity_freq_limit_ppb?: number;
+            kalman?: {
+              measurement_noise_ns?: number;
+              process_noise_ppb?: number;
+              phase_time_constant_s?: number;
+              innovation_gate_sigma?: number;
+            };
+          };
           pps?: {
             enabled?: boolean;
             source?: string;
@@ -1621,7 +1665,7 @@ export default function PTPBoxDashboard() {
             perout_phase_ns?: number;
             extts_correction_ns?: number;
             ts2phc?: {
-              servo?: ServoType;
+              servo?: NativeServoType;
               step_threshold_ns?: number;
               first_step_threshold_ns?: number;
               holdover_seconds?: number;
@@ -1638,7 +1682,7 @@ export default function PTPBoxDashboard() {
         }
         if (typeof value.two_step === "boolean") setTwoStep(value.two_step);
         if (typeof value.hardware_timestamping === "boolean") setHardwareTs(value.hardware_timestamping);
-        if (value.servo?.type && ["pi", "linreg", "nullf"].includes(value.servo.type)) {
+        if (value.servo?.type && ["pi", "linreg", "nullf", "kalman"].includes(value.servo.type)) {
           configuredServoTypeRef.current = value.servo.type;
           setServoType(value.servo.type);
         }
@@ -1646,6 +1690,10 @@ export default function PTPBoxDashboard() {
         if (typeof value.servo?.ki === "number") setKi(value.servo.ki);
         if (typeof value.servo?.step_threshold_ns === "number") setStepThreshold(value.servo.step_threshold_ns);
         if (typeof value.servo?.sanity_freq_limit_ppb === "number") setSanity(value.servo.sanity_freq_limit_ppb > 0);
+        if (typeof value.servo?.kalman?.measurement_noise_ns === "number") setKalmanMeasurementNoiseNs(value.servo.kalman.measurement_noise_ns);
+        if (typeof value.servo?.kalman?.process_noise_ppb === "number") setKalmanProcessNoisePpb(value.servo.kalman.process_noise_ppb);
+        if (typeof value.servo?.kalman?.phase_time_constant_s === "number") setKalmanPhaseTimeConstantS(value.servo.kalman.phase_time_constant_s);
+        if (typeof value.servo?.kalman?.innovation_gate_sigma === "number") setKalmanInnovationGateSigma(value.servo.kalman.innovation_gate_sigma);
         if (typeof value.pps?.enabled === "boolean") setPpsEnabled(value.pps.enabled);
         if (typeof value.pps?.source === "string") setPpsSource(value.pps.source);
         if (Array.isArray(value.pps?.sinks) && value.pps.sinks.length) setPpsSinks(value.pps.sinks);
@@ -1965,7 +2013,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, PPS I/O, ts2phc, and safety controls", keywords: "settings tune apply pulse", section: "Configuration", icon: SlidersHorizontal },
     { id: "nav-events", group: "Navigate", label: "Event log", description: "Clock, measurement, and operator events", keywords: "logs terminal activity", section: "Event log", icon: Terminal },
     ...nodes.map((node) => ({ id: `clock-${node.id}`, group: "Clocks" as const, label: node.label, description: `${node.role} · ${node.phc} · ${node.state}`, keywords: `${node.id} ${node.role} ${node.phc} ${node.ingress} ${node.egress} offset`, section: "Overview" as Section, nodeId: node.id, icon: Clock3 })),
-    { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
+    { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg kalman filter nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
     { id: "control-frequency", group: "Controls", label: "Synchronization frequency", description: `${syncFrequencyHz.toFixed(1)} Hz requested · ${effectiveSyncFrequencyHz} Hz effective`, keywords: "sync rate interval hertz frequency logSyncInterval", section: "Configuration", action: "sync-frequency", icon: Radio },
     { id: "control-pps", group: "Controls", label: "PPS & ts2phc", description: `${ppsStateLabel} · ${ppsSource === "external" ? "external source" : `${ppsSource} output`} · ${ppsSinks.length} inputs`, keywords: "pps pulse per second input output extts perout ts2phc pin", section: "Configuration", action: "pps-control", icon: Zap },
     { id: "control-notifications", group: "Controls", label: "Notification center", description: `${unreadNotificationCount} unread timing alert${unreadNotificationCount === 1 ? "" : "s"}`, keywords: "bell alerts warnings health", action: "notifications", icon: Bell },
@@ -2127,6 +2175,12 @@ export default function PTPBoxDashboard() {
         step_threshold_ns: stepThreshold,
         first_step_threshold_ns: 20_000,
         sanity_freq_limit_ppb: sanity ? 200_000 : 0,
+        kalman: {
+          measurement_noise_ns: kalmanMeasurementNoiseNs,
+          process_noise_ppb: kalmanProcessNoisePpb,
+          phase_time_constant_s: kalmanPhaseTimeConstantS,
+          innovation_gate_sigma: kalmanInnovationGateSigma,
+        },
       },
       pps: {
         enabled: ppsEnabled,
@@ -2355,7 +2409,7 @@ export default function PTPBoxDashboard() {
                 </div>
                 <div className="topology-footer">
                   <span><i className="legend-dot locked" /> Locked</span><span><i className="legend-dot tracking" /> Tracking</span><span><i className="legend-line" /> Measured hop</span>
-                  <p><Info size={13} /> NICs synchronize only through ptp4l over the wires. PHCs are read for comparison and never disciplined by the observatory.</p>
+                  <p><Info size={13} /> PTP packets remain the only synchronization reference over the wires. The PHC comparison sampler is read-only; a selected Kalman worker controls only its mapped PHC.</p>
                 </div>
               </section>
 
@@ -2404,6 +2458,8 @@ export default function PTPBoxDashboard() {
                     <div><span>PHC comparisons</span><strong>{activeNode.sampleCount}</strong></div>
                     <div><span>Servo mode</span><strong>{activeNode.role === "Grandmaster" ? "REFERENCE" : activeNode.servoEnabled === false ? "HOLDOVER" : activeNode.servoType?.toUpperCase() ?? "—"}</strong></div>
                     <div><span>Holdover drift{holdoverElapsedSeconds == null ? "" : ` · ${holdoverElapsedSeconds} s`}</span><strong>{holdoverMetrics?.driftPpb == null ? "—" : `${holdoverMetrics.driftPpb >= 0 ? "+" : ""}${holdoverMetrics.driftPpb.toFixed(2)} ppb`}</strong></div>
+                    {activeNode.servoType === "kalman" && <div><span>Kalman phase estimate</span><strong>{activeNode.kalman?.fresh ? formatNanoseconds(activeNode.kalman.phase_estimate_ns) : "ACQUIRING"}</strong></div>}
+                    {activeNode.servoType === "kalman" && <div><span>Oscillator estimate</span><strong>{activeNode.kalman?.fresh ? `${activeNode.kalman.frequency_estimate_ppb >= 0 ? "+" : ""}${activeNode.kalman.frequency_estimate_ppb.toFixed(2)} ppb` : "—"}</strong></div>}
                   </div>
                   <div className="servo-mini">
                     <div><span>{selectedServoLabel}</span><strong>{selectedServoDescription}</strong></div>
@@ -2556,10 +2612,17 @@ export default function PTPBoxDashboard() {
                 <section className="instrument-panel config-section" id="servo-control">
                   <div className="panel-heading"><div><span className="section-kicker">SERVO & HOLDOVER</span><h2>Clock discipline</h2></div><span className={`quality-badge ${targetHasHoldover ? "holdover" : ""}`}>{servoStatusLabel}</span></div>
                   <div className="form-grid">
-                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>LinuxPTP native servo implementation.</small></label>
+                    <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="kalman">Kalman · phase + frequency</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>{servoType === "kalman" ? "PTPBox two-state estimator with bounded PHC frequency control." : "LinuxPTP native servo implementation."}</small></label>
                     <label><span>Target</span><select className="select-control" value={servoTarget} onChange={(event) => selectServoTarget(event.target.value)}><option value="all">All downstream clocks</option>{nodes.filter((node) => node.role !== "Grandmaster").map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select><small>Holdover can be isolated to one cascade stage.</small></label>
-                    <label><span>Proportional constant</span><div className="input-unit"><input value={kp.toFixed(2)} onChange={(event) => setKp(Number(event.target.value))} /><em>Kp</em></div></label>
-                    <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
+                    {servoType === "kalman" ? <>
+                      <label><span>Measurement noise</span><div className="input-unit"><input type="number" min="0.001" step="1" value={kalmanMeasurementNoiseNs} onChange={(event) => setKalmanMeasurementNoiseNs(Number(event.target.value))} /><em>ns σ</em></div><small>Expected hardware timestamp and path asymmetry noise.</small></label>
+                      <label><span>Oscillator process noise</span><div className="input-unit"><input type="number" min="0.001" step="0.05" value={kalmanProcessNoisePpb} onChange={(event) => setKalmanProcessNoisePpb(Number(event.target.value))} /><em>ppb/√s</em></div><small>How quickly the estimated free-running frequency may wander.</small></label>
+                      <label><span>Phase time constant</span><div className="input-unit"><input type="number" min="0.1" step="0.5" value={kalmanPhaseTimeConstantS} onChange={(event) => setKalmanPhaseTimeConstantS(Number(event.target.value))} /><em>s</em></div><small>State-feedback horizon used to remove estimated phase.</small></label>
+                      <label><span>Innovation gate</span><div className="input-unit"><input type="number" min="1" step="0.5" value={kalmanInnovationGateSigma} onChange={(event) => setKalmanInnovationGateSigma(Number(event.target.value))} /><em>σ</em></div><small>Rejects transient measurements outside predicted uncertainty.</small></label>
+                    </> : <>
+                      <label><span>Proportional constant</span><div className="input-unit"><input value={kp.toFixed(2)} onChange={(event) => setKp(Number(event.target.value))} /><em>Kp</em></div></label>
+                      <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
+                    </>}
                     <label><span>First-step threshold</span><div className="input-unit"><input value="20,000" readOnly /><em>ns</em></div></label>
                     <label><span>Step threshold</span><div className="input-unit"><input value={stepThreshold} onChange={(event) => setStepThreshold(Number(event.target.value))} /><em>ns</em></div></label>
                   </div>
@@ -2624,7 +2687,7 @@ export default function PTPBoxDashboard() {
                   <div className="pps-ts2phc">
                     <div className="pps-subheading"><div><span className="section-kicker">LINUXPTP 4.4</span><strong>ts2phc discipline</strong></div><code>{ppsConfiguredRoles} PHC role{ppsConfiguredRoles === 1 ? "" : "s"}</code></div>
                     <div className="form-grid">
-                      <label><span>Servo</span><select className="select-control" value={ppsServo} onChange={(event) => setPpsServo(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency</option></select></label>
+                      <label><span>Servo</span><select className="select-control" value={ppsServo} onChange={(event) => setPpsServo(event.target.value as NativeServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency</option></select></label>
                       <label><span>Stable-lock threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStableThresholdNs} onChange={(event) => setPpsStableThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
                       <label><span>First-step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsFirstStepThresholdNs} onChange={(event) => setPpsFirstStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
                       <label><span>Step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStepThresholdNs} onChange={(event) => setPpsStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>

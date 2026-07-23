@@ -127,7 +127,7 @@ to the original measurements.
 | **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
-| **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, request a 0.5–10 Hz Sync cadence with the effective IEEE 1588 rate shown explicitly, enter holdover without stopping observation, and measure live drift before resuming. |
+| **Servo & holdover control** | Select PI, linear-regression, two-state Kalman, or null-frequency discipline per clock, tune Kalman measurement/process noise and phase response, request a 0.5–10 Hz Sync cadence with the effective IEEE 1588 rate shown explicitly, enter holdover without stopping observation, and measure live drift before resuming. |
 | **PPS & `ts2phc` control** | Select a PHC or external PPS source, assign PPS inputs, configure pins, channel, edge, pulse width, phase, correction, servo, and holdover, then see the actual PPS role and kernel pin state beneath every overview node. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
@@ -154,7 +154,7 @@ to the original measurements.
     <td width="50%"><img src="docs/images/notifications.jpg" alt="PTPBox live notification center over the cascade overview"></td>
   </tr>
   <tr>
-    <td><strong>Servo and holdover control</strong><br>Choose PI, linear regression, or null-frequency operation for one stage or the downstream chain. Enter holdover while raw monitoring continues.</td>
+    <td><strong>Servo and holdover control</strong><br>Choose PI, linear regression, a PTPBox two-state Kalman estimator, or null-frequency operation for one stage or the downstream chain. Enter holdover while raw monitoring continues.</td>
     <td><strong>Live notification center</strong><br>See PHC freshness, receiver lock health, and the active servo mix, then jump directly to the relevant control-room surface.</td>
   </tr>
 </table>
@@ -220,6 +220,7 @@ flowchart LR
     Logs["LinuxPTP logs\ntelemetry parser"]
     PHCs["/dev/ptp*\nread-only comparisons"]
     Helper["ptpboxctl\nfixed privileged verbs"]
+    Kalman["PTPBox Kalman servo\nphase + frequency state"]
     NS["BC1 … BC7\nnetwork namespaces"]
     PTP["one ptp4l per NIC\nhardware boundary clocks"]
 
@@ -230,6 +231,8 @@ flowchart LR
     Agent -. "sudo: fixed lifecycle + servo verbs" .-> Helper
     Helper --> NS
     NS --> PTP
+    PTP -. "raw offset / delay" .-> Kalman
+    Kalman -. "bounded PHC frequency" .-> NS
     Helper -. "guarded PPS config" .-> PPS["optional ts2phc\nPHC PPS out / in"]
 ```
 
@@ -254,6 +257,8 @@ state from sysfs and the managed process table.
   dispersion and its reported error bound
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
+- Kalman phase/frequency estimates, covariance-derived uncertainty, innovation
+  acceptance, rejected-sample count, and applied bounded correction
 - Lock/tracking state and recovery events
 - Holdover elapsed time and frequency drift from the continuing raw PHC trace
 - MTIE windows and mask verdicts
@@ -337,8 +342,9 @@ telemetry charts. The host agent uses only the Python standard library.
 
 ## Project status
 
-The Observatory is running on the reference hardware with selectable live
-servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
+The Observatory is running on the reference hardware with selectable PI,
+linear-regression, Kalman, and null-frequency servos, measured holdover,
+common-epoch PHC comparison, raw LinuxPTP telemetry,
 the multi-pendulum phase view, covariance and eigenmode analysis, notifications,
 the state-space and Poincaré atlas, a standalone host bundle, live inventory,
 configuration staging, and guarded lifecycle control. The next milestones are

@@ -48,6 +48,7 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("uds_address /run/ptpbox/ptp4l-bc2", text)
         self.assertIn("uds_ro_address /run/ptpbox/ptp4l-bc2-ro", text)
         self.assertIn("summary_interval 0", text)
+        self.assertIn("freq_est_interval 0", text)
         self.assertIn("tx_timestamp_timeout 100", text)
         self.assertIn("step_threshold 0.000000000", text)
         self.assertIn("free_running 0", text)
@@ -63,6 +64,7 @@ class ControllerConfigTests(unittest.TestCase):
 
         self.assertIn("logSyncInterval -3", text)
         self.assertIn("summary_interval -3", text)
+        self.assertIn("freq_est_interval -3", text)
 
     def test_holdover_config_keeps_measurement_running_without_adjustment(self) -> None:
         path = Path(self.temporary.name) / "ptpbox-holdover.conf"
@@ -71,6 +73,37 @@ class ControllerConfigTests(unittest.TestCase):
 
         self.assertIn("clock_servo linreg", text)
         self.assertIn("free_running 1", text)
+
+    def test_kalman_config_keeps_linuxptp_observing_without_competing_control(self) -> None:
+        path = Path(self.temporary.name) / "ptpbox-kalman.conf"
+        CONTROLLER.render_ptp_config("client", path, servo_override={"type": "kalman"})
+        text = path.read_text(encoding="utf-8")
+
+        self.assertIn("clock_servo nullf", text)
+        self.assertIn("free_running 1", text)
+
+    def test_kalman_worker_receives_phc_log_and_filter_settings(self) -> None:
+        temporary = Path(self.temporary.name)
+        helper = temporary / "ptpbox-kalman-servo"
+        helper.touch()
+        processes = []
+        values = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))
+
+        def fake_spawn(label, args, spawned):
+            spawned.append({"label": label, "pid": 42, "command": args, "log": "/tmp/worker.log"})
+
+        with (
+            patch.object(CONTROLLER, "KALMAN_HELPER", helper),
+            patch.object(CONTROLLER, "STATE_DIR", temporary),
+            patch.object(CONTROLLER, "spawn", side_effect=fake_spawn),
+        ):
+            CONTROLLER.spawn_kalman("BC7", "ptp8", "/tmp/BC7-OC.log", values, processes)
+
+        self.assertEqual("BC7-KALMAN", processes[0]["label"])
+        self.assertEqual("kalman", processes[0]["kind"])
+        self.assertEqual("BC7", processes[0]["kalman_for"])
+        self.assertIn("/dev/ptp8", processes[0]["command"])
+        self.assertIn("/tmp/BC7-OC.log", processes[0]["command"])
 
     def test_ts2phc_config_maps_periodic_output_and_external_timestamp_pins(self) -> None:
         path = Path(self.temporary.name) / "ptpbox-ts2phc.conf"

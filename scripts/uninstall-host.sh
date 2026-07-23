@@ -11,6 +11,7 @@ rm -f /etc/systemd/system/ptpbox-agent.service
 rm -f /etc/sudoers.d/ptpbox-web
 rm -f /etc/tmpfiles.d/ptpbox.conf
 rm -f /usr/local/sbin/ptpboxctl
+rm -f /usr/local/sbin/ptpbox-kalman-servo
 rm -f /etc/ptpbox/config.json
 rm -rf /opt/ptpbox-web
 systemctl daemon-reload

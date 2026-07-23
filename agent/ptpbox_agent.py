@@ -35,6 +35,7 @@ STATE_DIR = Path(os.environ.get("PTPBOX_STATE_DIR", ROOT / "runtime"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", STATE_DIR / "config.json"))
 SERVO_REQUEST_FILE = STATE_DIR / "servo-request.json"
 SERVO_STATE_FILE = Path(os.environ.get("PTPBOX_SERVO_STATE", "/run/ptpbox/servo-state.json"))
+KALMAN_STATE_DIR = Path(os.environ.get("PTPBOX_KALMAN_STATE_DIR", "/run/ptpbox"))
 CONTROL = Path(os.environ.get("PTPBOX_CONTROL", "/usr/local/sbin/ptpboxctl"))
 WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "static"))
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
@@ -49,7 +50,8 @@ TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 PHC_HISTORY_MAX_SAMPLES = 7200
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
-SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
+SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman"}
+LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 LOG_PATTERN = re.compile(
     r"offset\s+(?P<offset>-?\d+(?:\.\d+)?)\s+"
     r"(?:(?P<servo_state>s\d+)\s+)?freq\s+(?P<freq>[+-]?\d+(?:\.\d+)?)\s+"
@@ -57,7 +59,7 @@ LOG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LOG_TIME_PATTERN = re.compile(r"\[(?P<seconds>\d+(?:\.\d+)?)\]")
-LOG_SESSION_PATTERN = re.compile(r"selected /dev/ptp\d+ as PTP clock", re.IGNORECASE)
+LOG_SESSION_PATTERN = re.compile(r"(?:selected /dev/ptp\d+ as PTP clock|PTPBox session start)", re.IGNORECASE)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "profile": "G.8275.1 Telecom",
@@ -74,6 +76,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
+        "kalman": {
+            "measurement_noise_ns": 200.0,
+            "process_noise_ppb": 10.0,
+            "phase_time_constant_s": 4.0,
+            "innovation_gate_sigma": 6.0,
+        },
     },
     "pps": {
         "enabled": False,
@@ -310,7 +318,7 @@ def running_processes() -> list[dict[str, Any]]:
     result = run(["ps", "-eo", "pid=,comm=,args="])
     processes: list[dict[str, Any]] = []
     for line in result.stdout.splitlines():
-        if not re.search(r"\b(ptp4l|phc2sys|ts2phc)\b", line):
+        if not re.search(r"\b(ptp4l|phc2sys|ts2phc|ptpbox-kalman-servo)\b", line):
             continue
         parts = line.strip().split(maxsplit=2)
         if len(parts) >= 2:
@@ -674,12 +682,19 @@ def validate_config(value: dict[str, Any]) -> list[str]:
         errors.append("servo settings are required")
     else:
         if servo.get("type") not in SUPPORTED_SERVOS:
-            errors.append("servo.type must be pi, linreg, or nullf")
+            errors.append("servo.type must be pi, linreg, nullf, or kalman")
         for key in ("kp", "ki"):
             if not isinstance(servo.get(key), (int, float)) or not 0 <= float(servo[key]) <= 10:
                 errors.append(f"servo.{key} must be between 0 and 10")
         if not isinstance(servo.get("step_threshold_ns"), (int, float)) or servo["step_threshold_ns"] < 0:
             errors.append("servo.step_threshold_ns must be non-negative")
+        kalman = servo.get("kalman")
+        if not isinstance(kalman, dict):
+            errors.append("servo.kalman settings are required")
+        else:
+            for key in ("measurement_noise_ns", "process_noise_ppb", "phase_time_constant_s", "innovation_gate_sigma"):
+                if not isinstance(kalman.get(key), (int, float)) or isinstance(kalman.get(key), bool) or not 0 < float(kalman[key]) <= 1_000_000:
+                    errors.append(f"servo.kalman.{key} must be positive and no greater than 1000000")
     pps = value.get("pps")
     node_ids = [node["name"] for node in topology_nodes()]
     if not isinstance(pps, dict):
@@ -722,7 +737,7 @@ def validate_config(value: dict[str, Any]) -> list[str]:
         if not isinstance(ts2phc, dict):
             errors.append("pps.ts2phc settings are required")
         else:
-            if ts2phc.get("servo") not in SUPPORTED_SERVOS:
+            if ts2phc.get("servo") not in LINUXPTP_NATIVE_SERVOS:
                 errors.append("pps.ts2phc.servo must be pi, linreg, or nullf")
             for key in ("kp", "ki"):
                 if not isinstance(ts2phc.get(key), (int, float)) or not 0 <= float(ts2phc[key]) <= 10:
@@ -757,6 +772,20 @@ def save_config(value: dict[str, Any]) -> None:
 def load_servo_state() -> dict[str, Any]:
     value = load_json(SERVO_STATE_FILE, {})
     return value if isinstance(value, dict) else {}
+
+
+def load_kalman_status(name: str, now: float | None = None) -> dict[str, Any] | None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return None
+    value = load_json(KALMAN_STATE_DIR / f"kalman-{name.lower()}.json")
+    if not isinstance(value, dict) or value.get("node") != name or value.get("servo") != "kalman":
+        return None
+    observed_at = value.get("observed_at")
+    if not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool):
+        return None
+    result = dict(value)
+    result["fresh"] = (now or time.time()) - float(observed_at) <= max(5.0, 3.0 / configured_phc_sample_rate_hz())
+    return result
 
 
 def display_path(path: Path) -> str:
@@ -871,6 +900,8 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
     now = time.time()
     clocks: list[dict[str, Any]] = []
     nodes = topology_nodes()
+    control_state = load_servo_state()
+    controlled_nodes = control_state.get("nodes", {}) if isinstance(control_state, dict) else {}
     phc_payload = phc_telemetry(history_seconds, since)
     phc_by_id = {clock["id"]: clock for clock in phc_payload["clocks"]}
     cutoff = now - max(5.0, min(history_seconds, 900.0))
@@ -886,6 +917,28 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         window_samples = [sample for sample in all_samples if sample["observed_at"] >= cutoff]
         valid_window_samples = [sample for sample in window_samples if sample["valid"]]
         locked_window_samples = [sample for sample in valid_window_samples if sample["servo_state"] == "s2"]
+        node_control = controlled_nodes.get(node["name"], {}) if isinstance(controlled_nodes, dict) else {}
+        kalman_status = (
+            load_kalman_status(node["name"], now)
+            if isinstance(node_control, dict) and node_control.get("type") == "kalman" and node_control.get("enabled")
+            else None
+        )
+        if measurement and kalman_status and kalman_status["fresh"]:
+            measurement = dict(measurement)
+            measurement["linuxptp_frequency_ppb"] = measurement["frequency_ppb"]
+            measurement["frequency_ppb"] = float(kalman_status.get("correction_ppb", 0.0))
+            measurement["servo_state"] = "s2" if kalman_status.get("state") == "locked" else "s1"
+            measurement["control_source"] = "ptpbox-kalman"
+            if kalman_status.get("state") == "locked":
+                locked_since = kalman_status.get("locked_since_source_time")
+                locked_window_samples = [
+                    sample
+                    for sample in valid_window_samples
+                    if not isinstance(locked_since, (int, float))
+                    or isinstance(locked_since, bool)
+                    or not isinstance(sample.get("source_time"), (int, float))
+                    or float(sample["source_time"]) >= float(locked_since)
+                ]
         samples = window_samples
         if since is not None:
             samples = [sample for sample in samples if sample["observed_at"] > since]
@@ -912,6 +965,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
                 "phc_samples": phc_clock.get("samples", []),
                 "phc_window_sample_count": phc_clock.get("window_sample_count", 0),
                 "phc_rms_ns": phc_clock.get("rms_ns"),
+                "kalman": kalman_status,
             }
         )
     measured = sum(1 for clock in clocks if clock["measurement"] and clock["measurement"]["valid"])
@@ -942,7 +996,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         "phc_fresh_clocks": phc_payload["fresh_clocks"],
         "phc_method": phc_payload["method"],
         "phc_sample_rate_hz": phc_payload["sample_rate_hz"],
-        "servo_control": load_servo_state(),
+        "servo_control": control_state,
         "raw": True,
         "smoothing": "none",
         "measurement_source": "kernel cross-timestamped PHC comparison",
@@ -1115,7 +1169,7 @@ def status() -> dict[str, Any]:
         "pps": pps_status(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.8.0",
+        "agent_version": "1.9.0",
         "timestamp": time.time(),
     }
 
@@ -1258,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "target must be all or a downstream clock"}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
             if not isinstance(enabled, bool) or servo_type not in SUPPORTED_SERVOS:
-                self.send_json({"error": "enabled must be boolean and type must be pi, linreg, or nullf"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json({"error": "enabled must be boolean and type must be pi, linreg, nullf, or kalman"}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             pending = SERVO_REQUEST_FILE.with_suffix(".json.tmp")

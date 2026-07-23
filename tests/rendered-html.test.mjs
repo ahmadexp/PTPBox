@@ -61,6 +61,8 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /Configuration/);
   assert.match(page, /\/api\/servo\/control/);
   assert.match(page, /Linear regression/);
+  assert.match(page, /Kalman · phase \+ frequency/);
+  assert.match(page, /two-state estimator with bounded PHC frequency control/i);
   assert.match(page, /Enter holdover/);
   assert.match(page, /Notification center/);
   assert.match(page, /Mark all read/);
@@ -77,6 +79,7 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(agent, /\/api\/telemetry/);
   assert.match(agent, /\/api\/config\/apply/);
   assert.match(agent, /\/api\/servo\/control/);
+  assert.match(agent, /kalman/);
   assert.match(agent, /PTP_SYS_OFFSET_EXTENDED/);
   assert.match(packageJson, /build:standalone/);
   assert.match(standalone, /PTPBox — Precision Time Lab/);

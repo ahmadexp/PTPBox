@@ -61,8 +61,12 @@ time-series interpolation, or synthetic fill is applied in live mode.
 - start/stop LinuxPTP processes;
 - generate role-specific `ptp4l` configuration;
 - run one two-port boundary-clock process for every intermediate NIC;
-- apply PI, linear-regression, or null-frequency discipline to one receiver or
-  every downstream clock;
+- apply PI, linear-regression, PTPBox Kalman, or null-frequency discipline to
+  one receiver or every downstream clock;
+- for Kalman mode, keep `ptp4l` in non-disciplining `free_running` mode, feed
+  its hardware-timestamped offset samples into a two-state phase/frequency
+  estimator, reject statistically inconsistent innovations, and apply only the
+  bounded correction to the mapped PHC;
 - enter LinuxPTP `free_running` holdover while keeping both PTP diagnostics and
   the independent PHC comparison sampler alive;
 - validate PHC periodic-output, external-timestamp, pin, and channel
@@ -83,6 +87,8 @@ The reference host uses end-to-end delay, as did the original PTPBox. The
 generated LinuxPTP configuration matches `summary_interval` to the Sync
 interval. LinuxPTP therefore emits one signed master-offset sample per update
 instead of aggregating multiple updates into unsigned RMS summaries.
+`freq_est_interval` follows the same exponent so non-disciplining holdover and
+Kalman observation still emit one sample at every applied Sync cadence.
 BC1 has an explicit BMCA priority advantage. Intermediate ingress and egress
 ports also have static client/server roles, so a downstream free-running clock
 cannot be elected in reverse while an upstream link starts or faults.
@@ -159,6 +165,7 @@ sequenceDiagram
     participant C as ptpboxctl (root)
     participant N as Namespaces / NICs
     participant P as LinuxPTP
+    participant K as Kalman worker (root)
 
     Operator->>UI: Review topology and settings
     UI->>A: POST /api/config/apply
@@ -172,6 +179,15 @@ sequenceDiagram
     P-->>A: LinuxPTP logs
     A->>N: Read mapped PHCs without adjustment
     A-->>UI: PHC comparisons, servo telemetry, process state
+    Operator->>UI: Apply Kalman to BC7
+    UI->>A: POST /api/servo/control
+    A->>C: sudo -n ptpboxctl servo
+    C->>P: Restart BC7 with free_running 1
+    C->>K: Start worker for mapped BC7 PHC
+    P-->>K: Raw hardware-timestamped offset / delay
+    K->>K: Estimate phase, frequency, and covariance
+    K->>N: Apply bounded PHC frequency correction
+    K-->>A: Estimate, uncertainty, gate, and lock telemetry
     Operator->>UI: Enter holdover on BC7
     UI->>A: POST /api/servo/control
     A->>C: sudo -n ptpboxctl servo
@@ -187,7 +203,7 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs, servo state, and read-only PHC/PPS map |
+| `/run/ptpbox` | root | boot | managed process IDs, servo state, Kalman estimates, and read-only PHC/PPS map |
 | `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible `ptp4l` and optional `ts2phc` config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |

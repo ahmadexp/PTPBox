@@ -53,7 +53,7 @@ and whether privileged lifecycle control is installed.
     }
   },
   "observer_only": false,
-  "agent_version": "1.8.0"
+  "agent_version": "1.9.0"
 }
 ```
 
@@ -207,6 +207,12 @@ The response also includes `servo_control.nodes`. Each downstream node reports
 its selected `type`, whether discipline is `enabled`, its `mode` (`active` or
 `holdover`), and the Unix timestamp at which holdover began.
 
+For an active Kalman clock, the offset and path delay remain the untouched
+LinuxPTP observation. `measurement.frequency_ppb` reports the correction that
+PTPBox actually applied, `measurement.linuxptp_frequency_ppb` preserves
+LinuxPTP's non-disciplining rate estimate, and `control_source` is
+`ptpbox-kalman`.
+
 The raw payload preserves invalid samples but marks them `valid: false`. For
 this direct-cable lab, a negative path delay or a delay above 1 ms indicates a
 driver timestamp failure. Such samples are counted separately and excluded
@@ -239,7 +245,13 @@ Validates and atomically stages a complete configuration document.
     "ki": 0.3,
     "step_threshold_ns": 0,
     "first_step_threshold_ns": 20000,
-    "sanity_freq_limit_ppb": 200000
+    "sanity_freq_limit_ppb": 200000,
+    "kalman": {
+      "measurement_noise_ns": 200.0,
+      "process_noise_ppb": 10.0,
+      "phase_time_constant_s": 4.0,
+      "innovation_gate_sigma": 6.0
+    }
   },
   "pps": {
     "enabled": false,
@@ -291,7 +303,7 @@ then generates `/etc/linuxptp/ptpbox-ts2phc.conf` and starts one tracked
 ### `GET /api/servo`
 
 Returns the supported on-box servo implementations and the current per-clock
-state. The safe built-in choices are `pi`, `linreg`, and `nullf`.
+state. The safe built-in choices are `pi`, `linreg`, `kalman`, and `nullf`.
 
 ### `POST /api/servo/control`
 
@@ -318,6 +330,25 @@ Resume BC7 under the adaptive linear-regression servo with:
   "type": "linreg"
 }
 ```
+
+Run BC7 under the PTPBox Kalman servo with:
+
+```json
+{
+  "target": "BC7",
+  "enabled": true,
+  "type": "kalman"
+}
+```
+
+Kalman uses the raw LinuxPTP master offset as its observation. `ptp4l` runs
+with `free_running 1`, so it cannot compete with the dedicated controller for
+the PHC. The worker estimates signed phase and required oscillator correction,
+propagates a 2×2 covariance matrix, gates outliers against predicted innovation
+uncertainty, and applies the clamped frequency correction through
+`clock_adjtime`. Telemetry exposes the phase/frequency estimates, sigmas,
+innovation, accepted and rejected sample counts, correction, and acquisition
+state in each clock's `kalman` object.
 
 Use `target: "all"` for BC2 through the final OC. Changing the servo requires a
 brief restart of only the selected `ptp4l` instance; the agent and PHC sampler

@@ -201,6 +201,46 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(0, incremental["sample_count"])
         self.assertEqual(2, incremental["measured_clocks"])
 
+    def test_kalman_status_overlays_applied_correction_and_lock_state(self) -> None:
+        self.write_log("BC7")
+        state_dir = Path(self.temporary.name) / "kalman"
+        state_dir.mkdir()
+        (state_dir / "kalman-bc7.json").write_text(
+            json.dumps(
+                {
+                    "node": "BC7",
+                    "servo": "kalman",
+                    "state": "locked",
+                    "observed_at": time.time(),
+                    "correction_ppb": 123.5,
+                    "phase_estimate_ns": 4.0,
+                    "frequency_estimate_ppb": 122.0,
+                    "locked_since_source_time": 100.063,
+                }
+            ),
+            encoding="utf-8",
+        )
+        control = {
+            "nodes": {
+                "BC7": {"type": "kalman", "enabled": True, "mode": "active"},
+                "BC4": {"type": "pi", "enabled": True, "mode": "active"},
+            }
+        }
+
+        with (
+            mock.patch.object(AGENT, "KALMAN_STATE_DIR", state_dir),
+            mock.patch.object(AGENT, "load_servo_state", return_value=control),
+        ):
+            payload = AGENT.telemetry(history_seconds=120)
+
+        bc7 = next(clock for clock in payload["clocks"] if clock["id"] == "BC7")
+        self.assertEqual("s2", bc7["measurement"]["servo_state"])
+        self.assertEqual(123.5, bc7["measurement"]["frequency_ppb"])
+        self.assertEqual(-3.0, bc7["measurement"]["linuxptp_frequency_ppb"])
+        self.assertEqual("ptpbox-kalman", bc7["measurement"]["control_source"])
+        self.assertTrue(bc7["kalman"]["fresh"])
+        self.assertEqual(1, bc7["window_locked_sample_count"])
+
     def test_discards_samples_before_a_monotonic_clock_reset(self) -> None:
         path = self.log_dir / "BC7-OC.log"
         path.write_text(
@@ -235,6 +275,18 @@ class TelemetryTests(unittest.TestCase):
 
         samples = AGENT.parse_log_measurements(path)
         self.assertEqual([-4.0], [sample["offset_ns"] for sample in samples])
+
+    def test_ptpbox_session_marker_resets_free_running_log_window(self) -> None:
+        path = self.log_dir / "BC7-OC.log"
+        path.write_text(
+            "ptp4l[100.000]: master offset 99 s2 freq 1 path delay 250\n"
+            "PTPBox session start [200.000]\n"
+            "ptp4l[201.000]: master offset 7 s0 freq 2 path delay 252\n",
+            encoding="utf-8",
+        )
+
+        samples = AGENT.parse_log_measurements(path)
+        self.assertEqual([7.0], [sample["offset_ns"] for sample in samples])
 
     def test_current_boundary_log_does_not_fall_back_to_stale_oc_log(self) -> None:
         stale = self.write_log("BC7")
