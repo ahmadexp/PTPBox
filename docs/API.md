@@ -474,6 +474,7 @@ The main objects are:
 | `recurrence` | Binary recurrence matrix, recurrence rate, determinism, and threshold |
 | `bifurcation` | Offline PI gain-scale sweep with settled extrema, response bands, replay bounds, provenance, and `live_changes: 0` |
 | `fractal` | Higuchi trace dimension, embedded Grassberger–Procaccia correlation dimension, MF-DFA spectrum width, shuffled surrogates, fit quality, and `live_changes: 0` |
+| `attractor` | AMI-selected delay, false-nearest-neighbor embedding curve, standardized delay coordinates, recurrent-core candidates and coverage, successive-maxima return pairs, local-divergence fit, independent evidence gates, provenance, and `live_changes: 0` |
 | `koopman` | Fitted snapshot operator, singular values, residual σ, and amplification label |
 | `capabilities` | Hardware-derived DPLL, SyncE, devlink, temperature, path-monitor, and PPS status |
 | `profiles` | Applied configuration checks; explicitly not standards certification |

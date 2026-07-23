@@ -473,6 +473,64 @@ type ResearchPayload = {
     interpretation?: string;
     live_changes?: number;
   };
+  attractor?: {
+    status: string;
+    samples?: number;
+    observable?: string;
+    center_ns?: number;
+    scale_ns?: number;
+    delay_samples?: number;
+    delay_s?: number;
+    delay_method?: string;
+    embedding_dimension?: number;
+    fnn_threshold_pct?: number;
+    fnn_curve?: Array<{ dimension: number; false_neighbor_pct: number; pairs: number }>;
+    ami_curve?: Array<{ lag: number; lag_s: number; mutual_information: number }>;
+    embedding?: Array<{
+      sample_index: number;
+      x: number;
+      y: number;
+      z: number;
+      density: number;
+      core: number | null;
+    }>;
+    cores?: Array<{
+      id: number;
+      x: number;
+      y: number;
+      z: number;
+      visits: number;
+      share: number;
+      radius_sigma: number;
+    }>;
+    core_coverage?: number;
+    return_map?: Array<{ peak_index: number; current: number; next: number; interval_s: number }>;
+    divergence?: {
+      status: string;
+      slope_per_s?: number;
+      r_squared?: number;
+      fit_start_s?: number;
+      fit_end_s?: number;
+      pairs?: number;
+      theiler_window_samples?: number;
+      points?: Array<{ lag_samples: number; lag_s: number; mean_log_separation: number; pairs: number }>;
+      interpretation?: string;
+    };
+    evidence?: {
+      embedding_sufficient: boolean;
+      selected_fnn_pct?: number;
+      recurrent_geometry: boolean;
+      dimension_plateau: boolean;
+      positive_divergence: boolean;
+      stationary_window: boolean;
+      evidence_count: number;
+      verdict: string;
+    };
+    method?: string;
+    provenance?: string;
+    interpretation?: string;
+    live_changes?: number;
+  };
   koopman: {
     status: string;
     singular_values?: number[];
@@ -638,7 +696,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   Overview: { title: "Cascade overview", description: "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." },
   "Multi-pendulum": { title: "Multi-pendulum", description: "Watch every previous-hop phase residual swing around its learned equilibrium." },
   Covariance: { title: "Covariance lab", description: "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." },
-  "State space": { title: "State-space atlas", description: "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." },
+  "State space": { title: "Attractor Observatory", description: "Reconstruct hidden timing state, locate recurrent cores, and corroborate candidate attractors." },
   Metrology: { title: "Metrology workbench", description: "Quantify stability, fuse clock states, build an ensemble timescale, and preserve reproducible raw experiments." },
   "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
   Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
@@ -993,6 +1051,56 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
     r_squared: .97,
     points: [8, 12, 18, 27, 40, 60].map((scale) => ({ scale, fluctuation: (scale ** (.82 - q * .018)) * 2.4 })),
   }));
+  const attractorSamples = endpointValues.slice(-320);
+  const attractorCenter = attractorSamples.reduce((sum, value) => sum + value, 0) / Math.max(1, attractorSamples.length);
+  const attractorScale = Math.sqrt(attractorSamples.reduce((sum, value) => sum + (value - attractorCenter) ** 2, 0) / Math.max(1, attractorSamples.length - 1)) || 1;
+  const attractorNormalized = attractorSamples.map((value) => (value - attractorCenter) / attractorScale);
+  const modeledDelay = 3;
+  const modeledEmbeddingBase = attractorNormalized.slice(modeledDelay * 2).map((value, index) => {
+    const sampleIndex = index + modeledDelay * 2;
+    return {
+      sample_index: sampleIndex,
+      x: value,
+      y: attractorNormalized[sampleIndex - modeledDelay],
+      z: attractorNormalized[sampleIndex - modeledDelay * 2],
+      density: 0,
+      core: null as number | null,
+    };
+  });
+  const densityCounts = modeledEmbeddingBase.map((point) => modeledEmbeddingBase.reduce((count, candidate) => count + ((point.x - candidate.x) ** 2 + (point.y - candidate.y) ** 2 <= .15 ? 1 : 0), 0));
+  const maximumDensity = Math.max(1, ...densityCounts);
+  const modeledCoreSeeds: typeof modeledEmbeddingBase = [];
+  [...modeledEmbeddingBase.keys()]
+    .sort((left, right) => densityCounts[right] - densityCounts[left])
+    .forEach((index) => {
+      const candidate = modeledEmbeddingBase[index];
+      if (densityCounts[index] < 4 || modeledCoreSeeds.some((seed) => (seed.x - candidate.x) ** 2 + (seed.y - candidate.y) ** 2 < .5)) return;
+      if (modeledCoreSeeds.length < 3) modeledCoreSeeds.push(candidate);
+    });
+  const modeledCores = modeledCoreSeeds.map((seed, index) => {
+    const visits = modeledEmbeddingBase.filter((point) => (point.x - seed.x) ** 2 + (point.y - seed.y) ** 2 + (point.z - seed.z) ** 2 <= .52).length;
+    return { id: index + 1, x: seed.x, y: seed.y, z: seed.z, visits, share: visits / Math.max(1, modeledEmbeddingBase.length), radius_sigma: .72 };
+  });
+  const modeledEmbedding = modeledEmbeddingBase.map((point, index) => {
+    const core = modeledCores.find((candidate) => (point.x - candidate.x) ** 2 + (point.y - candidate.y) ** 2 + (point.z - candidate.z) ** 2 <= candidate.radius_sigma ** 2);
+    return { ...point, density: densityCounts[index] / maximumDensity, core: core?.id ?? null };
+  });
+  const modeledPeaks = attractorNormalized
+    .map((value, index) => ({ value, index }))
+    .filter(({ value, index }) => index > 0 && index < attractorNormalized.length - 1 && value > attractorNormalized[index - 1] && value >= attractorNormalized[index + 1]);
+  const modeledReturnMap = modeledPeaks.slice(0, -1).map((peak, index) => ({
+    peak_index: peak.index,
+    current: peak.value,
+    next: modeledPeaks[index + 1].value,
+    interval_s: modeledPeaks[index + 1].index - peak.index,
+  }));
+  const modeledDivergencePoints = Array.from({ length: 13 }, (_, index) => ({
+    lag_samples: index,
+    lag_s: index,
+    mean_log_separation: -2.1 + .074 * index - .003 * index ** 2,
+    pairs: Math.max(24, modeledEmbedding.length - index * 2),
+  }));
+  const modeledCoreCoverage = modeledEmbedding.filter((point) => point.core !== null).length / Math.max(1, modeledEmbedding.length);
   const variances = nodes.slice(1).map((node) => Math.max(1, node.rms ** 2));
   const rawWeights = variances.map((value) => 1 / value);
   const weightTotal = rawWeights.reduce((sum, value) => sum + value, 0);
@@ -1102,6 +1210,55 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
       method: "Higuchi graph dimension + Grassberger–Procaccia D2 + MF-DFA",
       provenance: "modeled endpoint phase; no interpolation and no clock writes",
       interpretation: "Finite-record scaling diagnostics. A non-integer dimension is not, by itself, evidence of deterministic chaos or a strange attractor.",
+      live_changes: 0,
+    },
+    attractor: {
+      status: attractorSamples.length >= 64 ? "ready" : "learning",
+      samples: attractorSamples.length,
+      observable: "modeled endpoint PHC offset relative to BC1",
+      center_ns: attractorCenter,
+      scale_ns: attractorScale,
+      delay_samples: modeledDelay,
+      delay_s: modeledDelay,
+      delay_method: "modeled AMI first local minimum",
+      embedding_dimension: 3,
+      fnn_threshold_pct: 5,
+      fnn_curve: [
+        { dimension: 1, false_neighbor_pct: 47.2, pairs: modeledEmbedding.length },
+        { dimension: 2, false_neighbor_pct: 13.8, pairs: modeledEmbedding.length },
+        { dimension: 3, false_neighbor_pct: 3.4, pairs: modeledEmbedding.length },
+        { dimension: 4, false_neighbor_pct: 1.6, pairs: modeledEmbedding.length },
+        { dimension: 5, false_neighbor_pct: .8, pairs: modeledEmbedding.length },
+      ],
+      ami_curve: Array.from({ length: 16 }, (_, index) => ({ lag: index + 1, lag_s: index + 1, mutual_information: .18 + .82 * Math.exp(-(index + 1) / 3.4) + .025 * Math.cos(index * .9) })),
+      embedding: modeledEmbedding,
+      cores: modeledCores,
+      core_coverage: modeledCoreCoverage,
+      return_map: modeledReturnMap,
+      divergence: {
+        status: "ready",
+        slope_per_s: .056,
+        r_squared: .94,
+        fit_start_s: 1,
+        fit_end_s: 7,
+        pairs: modeledEmbedding.length,
+        theiler_window_samples: 8,
+        points: modeledDivergencePoints,
+        interpretation: "modeled Rosenstein-style early-time mean log-separation slope",
+      },
+      evidence: {
+        embedding_sufficient: true,
+        selected_fnn_pct: 3.4,
+        recurrent_geometry: modeledCores.length > 0 && modeledCoreCoverage >= .08,
+        dimension_plateau: true,
+        positive_divergence: true,
+        stationary_window: true,
+        evidence_count: modeledCores.length ? 5 : 4,
+        verdict: modeledCores.length ? "candidate_attractor" : "reconstructed",
+      },
+      method: "Takens delay coordinates + AMI lag + false nearest neighbors + recurrent cores + return map + local divergence",
+      provenance: "deterministic hardware-model endpoint phase; standardized only for geometry; no clock writes",
+      interpretation: "A modeled candidate-attractor search, not a chaos classifier. Live mode requires corroboration across five independent evidence gates.",
       live_changes: 0,
     },
     koopman: { status: "ready", singular_values: [1.014, .982, .941, .72, .38, .17], spectral_norm: 1.014, residual_sigma_ns: 2.84, interpretation: "amplifying" },
@@ -1851,40 +2008,150 @@ function modalValue(value: number, scale: StateScale) {
   return `${formatNanoseconds(value, true)}/s`;
 }
 
-function StatePlaneChart({ points, eigenvalues, scale }: { points: ModalPoint[]; eigenvalues: number[]; scale: StateScale }) {
+type AttractorAnalysis = NonNullable<ResearchPayload["attractor"]>;
+
+function AttractorReconstructionChart({ analysis }: { analysis: AttractorAnalysis }) {
+  const points = analysis.embedding ?? [];
+  const cores = analysis.cores ?? [];
   const width = 820;
   const height = 430;
   const padding = { left: 58, right: 24, top: 24, bottom: 44 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
-  const xValues = points.map((point) => point.display[0] ?? 0);
-  const yValues = points.map((point) => point.display[1] ?? 0);
-  const sigmaX = scale === "sigma" ? 1 : Math.sqrt(Math.max(eigenvalues[0] ?? 0, 1e-9));
-  const sigmaY = scale === "sigma" ? 1 : Math.sqrt(Math.max(eigenvalues[1] ?? 0, 1e-9));
-  const xLimit = symmetricExtent([...xValues, sigmaX * 2], scale === "sigma" ? 2.5 : 1);
-  const yLimit = symmetricExtent([...yValues, sigmaY * 2], scale === "sigma" ? 2.5 : 1);
+  const xLimit = symmetricExtent(points.map((point) => point.x), 2.5);
+  const yLimit = symmetricExtent(points.map((point) => point.y), 2.5);
   const x = (value: number) => padding.left + ((value + xLimit) / (xLimit * 2)) * plotWidth;
   const y = (value: number) => padding.top + (1 - (value + yLimit) / (yLimit * 2)) * plotHeight;
-  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.display[0] ?? 0).toFixed(2)} ${y(point.display[1] ?? 0).toFixed(2)}`).join(" ");
+  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.x).toFixed(2)} ${y(point.y).toFixed(2)}`).join(" ");
   const latest = points.at(-1);
-  const unit = scale === "sigma" ? "σ" : "ns/s";
+  const delay = analysis.delay_s ?? 0;
 
   return (
-    <div className="state-plane-wrap">
-      <svg className="state-plane-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Principal state plane of PC1 versus PC2 with ${points.length} synchronized phase-change states`}>
-        <title>Principal state-space trajectory</title>
-        <desc>The six hop-change rates are centered and projected onto the first two covariance eigenvectors. Older states are faint and the newest state is ringed.</desc>
-        {[-1, 0, 1].map((fraction) => <g key={`x-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={x(fraction * xLimit)} y1={padding.top} x2={x(fraction * xLimit)} y2={height - padding.bottom} /><text className="state-axis-label" x={x(fraction * xLimit)} y={height - 18} textAnchor="middle">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${xLimit.toFixed(scale === "sigma" ? 1 : 0)}`}</text></g>)}
-        {[-1, 0, 1].map((fraction) => <g key={`y-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={padding.left} y1={y(fraction * yLimit)} x2={width - padding.right} y2={y(fraction * yLimit)} /><text className="state-axis-label" x={padding.left - 10} y={y(fraction * yLimit) + 3} textAnchor="end">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${yLimit.toFixed(scale === "sigma" ? 1 : 0)}`}</text></g>)}
-        {[2, 1].map((sigma) => <ellipse key={sigma} className={`state-sigma-ellipse sigma-${sigma}`} cx={x(0)} cy={y(0)} rx={Math.abs(x(sigmaX * sigma) - x(0))} ry={Math.abs(y(sigmaY * sigma) - y(0))} />)}
-        <path className="state-trajectory" d={path} />
-        {points.map((point, index) => <circle key={`${point.t}-${index}`} className="state-point" cx={x(point.display[0] ?? 0)} cy={y(point.display[1] ?? 0)} r={index === points.length - 1 ? 4.5 : 2.3} style={{ opacity: 0.16 + index / Math.max(1, points.length - 1) * 0.68 }} />)}
-        {latest && <circle className="state-current-ring" cx={x(latest.display[0] ?? 0)} cy={y(latest.display[1] ?? 0)} r="10" />}
-        <text className="state-axis-title" x={padding.left + plotWidth / 2} y={height - 2} textAnchor="middle">PC1 · {unit}</text>
-        <text className="state-axis-title" transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">PC2 · {unit}</text>
+    <div className="attractor-plane-wrap">
+      <svg className="attractor-plane-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Delay-coordinate attractor reconstruction with ${points.length} states and ${cores.length} recurrent core candidates`}>
+        <title>Delay-coordinate attractor reconstruction</title>
+        <desc>Raw endpoint PHC phase is standardized and plotted against a delayed copy. Point size indicates local occupancy, the line preserves time order, and numbered contours mark recurrent high-density candidates.</desc>
+        {[-1, 0, 1].map((fraction) => <g key={`x-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={x(fraction * xLimit)} y1={padding.top} x2={x(fraction * xLimit)} y2={height - padding.bottom} /><text className="state-axis-label" x={x(fraction * xLimit)} y={height - 18} textAnchor="middle">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${xLimit.toFixed(1)}`}</text></g>)}
+        {[-1, 0, 1].map((fraction) => <g key={`y-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={padding.left} y1={y(fraction * yLimit)} x2={width - padding.right} y2={y(fraction * yLimit)} /><text className="state-axis-label" x={padding.left - 10} y={y(fraction * yLimit) + 3} textAnchor="end">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${yLimit.toFixed(1)}`}</text></g>)}
+        <path className="attractor-trajectory" d={path} />
+        {points.map((point, index) => <circle key={`${point.sample_index}-${index}`} className={`attractor-state ${point.core ? "recurrent" : ""}`} cx={x(point.x)} cy={y(point.y)} r={1.6 + point.density * 3.2} style={{ opacity: .12 + .58 * point.density + .18 * index / Math.max(1, points.length - 1) }} />)}
+        {cores.map((core) => <g className="attractor-core" key={core.id}><circle cx={x(core.x)} cy={y(core.y)} r={Math.max(18, Math.abs(x(core.x + core.radius_sigma) - x(core.x)))} /><circle className="attractor-core-center" cx={x(core.x)} cy={y(core.y)} r="4" /><text x={x(core.x) + 9} y={y(core.y) - 9}>C{core.id} · {(core.share * 100).toFixed(0)}%</text></g>)}
+        {latest && <circle className="state-current-ring" cx={x(latest.x)} cy={y(latest.y)} r="10" />}
+        {!points.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">Collecting 64 endpoint PHC samples for reconstruction</text>}
+        <text className="state-axis-title" x={padding.left + plotWidth / 2} y={height - 2} textAnchor="middle">x(t) · standardized endpoint phase</text>
+        <text className="state-axis-title" transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">x(t − {delay.toFixed(1)} s) · σ</text>
       </svg>
-      <div className="state-plane-note"><span><i className="ellipse-two" />2σ covariance ellipse</span><span><i className="ellipse-one" />1σ covariance ellipse</span><strong>latest {latest ? `${modalValue(latest.display[0] ?? 0, scale)} · ${modalValue(latest.display[1] ?? 0, scale)}` : "—"}</strong></div>
+      <div className="attractor-plane-note">
+        <span><i className="trajectory" />time-ordered orbit</span>
+        <span><i className="density" />local occupancy</span>
+        <span><i className="core" />recurrent core candidate</span>
+        <strong>{points.length ? `${points.length} states · z = x(t − ${((analysis.delay_s ?? 0) * 2).toFixed(1)} s)` : "learning"}</strong>
+      </div>
     </div>
+  );
+}
+
+function FnnCurveChart({ analysis }: { analysis: AttractorAnalysis }) {
+  const points = analysis.fnn_curve ?? [];
+  const width = 390;
+  const height = 160;
+  const padding = { left: 42, right: 16, top: 17, bottom: 29 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (dimension: number) => padding.left + (dimension - 1) / 4 * plotWidth;
+  const y = (value: number) => padding.top + (1 - Math.min(100, Math.max(0, value)) / 100) * plotHeight;
+  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.dimension).toFixed(2)} ${y(point.false_neighbor_pct).toFixed(2)}`).join(" ");
+  const threshold = analysis.fnn_threshold_pct ?? 5;
+  return (
+    <svg className="attractor-mini-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="False nearest neighbor percentage by embedding dimension">
+      <title>False nearest neighbors</title>
+      {[0, 50, 100].map((value) => <g key={value}><line className="state-gridline" x1={padding.left} y1={y(value)} x2={width - padding.right} y2={y(value)} /><text className="state-axis-label" x={padding.left - 7} y={y(value) + 3} textAnchor="end">{value}%</text></g>)}
+      <line className="fnn-threshold" x1={padding.left} y1={y(threshold)} x2={width - padding.right} y2={y(threshold)} />
+      <path className="fnn-line" d={path} />
+      {points.map((point) => <circle className="fnn-point" key={point.dimension} cx={x(point.dimension)} cy={y(point.false_neighbor_pct)} r="3.4" />)}
+      {[1, 2, 3, 4, 5].map((dimension) => <text className="state-axis-label" key={dimension} x={x(dimension)} y={height - 10} textAnchor="middle">m{dimension}</text>)}
+      {!points.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">learning</text>}
+    </svg>
+  );
+}
+
+function AmiCurveChart({ analysis }: { analysis: AttractorAnalysis }) {
+  const points = analysis.ami_curve ?? [];
+  const width = 820;
+  const height = 170;
+  const padding = { left: 48, right: 20, top: 17, bottom: 31 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const maximumX = Math.max(1, ...points.map((point) => point.lag_s));
+  const maximumY = Math.max(.1, ...points.map((point) => point.mutual_information)) * 1.08;
+  const x = (value: number) => padding.left + value / maximumX * plotWidth;
+  const y = (value: number) => padding.top + (1 - value / maximumY) * plotHeight;
+  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.lag_s).toFixed(2)} ${y(point.mutual_information).toFixed(2)}`).join(" ");
+  const selected = points.find((point) => point.lag === analysis.delay_samples);
+  return (
+    <svg className="ami-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Average mutual information by candidate delay">
+      <title>Average mutual information delay selection</title>
+      {[0, .5, 1].map((fraction) => <line className="state-gridline" key={fraction} x1={padding.left} y1={y(fraction * maximumY)} x2={width - padding.right} y2={y(fraction * maximumY)} />)}
+      <path className="ami-line" d={path} />
+      {selected && <g className="ami-selected"><line x1={x(selected.lag_s)} y1={padding.top} x2={x(selected.lag_s)} y2={height - padding.bottom} /><circle cx={x(selected.lag_s)} cy={y(selected.mutual_information)} r="4" /><text x={x(selected.lag_s) + 8} y={Math.max(13, y(selected.mutual_information) - 8)}>τ = {selected.lag_s.toFixed(1)} s</text></g>}
+      <text className="state-axis-label" x={padding.left} y={height - 10}>1 sample</text>
+      <text className="state-axis-label" x={width - padding.right} y={height - 10} textAnchor="end">{maximumX.toFixed(1)} s lag</text>
+      {!points.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">Collecting average mutual information curve</text>}
+    </svg>
+  );
+}
+
+function DivergenceCurveChart({ analysis }: { analysis: AttractorAnalysis }) {
+  const divergence = analysis.divergence;
+  const points = divergence?.points ?? [];
+  const width = 390;
+  const height = 170;
+  const padding = { left: 42, right: 16, top: 17, bottom: 29 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const maximumX = Math.max(1, ...points.map((point) => point.lag_s));
+  const values = points.map((point) => point.mean_log_separation);
+  const minimumY = Math.min(-1, ...values);
+  const maximumY = Math.max(1, ...values);
+  const x = (value: number) => padding.left + value / maximumX * plotWidth;
+  const y = (value: number) => padding.top + (maximumY - value) / Math.max(.1, maximumY - minimumY) * plotHeight;
+  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.lag_s).toFixed(2)} ${y(point.mean_log_separation).toFixed(2)}`).join(" ");
+  const fitPoints = points.filter((point) => point.lag_s >= (divergence?.fit_start_s ?? Infinity) && point.lag_s <= (divergence?.fit_end_s ?? -Infinity));
+  const fitPath = fitPoints.map((point, index) => `${index ? "L" : "M"} ${x(point.lag_s).toFixed(2)} ${y(point.mean_log_separation).toFixed(2)}`).join(" ");
+  return (
+    <svg className="attractor-mini-chart divergence-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Mean log trajectory separation versus prediction horizon">
+      <title>Local trajectory divergence</title>
+      <line className="state-zero-axis" x1={padding.left} y1={height - padding.bottom} x2={width - padding.right} y2={height - padding.bottom} />
+      <path className="divergence-line" d={path} />
+      {fitPath && <path className="divergence-fit" d={fitPath} />}
+      <text className="state-axis-label" x={padding.left} y={height - 10}>0 s</text>
+      <text className="state-axis-label" x={width - padding.right} y={height - 10} textAnchor="end">{maximumX.toFixed(1)} s</text>
+      {!points.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">learning</text>}
+    </svg>
+  );
+}
+
+function ReturnMapChart({ analysis }: { analysis: AttractorAnalysis }) {
+  const points = analysis.return_map ?? [];
+  const width = 600;
+  const height = 430;
+  const padding = { left: 56, right: 22, top: 24, bottom: 44 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const limit = symmetricExtent(points.flatMap((point) => [point.current, point.next]), 2);
+  const x = (value: number) => padding.left + ((value + limit) / (limit * 2)) * plotWidth;
+  const y = (value: number) => padding.top + (1 - (value + limit) / (limit * 2)) * plotHeight;
+  return (
+    <svg className="return-map-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Successive-maxima return map with ${points.length} returns`}>
+      <title>Successive-maxima return map</title>
+      <desc>Each point maps one standardized endpoint phase maximum to the next. Concentrated branches can support recurrent geometry but do not alone prove an attractor.</desc>
+      <rect className="poincare-frame" x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} />
+      <line className="return-map-diagonal" x1={x(-limit)} y1={y(-limit)} x2={x(limit)} y2={y(limit)} />
+      {points.map((point, index) => <circle className="return-map-point" key={`${point.peak_index}-${index}`} cx={x(point.current)} cy={y(point.next)} r={2.5 + Math.min(2.5, point.interval_s / 10)} style={{ opacity: .28 + .72 * index / Math.max(1, points.length - 1) }} />)}
+      {!points.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">Waiting for successive local maxima</text>}
+      <text className="state-axis-title" x={padding.left + plotWidth / 2} y={height - 3} textAnchor="middle">maximum xₙ · σ</text>
+      <text className="state-axis-title" transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">next maximum xₙ₊₁ · σ</text>
+    </svg>
   );
 }
 
@@ -1951,6 +2218,7 @@ function ModalTrendChart({ points, scale }: { points: ModalPoint[]; scale: State
 function StateSpaceAtlas({
   history,
   nodes,
+  research,
   range,
   setRange,
   paused,
@@ -1958,6 +2226,7 @@ function StateSpaceAtlas({
 }: {
   history: HistoryPoint[];
   nodes: ClockNode[];
+  research: ResearchPayload;
   range: string;
   setRange: (value: string) => void;
   paused: boolean;
@@ -1985,30 +2254,70 @@ function StateSpaceAtlas({
   const eigenTrendWindow = Math.max(8, Math.min(24, Math.floor(basisSamples / 3)));
   const snapshots = useMemo(() => rollingMatrixSnapshots(changes, hopNodes.length, eigenTrendWindow, "covariance"), [changes, eigenTrendWindow, hopNodes.length]);
   const dataState = paused ? "FROZEN" : connection === "live" ? "LIVE" : connection === "simulation" ? "MODELED" : connection.toUpperCase();
+  const attractor: AttractorAnalysis = research.attractor ?? {
+    status: "learning",
+    samples: research.aligned_sample_count,
+    embedding: [],
+    cores: [],
+    return_map: [],
+    fnn_curve: [],
+    ami_curve: [],
+    divergence: { status: "learning", points: [] },
+  };
+  const evidence = attractor.evidence;
+  const verdict = evidence?.verdict ?? "learning";
+  const verdictLabel = verdict === "candidate_attractor" ? "CANDIDATE ATTRACTOR" : verdict === "recurrent_structure" ? "RECURRENT STRUCTURE" : verdict === "reconstructed" ? "RECONSTRUCTION READY" : verdict === "inconclusive" ? "INCONCLUSIVE" : "LEARNING";
+  const verdictClass = verdict === "candidate_attractor" ? "candidate" : verdict === "recurrent_structure" || verdict === "reconstructed" ? "supporting" : "learning";
+  const divergence = attractor.divergence;
+  const dimensionEstimate = research.fractal.correlation.dimension;
 
   return (
     <div className="state-space-layout">
       <section className="instrument-panel state-space-toolbar">
         <div className="panel-heading">
-          <div><span className="section-kicker">SIX-DIMENSIONAL PHASE-CHANGE STATE</span><h2>Modal coordinate system</h2></div>
+          <div><span className="section-kicker">NONLINEAR STATE RECONSTRUCTION</span><h2>Attractor Observatory</h2></div>
           <span className={`quality-badge ${connection === "live" ? "" : "holdover"}`}>{dataState}</span>
         </div>
         <div className="state-space-controls" aria-label="State-space analysis controls">
           <div><span>History</span><div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div></div>
           <div><span>PCA basis</span><div className="segmented-control">{[24, 48, 96].map((item) => <button className={basisSamples === item ? "active" : ""} type="button" key={item} onClick={() => setBasisSamples(item)}>{item}</button>)}</div></div>
           <div><span>Coordinate scale</span><div className="segmented-control"><button className={stateScale === "sigma" ? "active" : ""} type="button" onClick={() => setStateScale("sigma")}>σ-normalized</button><button className={stateScale === "physical" ? "active" : ""} type="button" onClick={() => setStateScale("physical")}>Physical</button></div></div>
-          <div className="state-space-live-readout"><span>Current state</span><strong>{stateRadius.toFixed(2)} σ</strong><small>{basisRows.length} synchronized changes</small></div>
+          <div className="state-space-live-readout"><span>Embedding</span><strong>m{attractor.embedding_dimension ?? "—"} · τ{attractor.delay_samples ?? "—"}</strong><small>{attractor.samples ?? 0} raw endpoint samples</small></div>
         </div>
-        <div className="state-method-strip"><Info size={14} /><span>State vector = centered H1…H6 phase-change rates. The PCA basis comes from the current covariance window; pendulum zeroing is excluded. Eigenvector signs are oriented deterministically to keep the live trajectory visually stable.</span></div>
+        <div className="state-method-strip"><Info size={14} /><span>The main orbit reconstructs hidden state from raw endpoint PHC phase using an automatically selected delay and embedding dimension. The PCA, Poincaré, eigenvalue, fractal-dimension, and divergence views remain independent corroborating evidence; no single plot is treated as proof of deterministic chaos.</span></div>
       </section>
 
-      <section className="instrument-panel state-plane-panel">
-        <div className="panel-heading"><div><span className="section-kicker">PRINCIPAL STATE PLANE</span><h2>PC1 × PC2 trajectory</h2></div><span className="panel-meta">older → newer · latest ringed</span></div>
-        <StatePlaneChart points={modalPoints} eigenvalues={eigen.values} scale={stateScale} />
+      <section className="instrument-panel attractor-search-panel">
+        <div className="panel-heading"><div><span className="section-kicker">TAKENS DELAY COORDINATES</span><h2>Candidate attractor geometry</h2></div><span className="panel-meta">older → newer · latest ringed</span></div>
+        <AttractorReconstructionChart analysis={attractor} />
+        <div className="attractor-delay-strip"><div className="subpanel-heading"><span>Delay selection · average mutual information</span><strong>{attractor.delay_method ?? "learning"}</strong></div><AmiCurveChart analysis={attractor} /></div>
+        <div className="poincare-note"><Info size={13} /><span>Numbered contours are recurrent high-density cores in the reconstructed orbit. They are candidates for persistent invariant geometry, not labels generated from visual smoothness.</span></div>
+      </section>
+
+      <section className="instrument-panel attractor-evidence-panel">
+        <div className="panel-heading"><div><span className="section-kicker">CORROBORATION, NOT CLASSIFICATION</span><h2>Attractor evidence ledger</h2></div><span className={`attractor-verdict ${verdictClass}`}>{verdictLabel}</span></div>
+        <div className="attractor-evidence-list">
+          <div className={evidence?.embedding_sufficient ? "pass" : ""}><span>01 · Delay independence</span><strong>{attractor.delay_samples ? `τ = ${attractor.delay_samples} samples` : "learning"}</strong><small>{attractor.delay_method ?? "Waiting for the AMI curve"}</small></div>
+          <div className={evidence?.embedding_sufficient ? "pass" : ""}><span>02 · Embedding sufficiency</span><strong>{attractor.embedding_dimension ? `m = ${attractor.embedding_dimension}` : "learning"}</strong><small>{Number.isFinite(evidence?.selected_fnn_pct) ? `${evidence?.selected_fnn_pct?.toFixed(2)}% false neighbors` : "False-nearest-neighbor curve pending"}</small></div>
+          <div className={evidence?.recurrent_geometry ? "pass" : ""}><span>03 · Recurrent geometry</span><strong>{attractor.cores?.length ?? 0} core{attractor.cores?.length === 1 ? "" : "s"}</strong><small>{((attractor.core_coverage ?? 0) * 100).toFixed(1)}% of states revisit a core</small></div>
+          <div className={evidence?.dimension_plateau ? "pass" : ""}><span>04 · Dimension plateau</span><strong>{Number.isFinite(dimensionEstimate) ? `D₂ ${dimensionEstimate?.toFixed(2)}` : "learning"}</strong><small>{evidence?.dimension_plateau ? "Converged across embeddings" : "No stable scaling plateau yet"}</small></div>
+          <div className={evidence?.positive_divergence ? "pass" : ""}><span>05 · Local divergence</span><strong>{Number.isFinite(divergence?.slope_per_s) ? `${divergence?.slope_per_s?.toFixed(4)} s⁻¹` : "inconclusive"}</strong><small>{Number.isFinite(divergence?.r_squared) ? `early-time fit R² ${divergence?.r_squared?.toFixed(3)}` : "Finite-record Rosenstein fit pending"}</small></div>
+          <div className={evidence?.stationary_window ? "pass" : ""}><span>06 · Window stationarity</span><strong>{evidence?.stationary_window ? "STABLE WINDOW" : "REGIME SHIFT"}</strong><small>{evidence?.stationary_window ? "No active Bayesian change point" : "Candidate label suppressed until the new regime settles"}</small></div>
+        </div>
+        <div className="attractor-evidence-chart"><div className="subpanel-heading"><span>False nearest neighbors</span><strong>5% acceptance line</strong></div><FnnCurveChart analysis={attractor} /></div>
+        <div className="attractor-evidence-chart"><div className="subpanel-heading"><span>Local trajectory divergence</span><strong>fit segment highlighted</strong></div><DivergenceCurveChart analysis={attractor} /></div>
+        <div className="attractor-verdict-note"><Info size={13} /><span>{attractor.interpretation ?? "Collecting enough raw phase history to evaluate independent evidence gates."}</span></div>
+      </section>
+
+      <section className="instrument-panel return-map-panel">
+        <div className="panel-heading"><div><span className="section-kicker">SUCCESSIVE EXTREMA</span><h2>Return map</h2></div><span className="panel-meta">{attractor.return_map?.length ?? 0} peak pairs</span></div>
+        <ReturnMapChart analysis={attractor} />
+        <div className="poincare-legend"><span><i className="return" />successive maxima</span><strong>xₙ₊₁ = xₙ diagonal · point size = return interval</strong></div>
+        <div className="poincare-note"><Info size={13} /><span>Stable branches and repeated islands support the recurrence hypothesis. A diffuse cloud, drifting branches, or too few maxima keeps the result inconclusive.</span></div>
       </section>
 
       <section className="instrument-panel poincare-panel">
-        <div className="panel-heading"><div><span className="section-kicker">EMPIRICAL RETURN SECTION</span><h2>Poincaré map</h2></div><span className="panel-meta">{crossings.length} crossings</span></div>
+        <div className="panel-heading"><div><span className="section-kicker">MULTIVARIATE CROSS-CHECK</span><h2>Poincaré section</h2></div><span className="panel-meta">{crossings.length} crossings</span></div>
         <div className="poincare-controls" aria-label="Poincaré section controls">
           <div><span>Zero plane</span><div className="segmented-control">{[0, 1, 2].map((axis) => <button type="button" className={sectionAxis === axis ? "active" : ""} key={axis} onClick={() => setSectionAxis(axis)}>PC{axis + 1}</button>)}</div></div>
           <div><span>Crossing</span><div className="segmented-control"><button type="button" className={crossingDirection === "rising" ? "active" : ""} onClick={() => setCrossingDirection("rising")}>Rising</button><button type="button" className={crossingDirection === "falling" ? "active" : ""} onClick={() => setCrossingDirection("falling")}>Falling</button><button type="button" className={crossingDirection === "both" ? "active" : ""} onClick={() => setCrossingDirection("both")}>Both</button></div></div>
@@ -2019,7 +2328,7 @@ function StateSpaceAtlas({
       </section>
 
       <section className="instrument-panel modal-trend-panel">
-        <div className="panel-heading"><div><span className="section-kicker">MODAL TIME TREND</span><h2>Principal coordinates through time</h2></div><span className="panel-meta">current PCA basis</span></div>
+        <div className="panel-heading"><div><span className="section-kicker">MULTIVARIATE CONTEXT</span><h2>Principal coordinates through time</h2></div><span className="panel-meta">current PCA basis · state {stateRadius.toFixed(2)} σ</span></div>
         <ModalTrendChart points={modalPoints} scale={stateScale} />
       </section>
 
@@ -3516,7 +3825,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-overview", group: "Navigate", label: "Cascade overview", description: "Topology, offsets, lock state, and live PHC traces", keywords: "home cascade topology clocks", section: "Overview", icon: LayoutDashboard },
     { id: "nav-pendulum", group: "Navigate", label: "Multi-pendulum", description: "Coupled previous-hop phase residuals", keywords: "swing equilibrium phase", section: "Multi-pendulum", icon: Orbit },
     { id: "nav-covariance", group: "Navigate", label: "Covariance lab", description: "Pair relationships and dominant eigenmodes", keywords: "matrix correlation eigenvalues", section: "Covariance", icon: Network },
-    { id: "nav-state", group: "Navigate", label: "State-space atlas", description: "Modal trajectory and empirical Poincaré map", keywords: "pca poincare phase portrait", section: "State space", icon: Activity },
+    { id: "nav-state", group: "Navigate", label: "Attractor Observatory", description: "Delay reconstruction, recurrent cores, return and Poincaré maps", keywords: "state space attractor takens delay embedding ami fnn lyapunov recurrence pca poincare phase portrait", section: "State space", icon: Activity },
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
@@ -4112,6 +4421,7 @@ export default function PTPBoxDashboard() {
             <StateSpaceAtlas
               history={history}
               nodes={nodes}
+              research={activeResearch}
               range={range}
               setRange={setRange}
               paused={paused}

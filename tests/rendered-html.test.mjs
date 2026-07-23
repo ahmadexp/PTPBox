@@ -51,11 +51,13 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /Rolling pair matrix/);
   assert.match(page, /Eigen spectrum/);
   assert.match(page, /Pendulum zeroing does not enter this path/);
-  assert.match(page, /State-space atlas/);
-  assert.match(page, /Principal state plane/);
-  assert.match(page, /Poincaré map/);
+  assert.match(page, /Attractor Observatory/);
+  assert.match(page, /Candidate attractor geometry/);
+  assert.match(page, /False nearest neighbors/);
+  assert.match(page, /Return map/);
+  assert.match(page, /Poincaré section/);
   assert.match(page, /Eigenvalues through time/);
-  assert.match(page, /not, by itself, evidence of a periodic orbit/i);
+  assert.match(page, /no single plot is treated as proof of deterministic chaos/i);
   assert.match(page, /Experiments/);
   assert.match(page, /Interfaces/);
   assert.match(page, /Configuration/);

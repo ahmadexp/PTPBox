@@ -1963,7 +1963,7 @@ def status() -> dict[str, Any]:
         "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.1.0",
+        "agent_version": "2.2.1",
         "timestamp": time.time(),
     }
 
@@ -2003,7 +2003,7 @@ def fault_expiry_loop(stop: threading.Event) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PTPBoxAgent/2.1"
+    server_version = "PTPBoxAgent/2.2.1"
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)

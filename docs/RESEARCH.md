@@ -207,6 +207,65 @@ binary matrix, recurrence rate, diagonal-line count, and determinism. Diagonal
 structure can indicate repeatable evolution; it is not proof of chaos or a
 deterministic attractor.
 
+### Attractor reconstruction and evidence gates
+
+The Attractor Observatory starts from one scalar observable: the raw endpoint
+PHC offset relative to BC1. It uses at most the newest 384 finite samples,
+centers and standardizes them, and reconstructs delay vectors
+
+\[
+\mathbf{x}_i =
+[x_i,x_{i-\tau},\ldots,x_{i-(m-1)\tau}].
+\]
+
+The delay \(\tau\) is the first local minimum of average mutual information over
+the bounded available lag range. If no finite-record minimum exists, the engine
+uses the first autocorrelation crossing below \(1/e\), or the available lag
+with the smallest absolute autocorrelation. This implements the reconstruction
+criterion of [Fraser and Swinney](https://doi.org/10.1103/PhysRevA.33.1134)
+within the finite live record.
+
+Embedding dimension is selected with the false-nearest-neighbor test of
+[Kennel, Brown, and Abarbanel](https://doi.org/10.1103/PhysRevA.45.3403).
+For \(m=1..5\), each point's nearest temporally separated neighbor is examined
+after adding the next delayed coordinate. A neighbor is false when either the
+new-coordinate distance ratio exceeds 10 or the expanded distance exceeds
+twice the scalar signal standard deviation. Temporally adjacent candidates are
+excluded with a Theiler window. The smallest \(m\geq2\) below 5% is selected;
+10% is the looser evidence gate reported to the UI.
+
+The displayed orbit is the first two coordinates, with the third coordinate
+retained as depth metadata. An 18×18 occupancy grid locates separated local
+density maxima; visits within a 0.72σ reconstructed-state radius define
+**recurrent-core candidates** and their coverage. Successive local maxima of the
+observable provide the return pairs \((x_n,x_{n+1})\).
+
+The local-divergence curve follows the small-record approach of
+[Rosenstein, Collins, and De Luca](https://doi.org/10.1016/0167-2789(93)90009-P):
+each state is paired with its closest temporally separated neighbor, the mean
+log separation is followed forward, and the best bounded early-time positive
+linear segment is reported with its slope, fit interval, pair count, and
+\(R^2\). This is a finite-record local-divergence estimate, not an asserted
+asymptotic Lyapunov exponent.
+
+The UI shows “candidate attractor” only when five independently inspectable
+conditions all hold:
+
+1. the selected embedding has at most 10% false nearest neighbors;
+2. one or more recurrent cores cover at least 8% of reconstructed states;
+3. the separate Grassberger–Procaccia dimension estimate converges across its
+   final three embeddings; and
+4. the early-time divergence slope is positive with \(R^2\geq0.8\).
+5. Bayesian online change detection reports a stationary window with newest
+   change probability below 0.2.
+
+Anything weaker is labeled reconstruction ready, recurrent structure, or
+inconclusive. Takens' embedding theorem motivates the reconstruction
+([original chapter](https://doi.org/10.1007/BFb0091924)); finite noisy PHC
+records do not satisfy every theorem assumption, so the label deliberately
+remains a candidate. The analysis performs no interpolation, never adjusts a
+clock, and always reports `live_changes: 0`.
+
 ### Replay bifurcation map
 
 The bifurcation workbench uses PI gain scale \(g\) as its continuation

@@ -847,6 +847,438 @@ def recurrence_analysis(channels: Sequence[Sequence[float]], max_points: int = 9
     }
 
 
+def _average_mutual_information(samples: Sequence[float], maximum_lag: int) -> list[dict[str, float]]:
+    if len(samples) < 16 or maximum_lag < 1:
+        return []
+    minimum = min(samples)
+    span = max(EPSILON, max(samples) - minimum)
+    bin_count = max(8, min(24, round(math.sqrt(len(samples) / 2))))
+
+    def bin_for(value: float) -> int:
+        return min(bin_count - 1, max(0, int((value - minimum) / span * bin_count)))
+
+    binned = [bin_for(value) for value in samples]
+    curve = []
+    for lag in range(1, maximum_lag + 1):
+        left = binned[:-lag]
+        right = binned[lag:]
+        pair_count = len(left)
+        if pair_count < 8:
+            break
+        left_counts = [0] * bin_count
+        right_counts = [0] * bin_count
+        joint_counts: dict[tuple[int, int], int] = {}
+        for first, second in zip(left, right):
+            left_counts[first] += 1
+            right_counts[second] += 1
+            joint_counts[(first, second)] = joint_counts.get((first, second), 0) + 1
+        information = 0.0
+        for (first, second), count in joint_counts.items():
+            probability = count / pair_count
+            independent = left_counts[first] * right_counts[second] / (pair_count * pair_count)
+            if probability > 0.0 and independent > 0.0:
+                information += probability * math.log(probability / independent)
+        curve.append({"lag": float(lag), "mutual_information": information})
+    return curve
+
+
+def _select_embedding_delay(samples: Sequence[float]) -> tuple[int, str, list[dict[str, float]]]:
+    maximum_lag = max(2, min(48, len(samples) // 12))
+    ami_curve = _average_mutual_information(samples, maximum_lag)
+    for index in range(1, len(ami_curve) - 1):
+        if (
+            ami_curve[index]["mutual_information"] <= ami_curve[index - 1]["mutual_information"]
+            and ami_curve[index]["mutual_information"] < ami_curve[index + 1]["mutual_information"]
+        ):
+            return int(ami_curve[index]["lag"]), "AMI first local minimum", ami_curve
+
+    center = mean(samples)
+    scale = max(EPSILON, math.sqrt(variance(samples)))
+    normalized = [(value - center) / scale for value in samples]
+    autocorrelations = []
+    for lag in range(1, maximum_lag + 1):
+        autocorrelations.append(
+            sum(left * right for left, right in zip(normalized[:-lag], normalized[lag:]))
+            / max(1, len(normalized) - lag)
+        )
+    delay = next(
+        (lag for lag, value in enumerate(autocorrelations, 1) if value <= math.exp(-1.0)),
+        min(range(1, len(autocorrelations) + 1), key=lambda lag: abs(autocorrelations[lag - 1])),
+    )
+    return delay, "autocorrelation 1/e fallback", ami_curve
+
+
+def _delay_vectors(samples: Sequence[float], dimension: int, delay: int) -> tuple[list[list[float]], list[int]]:
+    indices = list(range((dimension - 1) * delay, len(samples)))
+    return (
+        [
+            [samples[index - coordinate * delay] for coordinate in range(dimension)]
+            for index in indices
+        ],
+        indices,
+    )
+
+
+def _false_nearest_neighbor_curve(
+    samples: Sequence[float],
+    delay: int,
+    maximum_dimension: int = 6,
+) -> list[dict[str, Any]]:
+    signal_scale = max(EPSILON, math.sqrt(variance(samples)))
+    curve = []
+    for dimension in range(1, maximum_dimension):
+        vectors, source_indices = _delay_vectors(samples, dimension + 1, delay)
+        if len(vectors) < 24:
+            break
+        current_vectors = [vector[:dimension] for vector in vectors]
+        theiler = max(2, 2 * delay)
+        false_count = 0
+        pair_count = 0
+        for row, vector in enumerate(current_vectors):
+            nearest_index = -1
+            nearest_squared = math.inf
+            for column, candidate in enumerate(current_vectors):
+                if abs(source_indices[row] - source_indices[column]) <= theiler:
+                    continue
+                distance_squared = sum((left - right) ** 2 for left, right in zip(vector, candidate))
+                if distance_squared < nearest_squared:
+                    nearest_squared = distance_squared
+                    nearest_index = column
+            if nearest_index < 0 or not math.isfinite(nearest_squared):
+                continue
+            distance = math.sqrt(max(EPSILON, nearest_squared))
+            extra = abs(vectors[row][dimension] - vectors[nearest_index][dimension])
+            expanded = math.sqrt(nearest_squared + extra * extra)
+            false_count += extra / distance > 10.0 or expanded / signal_scale > 2.0
+            pair_count += 1
+        curve.append(
+            {
+                "dimension": dimension,
+                "false_neighbor_pct": 100.0 * false_count / max(1, pair_count),
+                "pairs": pair_count,
+            }
+        )
+    return curve
+
+
+def _recurrent_embedding_cores(
+    vectors: Sequence[Sequence[float]],
+    source_indices: Sequence[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+    if not vectors:
+        return [], [], 0.0
+    projected = [
+        [
+            vector[0],
+            vector[1] if len(vector) > 1 else 0.0,
+            vector[2] if len(vector) > 2 else 0.0,
+        ]
+        for vector in vectors
+    ]
+    grid_size = 18
+    cell_points: dict[tuple[int, int], list[int]] = {}
+    for index, (first, second, _third) in enumerate(projected):
+        row = min(grid_size - 1, max(0, int((first + 3.0) / 6.0 * grid_size)))
+        column = min(grid_size - 1, max(0, int((second + 3.0) / 6.0 * grid_size)))
+        cell_points.setdefault((row, column), []).append(index)
+    maximum_density = max((len(indices) for indices in cell_points.values()), default=1)
+    minimum_count = max(3, round(len(projected) * 0.012))
+    peaks = []
+    for (row, column), indices in cell_points.items():
+        count = len(indices)
+        neighbors = [
+            len(cell_points.get((row + row_step, column + column_step), []))
+            for row_step in (-1, 0, 1)
+            for column_step in (-1, 0, 1)
+            if row_step or column_step
+        ]
+        if count >= minimum_count and count >= max(neighbors, default=0):
+            peaks.append((count, row, column, indices))
+    peaks.sort(reverse=True)
+    selected: list[tuple[int, int, int, list[int]]] = []
+    for candidate in peaks:
+        _count, row, column, _indices = candidate
+        if any((row - other[1]) ** 2 + (column - other[2]) ** 2 < 5 for other in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) == 4:
+            break
+
+    cores = []
+    assigned: set[int] = set()
+    point_core: list[int | None] = [None] * len(projected)
+    for identifier, (_count, row, column, indices) in enumerate(selected, 1):
+        neighborhood = [
+            index
+            for row_step in (-1, 0, 1)
+            for column_step in (-1, 0, 1)
+            for index in cell_points.get((row + row_step, column + column_step), [])
+        ]
+        center = [
+            mean([projected[index][axis] for index in neighborhood])
+            for axis in range(3)
+        ]
+        visits = [
+            index
+            for index, point in enumerate(projected)
+            if math.sqrt(sum((value - center[axis]) ** 2 for axis, value in enumerate(point))) <= 0.72
+        ]
+        for index in visits:
+            if point_core[index] is None:
+                point_core[index] = identifier
+            assigned.add(index)
+        cores.append(
+            {
+                "id": identifier,
+                "x": center[0],
+                "y": center[1],
+                "z": center[2],
+                "visits": len(visits),
+                "share": len(visits) / max(1, len(projected)),
+                "radius_sigma": 0.72,
+            }
+        )
+    embedding = []
+    for index, point in enumerate(projected):
+        row = min(grid_size - 1, max(0, int((point[0] + 3.0) / 6.0 * grid_size)))
+        column = min(grid_size - 1, max(0, int((point[1] + 3.0) / 6.0 * grid_size)))
+        embedding.append(
+            {
+                "sample_index": source_indices[index],
+                "x": point[0],
+                "y": point[1],
+                "z": point[2],
+                "density": len(cell_points.get((row, column), [])) / maximum_density,
+                "core": point_core[index],
+            }
+        )
+    return embedding, cores, len(assigned) / max(1, len(projected))
+
+
+def _local_divergence(
+    vectors: Sequence[Sequence[float]],
+    source_indices: Sequence[int],
+    delay: int,
+    sample_period_s: float,
+) -> dict[str, Any]:
+    if len(vectors) < 48:
+        return {"status": "learning", "points": [], "pairs": 0}
+    maximum_lag = max(6, min(24, len(vectors) // 8))
+    theiler = max(2 * delay, 8)
+    pairs = []
+    usable = len(vectors) - maximum_lag
+    for row in range(usable):
+        nearest_index = -1
+        nearest_squared = math.inf
+        for column in range(usable):
+            if abs(source_indices[row] - source_indices[column]) <= theiler:
+                continue
+            distance_squared = sum(
+                (left - right) ** 2
+                for left, right in zip(vectors[row], vectors[column])
+            )
+            if distance_squared < nearest_squared:
+                nearest_squared = distance_squared
+                nearest_index = column
+        if nearest_index >= 0:
+            pairs.append((row, nearest_index))
+    points = []
+    for lag in range(maximum_lag + 1):
+        separations = []
+        for left_index, right_index in pairs:
+            distance = math.sqrt(
+                sum(
+                    (left - right) ** 2
+                    for left, right in zip(vectors[left_index + lag], vectors[right_index + lag])
+                )
+            )
+            if distance > EPSILON:
+                separations.append(math.log(distance))
+        if separations:
+            points.append(
+                {
+                    "lag_samples": lag,
+                    "lag_s": lag * sample_period_s,
+                    "mean_log_separation": mean(separations),
+                    "pairs": len(separations),
+                }
+            )
+    best_fit: dict[str, Any] | None = None
+    for start in range(1, min(4, len(points) - 4)):
+        for stop in range(start + 5, min(len(points), start + 11)):
+            selected = points[start:stop]
+            fit = _linear_fit(
+                [point["lag_s"] for point in selected],
+                [point["mean_log_separation"] for point in selected],
+            )
+            if not fit or fit["slope"] <= 0.0:
+                continue
+            score = fit["r_squared"] + len(selected) * 0.002
+            if best_fit is None or score > best_fit["score"]:
+                best_fit = {
+                    **fit,
+                    "score": score,
+                    "start_index": start,
+                    "end_index": stop - 1,
+                    "fit_start_s": selected[0]["lag_s"],
+                    "fit_end_s": selected[-1]["lag_s"],
+                }
+    if not best_fit:
+        return {
+            "status": "inconclusive",
+            "points": points,
+            "pairs": len(pairs),
+            "theiler_window_samples": theiler,
+        }
+    return {
+        "status": "ready",
+        "slope_per_s": best_fit["slope"],
+        "r_squared": best_fit["r_squared"],
+        "fit_start_s": best_fit["fit_start_s"],
+        "fit_end_s": best_fit["fit_end_s"],
+        "points": points,
+        "pairs": len(pairs),
+        "theiler_window_samples": theiler,
+        "interpretation": "Rosenstein-style early-time mean log-separation slope",
+    }
+
+
+def attractor_reconstruction_analysis(
+    values: Sequence[float],
+    sample_period_s: float,
+    dimension_plateau: bool = False,
+    stationary: bool = True,
+) -> dict[str, Any]:
+    """Delay-coordinate reconstruction with explicit finite-record evidence gates."""
+    samples = [float(value) for value in values if math.isfinite(float(value))][-384:]
+    if len(samples) < 64:
+        return {
+            "status": "learning",
+            "samples": len(samples),
+            "embedding": [],
+            "cores": [],
+            "return_map": [],
+            "fnn_curve": [],
+            "ami_curve": [],
+            "divergence": {"status": "learning", "points": []},
+            "live_changes": 0,
+        }
+    center = mean(samples)
+    scale = max(EPSILON, math.sqrt(variance(samples)))
+    normalized = [(value - center) / scale for value in samples]
+    delay, delay_method, ami_curve = _select_embedding_delay(normalized)
+    fnn_curve = _false_nearest_neighbor_curve(normalized, delay)
+    selected_dimension = next(
+        (
+            max(2, int(point["dimension"]))
+            for point in fnn_curve
+            if point["dimension"] >= 2 and point["false_neighbor_pct"] <= 5.0
+        ),
+        min(6, max(3, int(fnn_curve[-1]["dimension"]) + 1 if fnn_curve else 3)),
+    )
+    vectors, source_indices = _delay_vectors(normalized, selected_dimension, delay)
+    if len(vectors) > 320:
+        start = len(vectors) - 320
+        vectors = vectors[start:]
+        source_indices = source_indices[start:]
+    embedding, cores, core_coverage = _recurrent_embedding_cores(vectors, source_indices)
+    divergence = _local_divergence(vectors, source_indices, delay, sample_period_s)
+    peaks = []
+    minimum_peak_gap = max(2, delay // 2)
+    for index in range(1, len(normalized) - 1):
+        if normalized[index] > normalized[index - 1] and normalized[index] >= normalized[index + 1]:
+            if peaks and index - peaks[-1] < minimum_peak_gap:
+                if normalized[index] > normalized[peaks[-1]]:
+                    peaks[-1] = index
+            else:
+                peaks.append(index)
+    return_map = [
+        {
+            "peak_index": peaks[index],
+            "current": normalized[peaks[index]],
+            "next": normalized[peaks[index + 1]],
+            "interval_s": (peaks[index + 1] - peaks[index]) * sample_period_s,
+        }
+        for index in range(len(peaks) - 1)
+    ][-128:]
+    selected_fnn = next(
+        (
+            point["false_neighbor_pct"]
+            for point in fnn_curve
+            if int(point["dimension"]) == selected_dimension
+        ),
+        fnn_curve[-1]["false_neighbor_pct"] if fnn_curve else 100.0,
+    )
+    embedding_sufficient = selected_fnn <= 10.0
+    recurrent_geometry = len(cores) > 0 and core_coverage >= 0.08
+    positive_divergence = (
+        divergence.get("status") == "ready"
+        and float(divergence.get("slope_per_s") or 0.0) > 0.0
+        and float(divergence.get("r_squared") or 0.0) >= 0.8
+    )
+    evidence_count = sum(
+        (
+            embedding_sufficient,
+            recurrent_geometry,
+            bool(dimension_plateau),
+            positive_divergence,
+            bool(stationary),
+        )
+    )
+    verdict = (
+        "candidate_attractor"
+        if evidence_count == 5
+        else "recurrent_structure"
+        if embedding_sufficient and recurrent_geometry
+        else "reconstructed"
+        if embedding_sufficient
+        else "inconclusive"
+    )
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "observable": "endpoint PHC offset relative to BC1",
+        "center_ns": center,
+        "scale_ns": scale,
+        "delay_samples": delay,
+        "delay_s": delay * sample_period_s,
+        "delay_method": delay_method,
+        "embedding_dimension": selected_dimension,
+        "fnn_threshold_pct": 5.0,
+        "fnn_curve": fnn_curve,
+        "ami_curve": [
+            {
+                **point,
+                "lag_s": point["lag"] * sample_period_s,
+            }
+            for point in ami_curve
+        ],
+        "embedding": embedding,
+        "cores": cores,
+        "core_coverage": core_coverage,
+        "return_map": return_map,
+        "divergence": divergence,
+        "evidence": {
+            "embedding_sufficient": embedding_sufficient,
+            "selected_fnn_pct": selected_fnn,
+            "recurrent_geometry": recurrent_geometry,
+            "dimension_plateau": bool(dimension_plateau),
+            "positive_divergence": positive_divergence,
+            "stationary_window": bool(stationary),
+            "evidence_count": evidence_count,
+            "verdict": verdict,
+        },
+        "method": "Takens delay coordinates + AMI lag + false nearest neighbors + recurrent cores + return map + local divergence",
+        "provenance": "raw captured endpoint PHC phase; standardized only for geometry; no interpolation or clock writes",
+        "interpretation": (
+            "A candidate-attractor search, not a chaos classifier. Corroboration across "
+            "embedding sufficiency, recurrent geometry, dimension convergence, local "
+            "divergence, and window stationarity is required before the candidate label is shown."
+        ),
+        "live_changes": 0,
+    }
+
+
 def replay_bifurcation_analysis(
     phase_ns: Sequence[float],
     sample_period_s: float,
@@ -1908,6 +2340,15 @@ class RollingResearchEngine:
             active_controller=active_controller,
         )
         fractal = fractal_analysis(endpoint_series)
+        attractor = attractor_reconstruction_analysis(
+            endpoint_series,
+            period,
+            dimension_plateau=bool(fractal.get("correlation", {}).get("converged")),
+            stationary=(
+                changes.get("status") != "change"
+                and float(changes.get("latest_probability") or 0.0) < 0.2
+            ),
+        )
         koopman = koopman_dmd(hop_channels)
         ensemble_ids = [node for node in node_ids[1:] if series.get(node)]
         ensemble_channels = [series[node] for node in ensemble_ids]
@@ -2000,6 +2441,7 @@ class RollingResearchEngine:
             "recurrence": recurrence,
             "bifurcation": bifurcation,
             "fractal": fractal,
+            "attractor": attractor,
             "koopman": koopman,
             "system_identification": system_id,
             "auto_tune": auto_tune,

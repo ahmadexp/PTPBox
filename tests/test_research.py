@@ -171,6 +171,61 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual("learning", result["multifractal"]["status"])
         self.assertEqual(0, result["live_changes"])
 
+    def test_attractor_reconstruction_selects_delay_embedding_and_recurrent_cores(self) -> None:
+        values = [
+            75.0 * math.sin(index * 0.17)
+            + 24.0 * math.sin(index * 0.071 + 0.4)
+            + 4.0 * math.sin(index * 0.013)
+            for index in range(512)
+        ]
+        result = RESEARCH.attractor_reconstruction_analysis(
+            values,
+            0.5,
+            dimension_plateau=True,
+        )
+
+        self.assertEqual("ready", result["status"])
+        self.assertGreaterEqual(result["delay_samples"], 1)
+        self.assertGreaterEqual(result["embedding_dimension"], 2)
+        self.assertTrue(result["ami_curve"])
+        self.assertTrue(result["fnn_curve"])
+        self.assertGreater(len(result["embedding"]), 100)
+        self.assertTrue(result["return_map"])
+        self.assertTrue(result["evidence"]["stationary_window"])
+        self.assertIn(
+            result["evidence"]["verdict"],
+            {"reconstructed", "recurrent_structure", "candidate_attractor", "inconclusive"},
+        )
+        self.assertTrue(result["evidence"]["dimension_plateau"])
+        self.assertEqual(0, result["live_changes"])
+        self.assertIn("not a chaos classifier", result["interpretation"])
+
+    def test_attractor_candidate_is_suppressed_during_a_regime_change(self) -> None:
+        values = [
+            math.sin(index * 0.17) + 0.2 * math.sin(index * 0.071)
+            for index in range(384)
+        ]
+        result = RESEARCH.attractor_reconstruction_analysis(
+            values,
+            1.0,
+            dimension_plateau=True,
+            stationary=False,
+        )
+
+        self.assertFalse(result["evidence"]["stationary_window"])
+        self.assertNotEqual("candidate_attractor", result["evidence"]["verdict"])
+
+    def test_attractor_reconstruction_waits_for_a_defensible_record(self) -> None:
+        result = RESEARCH.attractor_reconstruction_analysis(
+            [math.sin(index * 0.2) for index in range(40)],
+            1.0,
+        )
+
+        self.assertEqual("learning", result["status"])
+        self.assertEqual([], result["embedding"])
+        self.assertEqual([], result["cores"])
+        self.assertEqual(0, result["live_changes"])
+
     def test_temperature_model_predicts_frequency_sensitivity(self) -> None:
         timestamps = [float(index) for index in range(100)]
         temperatures = [35.0 + index * 0.02 for index in range(100)]

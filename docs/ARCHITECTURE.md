@@ -200,6 +200,7 @@ from aligned raw measurements and reports a state such as `waiting`,
 | Safe tuner | Captured-data PI replay, bounded candidate set, RBF Gaussian process, expected improvement | `live_changes` is always zero; the operator must stage and apply a recommendation. |
 | BOCPD | Bounded run-length posterior with a Gaussian observation model | A probability of a regime change, not automatic root-cause attribution. |
 | Recurrence | Normalized multichannel distance matrix, recurrence rate, and diagonal determinism | Recurrence does not prove chaos. |
+| Attractor reconstruction | AMI delay, false-nearest-neighbor dimension, Takens coordinates, recurrent cores, return map, dimension plateau, local divergence, and regime stationarity | A candidate label requires five corroborating gates; a finite PHC record cannot prove a strange attractor. |
 | Replay bifurcation map | Settled endpoint-phase extrema across a bounded offline PI gain-scale sweep | `live_changes` is always zero; a replay response branch is not a physical bifurcation claim. |
 | Fractal scaling | Higuchi graph dimension, delay-embedded correlation dimension across \(m=2..5\), and MF-DFA with shuffled surrogates | Finite-record scaling is not proof of chaos, exact self-similarity, or a strange attractor. |
 | Koopman/DMD | Least-squares snapshot operator and singular-value amplification | Singular values describe the fitted local operator; they are not closed-loop gain margins. |

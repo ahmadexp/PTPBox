@@ -99,23 +99,37 @@ The computation uses raw previous-hop differences before visualization
 zeroing. Constant equilibrium subtraction therefore cancels naturally and
 cannot manufacture correlation.
 
-## Explore the timing system in state space
+## Search for attractors in measured timing dynamics
 
-<img src="docs/images/state-space-atlas.jpg" alt="Live PTPBox state-space atlas with a principal-component trajectory, empirical Poincaré section, modal time traces, and rolling eigenvalues" width="100%">
+<img src="docs/images/state-space-atlas.jpg" alt="Live PTPBox Attractor Observatory with delay-coordinate reconstruction, recurrent-core candidates, return map, evidence gates, modal time traces, and rolling eigenvalues" width="100%">
 
-The state-space atlas treats the six synchronized hop-change rates as one
-six-dimensional state vector. It centers that vector, builds a covariance PCA
-basis, and traces the live PC1×PC2 trajectory against its 1σ and 2σ geometry.
-Switch between σ-normalized and physical coordinates, select a 24, 48, or
-96-change basis, and inspect rising, falling, or bidirectional crossings through
-the PC1, PC2, or PC3 zero plane.
+The Attractor Observatory reconstructs hidden state from the raw endpoint PHC
+offset using Takens delay coordinates. It chooses the delay from the first local
+minimum of average mutual information, falling back to the autocorrelation
+1/e crossing when the finite record has no usable minimum. A false-nearest-
+neighbor curve then selects the smallest sufficient embedding dimension. The
+main trajectory shows `x(t)` against `x(t − τ)`, preserves sample order, encodes
+local occupancy, and marks repeatedly visited high-density regions as
+**recurrent-core candidates**.
 
-The empirical Poincaré section uses linear interpolation between consecutive
-measured states. It is useful for revealing recurrence and clustered return
-regions, but the Observatory deliberately does not label those patterns as a
-periodic orbit or deterministic attractor without supporting evidence. Modal
-time traces and rolling covariance eigenvalues keep the evolving geometry tied
-to the original measurements.
+The page does not turn a visually appealing orbit into a chaos claim. Its
+evidence ledger independently checks embedding sufficiency, recurrent geometry,
+Grassberger–Procaccia correlation-dimension convergence, a Rosenstein-style
+early-time local-divergence fit, and stationarity of the current regime. The
+stronger “candidate attractor” label appears only when all five gates agree. A successive-maxima
+return map, the empirical multivariate Poincaré section, modal time traces, and
+rolling covariance eigenvalues remain visible so apparent structure can be
+cross-checked against the six-hop dynamics.
+
+The live path uses at most the latest 384 raw endpoint samples, standardizes
+only the reconstruction coordinates, excludes temporally adjacent neighbors
+with a Theiler window, performs no interpolation, writes no clock, and reports
+the complete method and finite-record limitations through `/api/research`.
+The implementation follows the original work on
+[delay-coordinate reconstruction](https://doi.org/10.1007/BFb0091924),
+[average-mutual-information lag selection](https://doi.org/10.1103/PhysRevA.33.1134),
+[false nearest neighbors](https://doi.org/10.1103/PhysRevA.45.3403), and
+[small-record Lyapunov estimation](https://doi.org/10.1016/0167-2789(93)90009-P).
 
 ## Open the loop in the Holdover chamber
 
@@ -233,7 +247,7 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
 | **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
 | **Covariance lab** | Compare synchronized phase-change rates as covariance or correlation, follow every pair through time, and inspect eigenvalues plus dominant-mode loadings. |
-| **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
+| **Attractor Observatory** | Reconstruct endpoint dynamics with Takens coordinates, choose lag with AMI, check embedding with false nearest neighbors, locate recurrent-core candidates, inspect return/Poincaré maps, estimate local divergence, gate on regime stationarity, and require corroborating evidence before showing a candidate-attractor label. |
 | **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
 | **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
@@ -398,8 +412,10 @@ state from sysfs and the managed process table.
   and correlated-versus-independent cascade uncertainty
 - Rolling phase-change covariance/correlation, full pair timelines, eigenvalues,
   explained trace, effective rank, and dominant eigenvector loadings
-- Six-dimensional state-space projections, covariance ellipses, empirical
-  Poincaré crossings, modal coordinates, and rolling eigenvalue shares
+- Delay-coordinate endpoint reconstruction, AMI lag selection, false-nearest-
+  neighbor curves, recurrent-core occupancy, successive-maxima return maps,
+  finite-record local divergence, empirical Poincaré crossings, modal
+  coordinates, and rolling eigenvalue shares
 - Recurrence rate/determinism, Koopman/DMD amplification, and Bayesian online
   change probability
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
