@@ -248,6 +248,17 @@ class ExperimentStoreTests(unittest.TestCase):
             self.assertEqual(2, completed["sample_count"])
             self.assertIn("BC2", exported)
             self.assertIn("43.2", exported)
+            samples = store.phc_samples(run["id"], since=0.5)
+            self.assertEqual(["BC1", "BC2"], [sample["clock_id"] for sample in samples])
+            self.assertEqual(8.0, samples[1]["offset_ns"])
+            self.assertEqual(3.0, samples[1]["uncertainty_ns"])
+            summary = store.phc_holdover_summary(run["id"], 0.5, ["BC2"])
+            self.assertEqual(1, summary[0]["samples"])
+            self.assertEqual(8.0, summary[0]["latest_offset_ns"])
+            series, cycles, stride = store.phc_holdover_series(run["id"], 0.5, ["BC2"], max_cycles=1)
+            self.assertEqual(1, cycles)
+            self.assertEqual(1, stride)
+            self.assertEqual("BC2", series[0]["clock_id"])
             self.assertIsNone(store.active())
 
 

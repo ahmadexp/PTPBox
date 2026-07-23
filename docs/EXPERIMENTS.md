@@ -37,9 +37,26 @@ cycles; 20 minutes is a useful starting point.
 
 ### Holdover recovery
 
-Remove upstream synchronization, observe holdover drift, restore the source,
-and measure reacquisition. Record both the duration of source loss and whether
-the clock stepped or slewed on recovery.
+Use the dedicated **Holdover chamber** for a controlled servo-release trial.
+It restores the selected nodes' saved servos, requires a continuous stable
+dwell, zeroes each clock against the median of its final qualified PHC window,
+then changes only adjustment to LinuxPTP free-running mode. PTP traffic, direct
+PHC monitoring, and the durable raw recorder remain live.
+
+During the free run compare:
+
+- current, RMS, and peak absolute wander from the release baseline;
+- time-error slope in ns/s, numerically equal to fractional-frequency error in
+  ppb;
+- per-node divergence and downstream amplification;
+- direct-comparison uncertainty beside the observed wander;
+- elapsed time to an operational time-error limit;
+- reacquisition after the exact previous servo selection is restored.
+
+The default recipe automatically resumes synchronization at the declared
+duration. Use **Resume synchronization** to end early, or **Abort** during
+qualification. A broken lock, stale PHC sample, or release-gate excursion resets
+the dwell rather than releasing a partially synchronized chain.
 
 ### Gain sweep
 

@@ -65,7 +65,7 @@ and whether privileged lifecycle control is installed.
     "certification": false
   },
   "observer_only": false,
-  "agent_version": "2.0.0"
+  "agent_version": "2.1.0"
 }
 ```
 
@@ -396,6 +396,63 @@ Use `target: "all"` for BC2 through the final OC. Changing the servo requires a
 brief restart of only the selected `ptp4l` instance; the agent and PHC sampler
 do not restart. `nullf` deliberately commands zero frequency correction and is
 intended for SyncE-backed diagnostics, not ordinary oscillator discipline.
+
+## Dedicated holdover analysis
+
+### `GET /api/holdover`
+
+Returns the persistent holdover session, continuous-lock qualification,
+per-node release baselines, raw display series, and all-run metrics. The session
+state is one of `synchronizing`, `releasing`, `holdover`, `resuming`,
+`completed`, `aborted`, or `error`.
+
+`series[].values_ns` is the raw BC1-relative PHC difference minus that node's
+pre-release median. The endpoint applies no smoothing. Long runs are uniformly
+decimated to at most 1,800 displayed cycles, retain the final cycle, and report
+`display_stride`; the SQLite run and CSV export retain every captured row.
+
+`metrics.<node>.drift_ppb` is the least-squares slope of time error in ns/s.
+Those units are numerically equal to ppb fractional-frequency error.
+
+### `POST /api/holdover/control`
+
+Arm a run that first restores each node's existing servo, requires continuous
+LinuxPTP `s2` state plus fresh direct PHC comparisons, then automatically
+freezes clock adjustment:
+
+```json
+{
+  "action": "start",
+  "nodes": ["BC2", "BC3", "BC4", "BC5", "BC6", "BC7"],
+  "stable_dwell_s": 30,
+  "stable_threshold_ns": 1000,
+  "duration_s": 300,
+  "auto_release": true,
+  "auto_resume": true
+}
+```
+
+Any node leaving `s2`, exceeding the release gate, or losing fresh PHC data
+resets the dwell. At release the agent:
+
+1. calculates a per-node median from the final qualified PHC window;
+2. changes selected clocks to LinuxPTP `free_running 1`, downstream first;
+3. keeps PTP messages, the agent sampler, and SQLite capture running;
+4. restores the exact saved servo type when the duration expires.
+
+The other actions are:
+
+```json
+{ "action": "release" }
+{ "action": "resume" }
+{ "action": "abort" }
+```
+
+`release` is accepted only after the stable dwell unless an API client
+explicitly sends `"force": true`. `resume` seals the run after restoring
+synchronization. `abort` is the safe escape during qualification and also
+restores synchronization. A non-holdover experiment already recording causes
+`start` to return `409` rather than silently replacing it.
 
 ## Research and metrology
 

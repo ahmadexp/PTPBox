@@ -117,6 +117,29 @@ periodic orbit or deterministic attractor without supporting evidence. Modal
 time traces and rolling covariance eigenvalues keep the evolving geometry tied
 to the original measurements.
 
+## Open the loop in the Holdover chamber
+
+The dedicated Holdover mode turns a manual servo stop into a repeatable
+experiment. Select one clock or the downstream chain, choose the qualification
+dwell and capture duration, and arm the run. PTPBox first restores every
+selected node's saved servo, then requires fresh PHC observations and
+continuous LinuxPTP `s2` lock inside the release gate. Any excursion resets the
+dwell.
+
+At release, each clock is zeroed against the median of its final qualified
+BC1-relative PHC window. Clock adjustment changes to LinuxPTP `free_running 1`;
+PTP messages, direct PHC monitoring, and the SQLite recorder continue. The
+dominant graph shows unsmoothed accumulated time error from that baseline,
+while the node ledger reports current wander, peak magnitude, RMS, raw sample
+count, and least-squares rate error. Because 1 ns/s equals 1 ppb, the slope
+directly exposes the free-running fractional-frequency error.
+
+The original mixed servo assignment is preserved per node and restored
+automatically at the configured duration or immediately with **Resume
+synchronization**. Browser refreshes do not lose the run: the state machine is
+host-persistent, every raw row remains exportable, and long chart viewports are
+uniformly decimated without changing the stored dataset.
+
 ## Go beyond an offset graph
 
 <img src="docs/screenshots/metrology-live.png" alt="Live PTPBox metrology workbench with TDEV, factor-graph fusion, ensemble time, covariance-aware error budget, and durable run ledger" width="100%">
@@ -214,6 +237,7 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
 | **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
+| **Holdover chamber** | Qualify continuous lock, capture a per-node release baseline, stop adjustment without stopping observation, plot raw wander, report rate error, and restore the exact saved servos. |
 | **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |
@@ -366,7 +390,9 @@ state from sysfs and the managed process table.
 - Replay-only Gaussian-process PI recommendation with the evaluated safe
   frontier and zero live exploratory changes
 - Lock/tracking state and recovery events
-- Holdover elapsed time and frequency drift from the continuing raw PHC trace
+- Holdover qualification progress, per-node release baselines, elapsed
+  free-run time, current/peak/RMS wander, and frequency drift from the
+  continuing raw PHC trace
 - Offset distribution, P95, skew, and contribution share
 - Weighted factor-graph residuals, covariance-regularized ensemble weights,
   and correlated-versus-independent cascade uncertainty

@@ -78,6 +78,10 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /Metrology workbench/);
   assert.match(page, /Path microscope/);
   assert.match(page, /Intelligence/);
+  assert.match(page, /Holdover chamber/);
+  assert.match(page, /Synchronize → release → observe → recover/);
+  assert.match(page, /\/api\/holdover/);
+  assert.match(page, /no smoothing · every visible point is measured/i);
   assert.match(page, /Resilience/);
   assert.match(page, /Adaptive Kalman/);
   assert.match(page, /INTERACTING MULTIPLE MODEL/);
@@ -108,6 +112,7 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(agent, /\/api\/research/);
   assert.match(agent, /\/api\/path-events/);
   assert.match(agent, /\/api\/experiments/);
+  assert.match(agent, /\/api\/holdover/);
   assert.match(agent, /\/api\/fault\/control/);
   assert.match(packageJson, /build:standalone/);
   assert.match(standalone, /PTPBox — Precision Time Lab/);

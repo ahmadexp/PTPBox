@@ -42,6 +42,7 @@ STATE_DIR = Path(os.environ.get("PTPBOX_STATE_DIR", ROOT / "runtime"))
 CONFIG_FILE = Path(os.environ.get("PTPBOX_CONFIG", STATE_DIR / "config.json"))
 SERVO_REQUEST_FILE = STATE_DIR / "servo-request.json"
 SERVO_STATE_FILE = Path(os.environ.get("PTPBOX_SERVO_STATE", "/run/ptpbox/servo-state.json"))
+HOLDOVER_SESSION_FILE = STATE_DIR / "holdover-session.json"
 KALMAN_STATE_DIR = Path(os.environ.get("PTPBOX_KALMAN_STATE_DIR", "/run/ptpbox"))
 CONTROL = Path(os.environ.get("PTPBOX_CONTROL", "/usr/local/sbin/ptpboxctl"))
 WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "static"))
@@ -191,6 +192,7 @@ PHC_CROSS_TIMESTAMP_METHODS: dict[str, str] = {}
 RESEARCH_ENGINE = RollingResearchEngine(PHC_HISTORY_MAX_SAMPLES)
 _EXPERIMENT_STORES: dict[str, ExperimentStore] = {}
 _EXPERIMENT_STORES_LOCK = threading.Lock()
+HOLDOVER_LOCK = threading.RLock()
 _TEMPERATURE_CACHE: tuple[float, dict[str, float]] = (0.0, {})
 _CAPABILITY_CACHE: tuple[float, dict[str, Any]] = (0.0, {})
 
@@ -1267,6 +1269,477 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
     }
 
 
+def load_holdover_session() -> dict[str, Any] | None:
+    value = load_json(HOLDOVER_SESSION_FILE)
+    return value if isinstance(value, dict) and isinstance(value.get("id"), str) else None
+
+
+def save_holdover_session(value: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    value["updated_at"] = time.time()
+    pending = HOLDOVER_SESSION_FILE.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    pending.replace(HOLDOVER_SESSION_FILE)
+
+
+def _set_servo_controls(nodes: list[str], enabled: bool, servo_types: dict[str, str]) -> dict[str, Any]:
+    """Apply per-node control without collapsing a mixed-servo experiment."""
+    ordered = sorted(
+        nodes,
+        key=lambda name: int(re.sub(r"\D", "", name) or 0),
+        reverse=not enabled,
+    )
+    results: list[dict[str, Any]] = []
+    for node in ordered:
+        servo_type = servo_types.get(node)
+        if servo_type not in SUPPORTED_SERVOS:
+            raise ValueError(f"unsupported saved servo type for {node}")
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        pending = SERVO_REQUEST_FILE.with_suffix(".json.tmp")
+        pending.write_text(
+            json.dumps({"target": node, "enabled": enabled, "type": servo_type}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        pending.replace(SERVO_REQUEST_FILE)
+        code, response = control("servo")
+        if code != HTTPStatus.OK:
+            raise RuntimeError(str(response.get("error") or f"servo transition failed for {node}"))
+        results.append({"node": node, "response": response})
+    return {"nodes": ordered, "enabled": enabled, "results": results}
+
+
+def _holdover_lock_observation(session: dict[str, Any]) -> dict[str, Any]:
+    selected = [str(node) for node in session.get("nodes", [])]
+    threshold = float(session.get("stable_threshold_ns", 1_000.0))
+    payload = telemetry(history_seconds=max(10.0, float(session.get("stable_dwell_s", 30.0)) + 5.0))
+    by_id = {str(clock["id"]): clock for clock in payload["clocks"]}
+    now = float(payload["timestamp"])
+    node_states: dict[str, dict[str, Any]] = {}
+    all_stable = bool(selected)
+    for node in selected:
+        clock = by_id.get(node)
+        measurement = clock.get("measurement") if isinstance(clock, dict) else None
+        phc = clock.get("phc_measurement") if isinstance(clock, dict) else None
+        servo = (payload.get("servo_control") or {}).get("nodes", {}).get(node, {})
+        reasons: list[str] = []
+        if not isinstance(servo, dict) or not servo.get("enabled"):
+            reasons.append("discipline is not active")
+        if not isinstance(measurement, dict) or not measurement.get("valid"):
+            reasons.append("no valid LinuxPTP offset")
+        else:
+            if now - float(measurement.get("observed_at") or 0.0) > TELEMETRY_STALE_AFTER_SECONDS:
+                reasons.append("LinuxPTP offset is stale")
+            if measurement.get("servo_state") != "s2":
+                reasons.append(f"servo state is {measurement.get('servo_state') or 'unknown'}")
+            offset = measurement.get("offset_ns")
+            if not isinstance(offset, (int, float)) or isinstance(offset, bool) or abs(float(offset)) > threshold:
+                reasons.append(f"master offset exceeds ±{threshold:g} ns")
+        if not isinstance(phc, dict) or not phc.get("valid"):
+            reasons.append("no valid direct PHC comparison")
+        elif now - float(phc.get("observed_at") or 0.0) > PHC_STALE_AFTER_SECONDS:
+            reasons.append("direct PHC comparison is stale")
+        stable = not reasons
+        all_stable = all_stable and stable
+        node_states[node] = {
+            "stable": stable,
+            "reason": "; ".join(reasons) if reasons else "locked and inside release gate",
+            "ptp_offset_ns": measurement.get("offset_ns") if isinstance(measurement, dict) else None,
+            "phc_offset_ns": phc.get("offset_ns") if isinstance(phc, dict) else None,
+            "servo_state": measurement.get("servo_state") if isinstance(measurement, dict) else None,
+            "observed_at": phc.get("observed_at") if isinstance(phc, dict) else None,
+        }
+    return {
+        "all_stable": all_stable,
+        "nodes": node_states,
+        "observed_at": now,
+        "phc_mode": payload.get("phc_mode"),
+        "measurement_method": payload.get("phc_method"),
+    }
+
+
+def _holdover_baselines(session: dict[str, Any], release_at: float) -> dict[str, Any]:
+    selected = {str(node) for node in session.get("nodes", [])}
+    window_seconds = max(5.0, min(60.0, float(session.get("stable_dwell_s", 30.0))))
+    rows = experiment_store().phc_samples(str(session["experiment_id"]), release_at - window_seconds)
+    grouped: dict[str, list[dict[str, Any]]] = {node: [] for node in selected}
+    for row in rows:
+        node = str(row.get("clock_id"))
+        if node in grouped and row.get("valid") and isinstance(row.get("offset_ns"), (int, float)):
+            grouped[node].append(row)
+    baselines: dict[str, Any] = {}
+    for node, samples in grouped.items():
+        if not samples:
+            raise RuntimeError(f"no valid pre-release PHC baseline for {node}")
+        offsets = [float(sample["offset_ns"]) for sample in samples]
+        uncertainties = [
+            float(sample["uncertainty_ns"])
+            for sample in samples
+            if isinstance(sample.get("uncertainty_ns"), (int, float))
+        ]
+        baselines[node] = {
+            "offset_ns": statistics.median(offsets),
+            "uncertainty_ns": statistics.median(uncertainties) if uncertainties else None,
+            "samples": len(offsets),
+            "window_s": window_seconds,
+            "last_observed_at": float(samples[-1]["observed_at"]),
+        }
+    return baselines
+
+
+def start_holdover_session(payload: dict[str, Any]) -> dict[str, Any]:
+    with HOLDOVER_LOCK:
+        current = load_holdover_session()
+        if current and current.get("phase") in {"synchronizing", "releasing", "holdover", "resuming"}:
+            raise RuntimeError("a holdover run is already active")
+        active_experiment = experiment_store().active()
+        if active_experiment:
+            raise RuntimeError(f"experiment {active_experiment['id']} is already recording")
+        receivers = [node["name"] for node in topology_nodes()[1:]]
+        requested = payload.get("nodes", receivers)
+        if not isinstance(requested, list) or not requested or any(not isinstance(node, str) for node in requested):
+            raise ValueError("nodes must be a non-empty list of downstream clock IDs")
+        nodes = list(dict.fromkeys(str(node) for node in requested))
+        if any(node not in receivers for node in nodes):
+            raise ValueError("holdover nodes must be downstream topology clocks")
+        stable_dwell_s = payload.get("stable_dwell_s", 30.0)
+        stable_threshold_ns = payload.get("stable_threshold_ns", 1_000.0)
+        duration_s = payload.get("duration_s", 300.0)
+        for name, value, minimum, maximum in (
+            ("stable_dwell_s", stable_dwell_s, 5.0, 600.0),
+            ("stable_threshold_ns", stable_threshold_ns, 1.0, 1_000_000.0),
+            ("duration_s", duration_s, 10.0, 86_400.0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= float(value) <= maximum:
+                raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+        servo_state = load_servo_state().get("nodes", {})
+        servo_types = {
+            node: str((servo_state.get(node) or {}).get("type") or load_config()["servo"]["type"])
+            for node in nodes
+        }
+        if any(servo_type not in SUPPORTED_SERVOS for servo_type in servo_types.values()):
+            raise ValueError("every selected node needs a supported servo type")
+        _set_servo_controls(nodes, True, servo_types)
+        experiment = experiment_store().start(
+            {
+                "name": str(payload.get("name") or f"Holdover · {', '.join(nodes)}"),
+                "kind": "holdover",
+                "nodes": nodes,
+                "stable_dwell_s": float(stable_dwell_s),
+                "stable_threshold_ns": float(stable_threshold_ns),
+                "duration_s": float(duration_s),
+                "auto_release": bool(payload.get("auto_release", True)),
+                "auto_resume": bool(payload.get("auto_resume", True)),
+                "raw": True,
+                "smoothing": "none",
+            },
+            load_config(),
+        )
+        now = time.time()
+        session = {
+            "version": 1,
+            "id": f"holdover-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(now))}",
+            "phase": "synchronizing",
+            "nodes": nodes,
+            "servo_types": servo_types,
+            "started_at": now,
+            "phase_changed_at": now,
+            "stable_since": None,
+            "stable_dwell_s": float(stable_dwell_s),
+            "stable_threshold_ns": float(stable_threshold_ns),
+            "duration_s": float(duration_s),
+            "auto_release": bool(payload.get("auto_release", True)),
+            "auto_resume": bool(payload.get("auto_resume", True)),
+            "release_at": None,
+            "resume_at": None,
+            "baseline": {},
+            "lock": {"all_stable": False, "nodes": {}, "observed_at": now},
+            "experiment_id": experiment["id"],
+            "error": None,
+        }
+        save_holdover_session(session)
+        experiment_store().event(
+            "holdover",
+            "info",
+            f"Armed holdover run for {', '.join(nodes)}",
+            {"session_id": session["id"], "phase": "synchronizing"},
+        )
+        return holdover_session_snapshot(refresh=True)
+
+
+def release_holdover_session(force: bool = False) -> dict[str, Any]:
+    with HOLDOVER_LOCK:
+        session = load_holdover_session()
+        if not session or session.get("phase") != "synchronizing":
+            raise RuntimeError("no synchronizing holdover run is armed")
+        if not session.get("ready_to_release"):
+            session = refresh_holdover_session(session, allow_transitions=False)
+            if session.get("phase") != "synchronizing":
+                return holdover_session_snapshot(refresh=False)
+        if not session.get("ready_to_release") and not force:
+            raise RuntimeError("selected clocks have not completed the stable dwell")
+        release_started = time.time()
+        session["phase"] = "releasing"
+        session["phase_changed_at"] = release_started
+        session["baseline"] = _holdover_baselines(session, release_started)
+        save_holdover_session(session)
+        try:
+            _set_servo_controls(
+                [str(node) for node in session["nodes"]],
+                False,
+                {str(node): str(servo_type) for node, servo_type in session["servo_types"].items()},
+            )
+        except Exception as exc:
+            session["phase"] = "error"
+            session["error"] = str(exc)
+            save_holdover_session(session)
+            experiment_store().event("holdover", "error", "Holdover release failed", {"error": str(exc)})
+            raise
+        control_state = load_servo_state().get("nodes", {})
+        release_at_by_node = {
+            str(node): float((control_state.get(node) or {}).get("holdover_started"))
+            for node in session["nodes"]
+            if isinstance((control_state.get(node) or {}).get("holdover_started"), (int, float))
+        }
+        actual_releases = list(release_at_by_node.values())
+        session["release_at"] = min(actual_releases) if actual_releases else time.time()
+        session["release_at_by_node"] = release_at_by_node or {
+            str(node): session["release_at"] for node in session["nodes"]
+        }
+        session["phase"] = "holdover"
+        session["phase_changed_at"] = session["release_at"]
+        session["error"] = None
+        save_holdover_session(session)
+        experiment_store().event(
+            "holdover",
+            "warning",
+            "Clock adjustment frozen; direct PHC monitoring remains active",
+            {
+                "session_id": session["id"],
+                "nodes": session["nodes"],
+                "release_at": session["release_at"],
+                "baseline": session["baseline"],
+            },
+        )
+        return holdover_session_snapshot(refresh=False)
+
+
+def resume_holdover_session(aborted: bool = False, automatic: bool = False) -> dict[str, Any]:
+    with HOLDOVER_LOCK:
+        session = load_holdover_session()
+        if not session or session.get("phase") not in {"synchronizing", "releasing", "holdover", "error"}:
+            raise RuntimeError("no active holdover run can be resumed")
+        session["phase"] = "resuming"
+        session["phase_changed_at"] = time.time()
+        save_holdover_session(session)
+        try:
+            _set_servo_controls(
+                [str(node) for node in session["nodes"]],
+                True,
+                {str(node): str(servo_type) for node, servo_type in session["servo_types"].items()},
+            )
+        except Exception as exc:
+            session["phase"] = "error"
+            session["error"] = str(exc)
+            save_holdover_session(session)
+            experiment_store().event("holdover", "error", "Servo recovery failed", {"error": str(exc)})
+            raise
+        session["resume_at"] = time.time()
+        session["phase"] = "aborted" if aborted else "completed"
+        session["phase_changed_at"] = session["resume_at"]
+        session["error"] = None
+        save_holdover_session(session)
+        experiment_store().event(
+            "holdover",
+            "info",
+            "Synchronization restored after holdover" if not aborted else "Holdover run aborted; synchronization restored",
+            {"session_id": session["id"], "automatic": automatic},
+        )
+        experiment_store().stop(str(session.get("experiment_id")))
+        return holdover_session_snapshot(refresh=False)
+
+
+def refresh_holdover_session(
+    session: dict[str, Any] | None = None,
+    allow_transitions: bool = True,
+) -> dict[str, Any]:
+    with HOLDOVER_LOCK:
+        session = session or load_holdover_session()
+        if not session:
+            return {}
+        phase = session.get("phase")
+        now = time.time()
+        if phase == "synchronizing":
+            observation = _holdover_lock_observation(session)
+            session["lock"] = observation
+            if observation["all_stable"]:
+                if not isinstance(session.get("stable_since"), (int, float)):
+                    session["stable_since"] = now
+            else:
+                session["stable_since"] = None
+            stable_elapsed = now - float(session["stable_since"]) if isinstance(session.get("stable_since"), (int, float)) else 0.0
+            session["ready_to_release"] = stable_elapsed >= float(session["stable_dwell_s"])
+            save_holdover_session(session)
+            if allow_transitions and session["ready_to_release"] and session.get("auto_release"):
+                release_holdover_session()
+                return load_holdover_session() or {}
+        elif phase == "holdover" and isinstance(session.get("release_at"), (int, float)):
+            elapsed = now - float(session["release_at"])
+            if allow_transitions and session.get("auto_resume") and elapsed >= float(session.get("duration_s", 300.0)):
+                resume_holdover_session(automatic=True)
+                return load_holdover_session() or {}
+        return session
+
+
+def _linear_drift_ppb(points: list[tuple[float, float]]) -> float | None:
+    if len(points) < 2:
+        return None
+    origin = points[0][0]
+    xs = [timestamp - origin for timestamp, _value in points]
+    ys = [value for _timestamp, value in points]
+    mean_x = statistics.fmean(xs)
+    mean_y = statistics.fmean(ys)
+    denominator = sum((value - mean_x) ** 2 for value in xs)
+    if denominator <= 0:
+        return None
+    return sum((xs[index] - mean_x) * (ys[index] - mean_y) for index in range(len(xs))) / denominator
+
+
+def holdover_session_snapshot(refresh: bool = False, include_series: bool = True) -> dict[str, Any]:
+    with HOLDOVER_LOCK:
+        session = load_holdover_session()
+        if not session:
+            return {"active": False, "session": None, "series": [], "metrics": {}, "timestamp": time.time()}
+        if refresh and session.get("phase") in {"synchronizing", "holdover"}:
+            session = refresh_holdover_session(session)
+        release_at = session.get("release_at")
+        selected = [str(node) for node in session.get("nodes", [])]
+        baseline = session.get("baseline", {})
+        stable_since = session.get("stable_since")
+        stable_elapsed = max(0.0, time.time() - float(stable_since)) if isinstance(stable_since, (int, float)) else 0.0
+        active = session.get("phase") in {"synchronizing", "releasing", "holdover", "resuming", "error"}
+        response = {
+            "active": active,
+            "session": session,
+            "stable_elapsed_s": stable_elapsed,
+            "stable_progress": min(1.0, stable_elapsed / max(1.0, float(session.get("stable_dwell_s", 30.0)))),
+            "holdover_elapsed_s": max(0.0, time.time() - float(release_at)) if isinstance(release_at, (int, float)) else 0.0,
+            "series": [],
+            "metrics": {},
+            "captured_rows": 0,
+            "captured_cycles": 0,
+            "display_stride": 1,
+            "raw": True,
+            "smoothing": "none",
+            "measurement_source": "kernel cross-timestamped PHC comparison relative to pre-release median",
+            "timestamp": time.time(),
+        }
+        if not include_series or not isinstance(release_at, (int, float)) or not session.get("experiment_id"):
+            return response
+        store = experiment_store()
+        identifier = str(session["experiment_id"])
+        release = float(release_at)
+        summary_rows = store.phc_holdover_summary(identifier, release, selected)
+        sampled_rows, captured_cycles, display_stride = store.phc_holdover_series(identifier, release, selected)
+        metrics: dict[str, Any] = {}
+        for row in summary_rows:
+            node = str(row["clock_id"])
+            base = baseline.get(node) if isinstance(baseline, dict) else None
+            if not isinstance(base, dict) or not isinstance(base.get("offset_ns"), (int, float)):
+                continue
+            base_offset = float(base["offset_ns"])
+            samples = int(row["samples"])
+            sum_offset = float(row["sum_offset_ns"])
+            sum_offset_squared = float(row["sum_offset_squared_ns2"])
+            sum_time = float(row["sum_time_s"])
+            sum_time_squared = float(row["sum_time_squared_s2"])
+            sum_time_offset = float(row["sum_time_offset_ns_s"])
+            denominator = samples * sum_time_squared - sum_time * sum_time
+            drift = (
+                (samples * sum_time_offset - sum_time * sum_offset) / denominator
+                if samples >= 2 and denominator > 0
+                else None
+            )
+            wander_squared = max(
+                0.0,
+                sum_offset_squared - 2.0 * base_offset * sum_offset + samples * base_offset * base_offset,
+            )
+            minimum = float(row["minimum_offset_ns"]) - base_offset
+            maximum = float(row["maximum_offset_ns"]) - base_offset
+            latest = row.get("latest_offset_ns")
+            metrics[node] = {
+                "samples": samples,
+                "current_wander_ns": float(latest) - base_offset if isinstance(latest, (int, float)) else None,
+                "peak_abs_wander_ns": max(abs(minimum), abs(maximum)),
+                "rms_wander_ns": (wander_squared / samples) ** 0.5 if samples else None,
+                "drift_ppb": drift,
+                "latest_uncertainty_ns": row.get("latest_uncertainty_ns"),
+            }
+        cycles: dict[str, dict[str, Any]] = {}
+        release_by_node = session.get("release_at_by_node", {})
+        for row in sampled_rows:
+            node = str(row.get("clock_id"))
+            base = baseline.get(node) if isinstance(baseline, dict) else None
+            node_release = (
+                float(release_by_node[node])
+                if isinstance(release_by_node, dict) and isinstance(release_by_node.get(node), (int, float))
+                else release
+            )
+            if (
+                node not in selected
+                or not row.get("valid")
+                or not isinstance(base, dict)
+                or float(row["observed_at"]) < node_release
+            ):
+                continue
+            offset = row.get("offset_ns")
+            base_offset = base.get("offset_ns")
+            if not isinstance(offset, (int, float)) or not isinstance(base_offset, (int, float)):
+                continue
+            observed_at = float(row["observed_at"])
+            wander = float(offset) - float(base_offset)
+            uncertainty = float(row["uncertainty_ns"]) if isinstance(row.get("uncertainty_ns"), (int, float)) else None
+            cycle_id = str(row["cycle_id"])
+            point = cycles.setdefault(
+                cycle_id,
+                {
+                    "observed_at": observed_at,
+                    "elapsed_s": observed_at - float(release_at),
+                    "values_ns": {},
+                    "uncertainty_ns": {},
+                },
+            )
+            point["values_ns"][node] = wander
+            if uncertainty is not None:
+                point["uncertainty_ns"][node] = uncertainty
+        raw_series = sorted(cycles.values(), key=lambda point: float(point["observed_at"]))
+        response.update(
+            {
+                "series": raw_series,
+                "metrics": metrics,
+                "captured_rows": sum(int(row["samples"]) for row in summary_rows),
+                "captured_cycles": captured_cycles,
+                "display_stride": display_stride,
+            }
+        )
+        return response
+
+
+def holdover_session_loop(stop: threading.Event) -> None:
+    while not stop.wait(1.0):
+        session = load_holdover_session()
+        if not session or session.get("phase") not in {"synchronizing", "holdover"}:
+            continue
+        try:
+            refresh_holdover_session(session)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            with HOLDOVER_LOCK:
+                current = load_holdover_session()
+                if current and current.get("phase") in {"synchronizing", "releasing", "holdover", "resuming"}:
+                    current["phase"] = "error"
+                    current["error"] = str(exc)
+                    save_holdover_session(current)
+
+
 def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
     telemetry_payload = telemetry(history_seconds=history_seconds, limit=TELEMETRY_MAX_SAMPLES)
     config_value = load_config()
@@ -1485,11 +1958,12 @@ def status() -> dict[str, Any]:
             if isinstance(details, dict) and "supported" in details
         },
         "active_experiment": experiment_store().active(),
+        "holdover": holdover_session_snapshot(refresh=False, include_series=False),
         "profile_compliance": profile_compliance(),
         "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.0.0",
+        "agent_version": "2.1.0",
         "timestamp": time.time(),
     }
 
@@ -1529,7 +2003,7 @@ def fault_expiry_loop(stop: threading.Event) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PTPBoxAgent/1.0"
+    server_version = "PTPBoxAgent/2.1"
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
@@ -1642,6 +2116,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(profile_compliance())
             elif route == "/api/experiments":
                 self.send_json({"active": experiment_store().active(), "runs": experiment_store().list(100), "timestamp": time.time()})
+            elif route == "/api/holdover":
+                self.send_json(holdover_session_snapshot(refresh=True))
             elif route.startswith("/api/experiments/") and route.endswith("/export"):
                 identifier = route.removeprefix("/api/experiments/").removesuffix("/export").strip("/")
                 if not re.fullmatch(r"run-[0-9A-Za-z-]+", identifier) or not experiment_store().get(identifier):
@@ -1691,6 +2167,32 @@ class Handler(BaseHTTPRequestHandler):
             pending.write_text(json.dumps({"target": target, "enabled": enabled, "type": servo_type}, indent=2) + "\n", encoding="utf-8")
             pending.replace(SERVO_REQUEST_FILE)
             code, response = control("servo")
+            self.send_json(response, code)
+            return
+        if route == "/api/holdover/control":
+            action = str(body.get("action") or "")
+            try:
+                if action == "start":
+                    response = start_holdover_session(body)
+                    code = HTTPStatus.CREATED
+                elif action == "release":
+                    response = release_holdover_session(force=bool(body.get("force", False)))
+                    code = HTTPStatus.OK
+                elif action == "resume":
+                    response = resume_holdover_session()
+                    code = HTTPStatus.OK
+                elif action == "abort":
+                    response = resume_holdover_session(aborted=True)
+                    code = HTTPStatus.OK
+                else:
+                    self.send_json({"error": "action must be start, release, resume, or abort"}, HTTPStatus.BAD_REQUEST)
+                    return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                return
             self.send_json(response, code)
             return
         if route == "/api/experiments/start":
@@ -1757,8 +2259,10 @@ def main() -> None:
     stop_sampler = threading.Event()
     sampler = threading.Thread(target=phc_sampler_loop, args=(stop_sampler,), name="ptpbox-phc-sampler", daemon=True)
     fault_expirer = threading.Thread(target=fault_expiry_loop, args=(stop_sampler,), name="ptpbox-fault-expirer", daemon=True)
+    holdover_manager = threading.Thread(target=holdover_session_loop, args=(stop_sampler,), name="ptpbox-holdover-manager", daemon=True)
     sampler.start()
     fault_expirer.start()
+    holdover_manager.start()
     print(f"PTPBox agent listening on http://{args.bind}:{args.port} (root={ROOT})")
     try:
         server.serve_forever()
@@ -1768,6 +2272,7 @@ def main() -> None:
         stop_sampler.set()
         sampler.join(timeout=2)
         fault_expirer.join(timeout=2)
+        holdover_manager.join(timeout=2)
         server.server_close()
 
 

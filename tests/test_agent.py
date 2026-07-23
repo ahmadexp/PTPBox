@@ -436,5 +436,185 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(timing1.carrier)
 
 
+class HoldoverSessionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.originals = (
+            AGENT.STATE_DIR,
+            AGENT.CONFIG_FILE,
+            AGENT.SERVO_REQUEST_FILE,
+            AGENT.SERVO_STATE_FILE,
+            AGENT.HOLDOVER_SESSION_FILE,
+        )
+        AGENT.STATE_DIR = root
+        AGENT.CONFIG_FILE = root / "config.json"
+        AGENT.SERVO_REQUEST_FILE = root / "servo-request.json"
+        AGENT.SERVO_STATE_FILE = root / "servo-state.json"
+        AGENT.HOLDOVER_SESSION_FILE = root / "holdover-session.json"
+        with AGENT._EXPERIMENT_STORES_LOCK:
+            AGENT._EXPERIMENT_STORES.clear()
+
+    def tearDown(self) -> None:
+        (
+            AGENT.STATE_DIR,
+            AGENT.CONFIG_FILE,
+            AGENT.SERVO_REQUEST_FILE,
+            AGENT.SERVO_STATE_FILE,
+            AGENT.HOLDOVER_SESSION_FILE,
+        ) = self.originals
+        with AGENT._EXPERIMENT_STORES_LOCK:
+            AGENT._EXPERIMENT_STORES.clear()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def topology() -> list[dict[str, str]]:
+        return [
+            {"name": "BC1", "ingress": "p1", "egress": "p2"},
+            {"name": "BC2", "ingress": "p3", "egress": "p4"},
+            {"name": "BC3", "ingress": "p5", "egress": "p6"},
+        ]
+
+    @staticmethod
+    def lock_observation(stable: bool = True) -> dict[str, object]:
+        return {
+            "all_stable": stable,
+            "nodes": {
+                "BC2": {
+                    "stable": stable,
+                    "reason": "locked" if stable else "servo state is s1",
+                    "ptp_offset_ns": 12.0,
+                    "phc_offset_ns": 20.0,
+                    "servo_state": "s2" if stable else "s1",
+                    "observed_at": time.time(),
+                }
+            },
+            "observed_at": time.time(),
+            "phc_mode": "live",
+            "measurement_method": "test",
+        }
+
+    def test_holdover_run_qualifies_releases_measures_and_recovers(self) -> None:
+        servo_state = {"nodes": {"BC2": {"type": "pi", "enabled": True}}}
+        with (
+            mock.patch.object(AGENT, "topology_nodes", side_effect=self.topology),
+            mock.patch.object(AGENT, "load_servo_state", return_value=servo_state),
+            mock.patch.object(AGENT, "_set_servo_controls") as controls,
+            mock.patch.object(AGENT, "_holdover_lock_observation", return_value=self.lock_observation()),
+        ):
+            armed = AGENT.start_holdover_session(
+                {
+                    "nodes": ["BC2"],
+                    "stable_dwell_s": 5,
+                    "stable_threshold_ns": 100,
+                    "duration_s": 60,
+                    "auto_release": False,
+                }
+            )
+            self.assertEqual("synchronizing", armed["session"]["phase"])
+            self.assertEqual(["BC2"], armed["session"]["nodes"])
+
+            store = AGENT.experiment_store()
+            before_release = time.time()
+            store.record_phc(
+                {
+                    "sample_id": "pre:1",
+                    "clocks": [
+                        {
+                            "id": "BC2",
+                            "observed_at": before_release,
+                            "offset_ns": 20.0,
+                            "previous_hop_offset_ns": 20.0,
+                            "comparison_uncertainty_ns": 3.0,
+                            "valid": True,
+                        }
+                    ],
+                }
+            )
+            session = AGENT.load_holdover_session()
+            self.assertIsNotNone(session)
+            session["stable_since"] = time.time() - 6
+            AGENT.save_holdover_session(session)
+
+            released = AGENT.release_holdover_session()
+            self.assertEqual("holdover", released["session"]["phase"])
+            self.assertEqual(20.0, released["session"]["baseline"]["BC2"]["offset_ns"])
+
+            release_at = released["session"]["release_at"]
+            for index, offset in enumerate((70.0, 120.0), start=1):
+                store.record_phc(
+                    {
+                        "sample_id": f"hold:{index}",
+                        "clocks": [
+                            {
+                                "id": "BC2",
+                                "observed_at": release_at + index,
+                                "offset_ns": offset,
+                                "previous_hop_offset_ns": offset,
+                                "comparison_uncertainty_ns": 4.0,
+                                "valid": True,
+                            }
+                        ],
+                    }
+                )
+            measured = AGENT.holdover_session_snapshot()
+            self.assertEqual(100.0, measured["metrics"]["BC2"]["current_wander_ns"])
+            self.assertAlmostEqual(50.0, measured["metrics"]["BC2"]["drift_ppb"])
+            self.assertEqual("none", measured["smoothing"])
+
+            completed = AGENT.resume_holdover_session()
+            self.assertEqual("completed", completed["session"]["phase"])
+            self.assertIsNone(store.active())
+            self.assertEqual(
+                [(["BC2"], True), (["BC2"], False), (["BC2"], True)],
+                [(call.args[0], call.args[1]) for call in controls.call_args_list],
+            )
+
+    def test_unstable_sample_resets_the_release_dwell(self) -> None:
+        session = {
+            "id": "holdover-test",
+            "phase": "synchronizing",
+            "nodes": ["BC2"],
+            "stable_dwell_s": 30.0,
+            "stable_threshold_ns": 100.0,
+            "stable_since": time.time() - 20,
+            "auto_release": False,
+        }
+        AGENT.save_holdover_session(session)
+        with mock.patch.object(AGENT, "_holdover_lock_observation", return_value=self.lock_observation(False)):
+            refreshed = AGENT.refresh_holdover_session(session)
+
+        self.assertIsNone(refreshed["stable_since"])
+        self.assertFalse(refreshed["ready_to_release"])
+
+    def test_automatic_transition_returns_session_state_not_api_envelope(self) -> None:
+        session = {
+            "id": "holdover-auto",
+            "phase": "synchronizing",
+            "nodes": ["BC2"],
+            "stable_dwell_s": 5.0,
+            "stable_threshold_ns": 100.0,
+            "stable_since": time.time() - 6,
+            "auto_release": True,
+        }
+        AGENT.save_holdover_session(session)
+
+        def release() -> dict[str, object]:
+            released = AGENT.load_holdover_session()
+            released["phase"] = "holdover"
+            released["release_at"] = time.time()
+            AGENT.save_holdover_session(released)
+            return {"active": True, "session": released}
+
+        with (
+            mock.patch.object(AGENT, "_holdover_lock_observation", return_value=self.lock_observation()),
+            mock.patch.object(AGENT, "release_holdover_session", side_effect=release),
+        ):
+            refreshed = AGENT.refresh_holdover_session(session)
+
+        self.assertEqual("holdover", refreshed["phase"])
+        self.assertNotIn("session", refreshed)
+
+
 if __name__ == "__main__":
     unittest.main()

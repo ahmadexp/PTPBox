@@ -1669,6 +1669,139 @@ class ExperimentStore:
                 rows,
             )
 
+    def phc_samples(self, identifier: str, since: float | None = None) -> list[dict[str, Any]]:
+        """Return every captured PHC comparison row for deterministic post-processing."""
+        parameters: list[Any] = [identifier]
+        predicate = ""
+        if since is not None:
+            predicate = " AND observed_at>=?"
+            parameters.append(float(since))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT observed_at, cycle_id, clock_id, offset_ns, hop_offset_ns,
+                       uncertainty_ns, temperature_c, valid
+                FROM samples
+                WHERE experiment_id=? AND source='phc-cross-timestamp'{predicate}
+                ORDER BY observed_at, clock_id
+                """,
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def phc_holdover_summary(
+        self,
+        identifier: str,
+        since: float,
+        clock_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        if not clock_ids:
+            return []
+        placeholders = ",".join("?" for _clock in clock_ids)
+        parameters: list[Any] = [identifier, float(since), *clock_ids]
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT clock_id,
+                       COUNT(*) AS samples,
+                       MIN(offset_ns) AS minimum_offset_ns,
+                       MAX(offset_ns) AS maximum_offset_ns,
+                       SUM(offset_ns) AS sum_offset_ns,
+                       SUM(offset_ns * offset_ns) AS sum_offset_squared_ns2,
+                       SUM(observed_at - ?) AS sum_time_s,
+                       SUM((observed_at - ?) * (observed_at - ?)) AS sum_time_squared_s2,
+                       SUM((observed_at - ?) * offset_ns) AS sum_time_offset_ns_s,
+                       MAX(observed_at) AS latest_at,
+                       (
+                         SELECT latest.offset_ns
+                         FROM samples latest
+                         WHERE latest.experiment_id=samples.experiment_id
+                           AND latest.clock_id=samples.clock_id
+                           AND latest.source='phc-cross-timestamp'
+                           AND latest.valid=1
+                           AND latest.observed_at>=?
+                         ORDER BY latest.observed_at DESC LIMIT 1
+                       ) AS latest_offset_ns,
+                       (
+                         SELECT latest.uncertainty_ns
+                         FROM samples latest
+                         WHERE latest.experiment_id=samples.experiment_id
+                           AND latest.clock_id=samples.clock_id
+                           AND latest.source='phc-cross-timestamp'
+                           AND latest.valid=1
+                           AND latest.observed_at>=?
+                         ORDER BY latest.observed_at DESC LIMIT 1
+                       ) AS latest_uncertainty_ns
+                FROM samples
+                WHERE experiment_id=? AND source='phc-cross-timestamp'
+                  AND valid=1 AND offset_ns IS NOT NULL AND observed_at>=?
+                  AND clock_id IN ({placeholders})
+                GROUP BY clock_id
+                ORDER BY clock_id
+                """,
+                [
+                    float(since),
+                    float(since),
+                    float(since),
+                    float(since),
+                    float(since),
+                    float(since),
+                    *parameters,
+                ],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def phc_holdover_series(
+        self,
+        identifier: str,
+        since: float,
+        clock_ids: Sequence[str],
+        max_cycles: int = 1800,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """Return uniformly decimated raw cycles while retaining the final cycle."""
+        if not clock_ids:
+            return [], 0, 1
+        with self._connect() as connection:
+            cycle_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT cycle_id)
+                    FROM samples
+                    WHERE experiment_id=? AND source='phc-cross-timestamp' AND observed_at>=?
+                    """,
+                    (identifier, float(since)),
+                ).fetchone()[0]
+            )
+            stride = max(1, (cycle_count + max(1, max_cycles) - 1) // max(1, max_cycles))
+            placeholders = ",".join("?" for _clock in clock_ids)
+            rows = connection.execute(
+                f"""
+                WITH captured_cycles AS (
+                    SELECT cycle_id,
+                           MIN(observed_at) AS cycle_time,
+                           ROW_NUMBER() OVER (ORDER BY MIN(observed_at), cycle_id) AS sequence,
+                           COUNT(*) OVER () AS total
+                    FROM samples
+                    WHERE experiment_id=? AND source='phc-cross-timestamp' AND observed_at>=?
+                    GROUP BY cycle_id
+                ),
+                picked_cycles AS (
+                    SELECT cycle_id
+                    FROM captured_cycles
+                    WHERE (sequence - 1) % ? = 0 OR sequence = total
+                )
+                SELECT samples.observed_at, samples.cycle_id, samples.clock_id,
+                       samples.offset_ns, samples.uncertainty_ns, samples.valid
+                FROM samples
+                JOIN picked_cycles USING (cycle_id)
+                WHERE samples.experiment_id=? AND samples.source='phc-cross-timestamp'
+                  AND samples.observed_at>=? AND samples.clock_id IN ({placeholders})
+                ORDER BY samples.observed_at, samples.clock_id
+                """,
+                (identifier, float(since), stride, identifier, float(since), *clock_ids),
+            ).fetchall()
+        return [dict(row) for row in rows], cycle_count, stride
+
     def event(self, category: str, severity: str, message: str, payload: dict[str, Any] | None = None) -> None:
         active = self.active()
         with self._lock, self._connect() as connection:

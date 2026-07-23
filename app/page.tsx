@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Holdover" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
@@ -55,6 +55,65 @@ type ServoNodeControl = {
 };
 
 type ServoControlState = { updated_at: number | null; nodes: Record<string, ServoNodeControl> };
+
+type HoldoverPhase = "synchronizing" | "releasing" | "holdover" | "resuming" | "completed" | "aborted" | "error";
+
+type HoldoverNodeLock = {
+  stable: boolean;
+  reason: string;
+  ptp_offset_ns: number | null;
+  phc_offset_ns: number | null;
+  servo_state: string | null;
+  observed_at: number | null;
+};
+
+type HoldoverSession = {
+  id: string;
+  phase: HoldoverPhase;
+  nodes: string[];
+  servo_types: Record<string, ServoType>;
+  started_at: number;
+  phase_changed_at: number;
+  stable_since: number | null;
+  stable_dwell_s: number;
+  stable_threshold_ns: number;
+  duration_s: number;
+  auto_release: boolean;
+  auto_resume: boolean;
+  release_at: number | null;
+  resume_at: number | null;
+  baseline: Record<string, { offset_ns: number; uncertainty_ns: number | null; samples: number; window_s: number }>;
+  lock: { all_stable: boolean; nodes: Record<string, HoldoverNodeLock>; observed_at: number; phc_mode?: string; measurement_method?: string };
+  experiment_id: string;
+  ready_to_release?: boolean;
+  error: string | null;
+};
+
+type HoldoverMetric = {
+  samples: number;
+  current_wander_ns: number | null;
+  peak_abs_wander_ns: number | null;
+  rms_wander_ns: number | null;
+  drift_ppb: number | null;
+  latest_uncertainty_ns: number | null;
+};
+
+type HoldoverPayload = {
+  active: boolean;
+  session: HoldoverSession | null;
+  stable_elapsed_s: number;
+  stable_progress: number;
+  holdover_elapsed_s: number;
+  series: Array<{ observed_at: number; elapsed_s: number; values_ns: Record<string, number>; uncertainty_ns: Record<string, number> }>;
+  metrics: Record<string, HoldoverMetric>;
+  captured_rows: number;
+  captured_cycles: number;
+  display_stride: number;
+  raw: true;
+  smoothing: "none";
+  measurement_source: string;
+  timestamp: number;
+};
 
 type PpsPinStatus = {
   index: number;
@@ -170,6 +229,7 @@ type AgentStatus = {
   running?: boolean;
   phc_sample_rate_hz?: number;
   servo_control?: ServoControlState;
+  holdover?: HoldoverPayload;
   pps?: PpsStatus;
   agent_version?: string;
   advanced_capabilities?: Record<string, boolean>;
@@ -582,6 +642,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   Metrology: { title: "Metrology workbench", description: "Quantify stability, fuse clock states, build an ensemble timescale, and preserve reproducible raw experiments." },
   "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
   Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
+  Holdover: { title: "Holdover chamber", description: "Synchronize, release clock discipline, and measure raw free-running PHC wander against the captured release baseline." },
   Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
   Analytics: { title: "Timing analytics", description: "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." },
   Experiments: { title: "Experiments", description: "Design, run, and compare repeatable servo response tests." },
@@ -2540,6 +2601,223 @@ function ResilienceWorkbench({
   );
 }
 
+function formatElapsed(seconds: number) {
+  const safe = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const remaining = safe % 60;
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+}
+
+function HoldoverWanderChart({
+  series,
+  selected,
+  nodes,
+  releaseThresholdNs,
+}: {
+  series: HoldoverPayload["series"];
+  selected: string[];
+  nodes: ClockNode[];
+  releaseThresholdNs: number;
+}) {
+  const width = 1000;
+  const height = 360;
+  const pad = { left: 82, right: 24, top: 30, bottom: 48 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const allValues = series.flatMap((point) => selected.map((id) => point.values_ns[id]).filter(Number.isFinite));
+  const timeMax = Math.max(1, ...series.map((point) => point.elapsed_s));
+  const observedMax = Math.max(25, ...allValues.map(Math.abs));
+  const yMax = observedMax * 1.12;
+  const x = (value: number) => pad.left + (Math.max(0, value) / timeMax) * plotWidth;
+  const y = (value: number) => pad.top + ((yMax - value) / (yMax * 2)) * plotHeight;
+  const thresholdVisible = releaseThresholdNs <= yMax;
+
+  if (!series.length || !allValues.length) {
+    return (
+      <div className="holdover-chart-empty">
+        <Orbit size={28} />
+        <strong>Waiting for the release edge</strong>
+        <span>The raw wander trace begins at t = 0 when clock adjustment is frozen.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="holdover-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Raw PHC wander since holdover release">
+        <rect className="holdover-chart-frame" x={pad.left} y={pad.top} width={plotWidth} height={plotHeight} rx="3" />
+        {Array.from({ length: 5 }, (_, index) => {
+          const value = yMax - (index / 4) * yMax * 2;
+          return <g key={`y-${index}`}><line className={Math.abs(value) < .001 ? "holdover-zero" : "holdover-grid"} x1={pad.left} x2={width - pad.right} y1={y(value)} y2={y(value)} /><text className="holdover-axis-label" x={pad.left - 12} y={y(value) + 3} textAnchor="end">{formatNanoseconds(value)}</text></g>;
+        })}
+        {Array.from({ length: 6 }, (_, index) => {
+          const value = (index / 5) * timeMax;
+          return <g key={`x-${index}`}><line className="holdover-grid" x1={x(value)} x2={x(value)} y1={pad.top} y2={height - pad.bottom} /><text className="holdover-axis-label" x={x(value)} y={height - 22} textAnchor={index === 0 ? "start" : index === 5 ? "end" : "middle"}>{formatElapsed(value)}</text></g>;
+        })}
+        {thresholdVisible && <g className="holdover-threshold-band"><rect x={pad.left} y={y(releaseThresholdNs)} width={plotWidth} height={y(-releaseThresholdNs) - y(releaseThresholdNs)} /><line x1={pad.left} x2={width - pad.right} y1={y(releaseThresholdNs)} y2={y(releaseThresholdNs)} /><line x1={pad.left} x2={width - pad.right} y1={y(-releaseThresholdNs)} y2={y(-releaseThresholdNs)} /></g>}
+        <line className="holdover-release-line" x1={pad.left} x2={pad.left} y1={pad.top} y2={height - pad.bottom} />
+        <text className="holdover-release-label" x={pad.left + 8} y={pad.top + 15}>DISCIPLINE RELEASED · t = 0</text>
+        {selected.map((id) => {
+          const node = nodes.find((item) => item.id === id);
+          const points = series.filter((point) => Number.isFinite(point.values_ns[id]));
+          if (!node || points.length < 2) return null;
+          const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.elapsed_s).toFixed(2)} ${y(point.values_ns[id]).toFixed(2)}`).join(" ");
+          const last = points[points.length - 1];
+          return (
+            <g key={id}>
+              <path className="holdover-trace" d={path} style={{ stroke: node.color }} />
+              {points.length <= 140 && points.map((point) => <circle key={`${id}-${point.observed_at}`} className="holdover-sample" cx={x(point.elapsed_s)} cy={y(point.values_ns[id])} r="1.45" style={{ fill: node.color }} />)}
+              <circle className="holdover-current" cx={x(last.elapsed_s)} cy={y(last.values_ns[id])} r="3.6" style={{ fill: node.color }} />
+            </g>
+          );
+        })}
+        <text className="holdover-axis-title" x={pad.left + plotWidth / 2} y={height - 5} textAnchor="middle">ELAPSED HOLDOVER TIME</text>
+        <text className="holdover-axis-title" transform={`translate(17 ${pad.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">WANDER FROM RELEASE BASELINE · ns</text>
+      </svg>
+    </div>
+  );
+}
+
+function HoldoverWorkbench({
+  payload,
+  history,
+  nodes,
+  connection,
+  cascadeRunning,
+  target,
+  setTarget,
+  stableDwellS,
+  setStableDwellS,
+  durationS,
+  setDurationS,
+  stableThresholdNs,
+  setStableThresholdNs,
+  busy,
+  control,
+  exportRun,
+}: {
+  payload: HoldoverPayload | null;
+  history: HistoryPoint[];
+  nodes: ClockNode[];
+  connection: ConnectionMode;
+  cascadeRunning: boolean;
+  target: string;
+  setTarget: (value: string) => void;
+  stableDwellS: number;
+  setStableDwellS: (value: number) => void;
+  durationS: number;
+  setDurationS: (value: number) => void;
+  stableThresholdNs: number;
+  setStableThresholdNs: (value: number) => void;
+  busy: boolean;
+  control: (action: "start" | "release" | "resume" | "abort") => void;
+  exportRun: (id: string) => void;
+}) {
+  const session = payload?.session ?? null;
+  const phase = session?.phase ?? "completed";
+  const live = connection !== "simulation" && connection !== "checking";
+  const selected = session?.nodes ?? (target === "all" ? nodes.slice(1).map((node) => node.id) : [target]);
+  const previewSeries = (() => {
+    if (payload?.series.length) return payload.series;
+    if (connection !== "simulation" || history.length < 2) return [];
+    const base = history[0];
+    const previewWindow = history.slice(-90);
+    const previewStartedAt = previewWindow[0].t;
+    return previewWindow.map((point) => ({
+      observed_at: point.t,
+      elapsed_s: point.t - previewStartedAt,
+      values_ns: Object.fromEntries(selected.map((id) => [id, (point.values[id] ?? 0) - (base.values[id] ?? 0)])),
+      uncertainty_ns: {},
+    }));
+  })();
+  const metrics = (() => {
+    if (payload?.metrics && Object.keys(payload.metrics).length) return payload.metrics;
+    return Object.fromEntries(selected.map((id) => {
+      const points = previewSeries.filter((point) => Number.isFinite(point.values_ns[id])).map((point) => [point.elapsed_s, point.values_ns[id]] as [number, number]);
+      const values = points.map((point) => point[1]);
+      return [id, {
+        samples: values.length,
+        current_wander_ns: values.at(-1) ?? null,
+        peak_abs_wander_ns: values.length ? Math.max(...values.map(Math.abs)) : null,
+        rms_wander_ns: values.length ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length) : null,
+        drift_ppb: points.length > 1 ? (points.at(-1)![1] - points[0][1]) / Math.max(1, points.at(-1)![0] - points[0][0]) : null,
+        latest_uncertainty_ns: null,
+      }];
+    })) as Record<string, HoldoverMetric>;
+  })();
+  const metricValues = Object.values(metrics);
+  const worstWander = metricValues.reduce((maximum, metric) => Math.max(maximum, Math.abs(metric.current_wander_ns ?? 0)), 0);
+  const worstDrift = metricValues.reduce((maximum, metric) => Math.max(maximum, Math.abs(metric.drift_ppb ?? 0)), 0);
+  const isActive = Boolean(session && ["synchronizing", "releasing", "holdover", "resuming", "error"].includes(session.phase));
+  const released = Boolean(session?.release_at);
+  const phaseIndex = phase === "synchronizing" ? 1 : phase === "releasing" ? 2 : phase === "holdover" || phase === "error" ? 3 : phase === "resuming" ? 4 : session?.resume_at ? 5 : 0;
+  const phaseLabel = connection === "simulation" ? "SIMULATION PREVIEW" : phase === "synchronizing" ? "QUALIFYING LOCK" : phase === "releasing" ? "OPENING LOOP" : phase === "holdover" ? "FREE RUNNING" : phase === "resuming" ? "RESTORING SYNC" : phase === "error" ? "OPERATOR ATTENTION" : phase === "aborted" ? "ABORTED / RESTORED" : session ? "RUN SEALED" : "READY";
+
+  return (
+    <div className="holdover-layout">
+      <section className="instrument-panel holdover-protocol">
+        <div className="panel-heading"><div><span className="section-kicker">CONTROLLED LOSS OF DISCIPLINE</span><h2>Synchronize → release → observe → recover</h2></div><span className={`quality-badge ${phase === "holdover" ? "holdover" : phase === "error" ? "pending" : ""}`}>{phaseLabel}</span></div>
+        <div className="holdover-phase-rail">
+          {[
+            ["01", "Discipline", "Run each selected clock on its saved servo"],
+            ["02", "Qualify", `${session?.stable_dwell_s ?? stableDwellS}s continuous s2 lock inside the release gate`],
+            ["03", "Free run", "Freeze PHC correction; keep PTP and cross timestamps alive"],
+            ["04", "Recover", "Restore the exact per-node servo selection"],
+          ].map((item, index) => <div className={`${phaseIndex > index ? "complete" : ""} ${phaseIndex === index + 1 ? "active" : ""}`} key={item[0]}><i>{phaseIndex > index + 1 ? <Check size={12} /> : item[0]}</i><span><strong>{item[1]}</strong><small>{item[2]}</small></span></div>)}
+        </div>
+        <div className="holdover-config">
+          <label><span>Clock set</span><select value={target} disabled={isActive} onChange={(event) => setTarget(event.target.value)}><option value="all">All downstream clocks · BC2…BC7</option>{nodes.slice(1).map((node) => <option key={node.id} value={node.id}>{node.label} · {node.phc}</option>)}</select></label>
+          <label><span>Stable dwell</span><select value={stableDwellS} disabled={isActive} onChange={(event) => setStableDwellS(Number(event.target.value))}><option value={10}>10 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option><option value={120}>2 minutes</option></select></label>
+          <label><span>Holdover duration</span><select value={durationS} disabled={isActive} onChange={(event) => setDurationS(Number(event.target.value))}><option value={60}>1 minute</option><option value={300}>5 minutes</option><option value={900}>15 minutes</option><option value={3600}>1 hour</option></select></label>
+          <label><span>Release gate</span><div className="input-unit"><input type="number" min="1" max="1000000" disabled={isActive} value={stableThresholdNs} onChange={(event) => setStableThresholdNs(Number(event.target.value))} /><em>ns</em></div><small>Absolute LinuxPTP master offset on every selected node.</small></label>
+        </div>
+        <div className="holdover-actions">
+          <div><Radio size={15} /><span><strong>Observation never stops</strong><small>Raw direct PHC comparisons are written to the durable experiment ledger before, during, and after release.</small></span></div>
+          {session?.phase === "synchronizing" ? <>
+            <button className="full-secondary" type="button" disabled={busy} onClick={() => control("abort")}><X size={14} /> Abort</button>
+            <button className="primary-action" type="button" disabled={busy || !session.ready_to_release} onClick={() => control("release")}><Pause size={14} /> Release now</button>
+          </> : session && ["holdover", "error"].includes(session.phase) ? <>
+            <button className="full-secondary" type="button" disabled={busy || !session.experiment_id} onClick={() => exportRun(session.experiment_id)}><Download size={14} /> Export raw</button>
+            <button className="primary-action" type="button" disabled={busy} onClick={() => control("resume")}><Play size={14} /> Resume synchronization</button>
+          </> : <>
+            {session?.experiment_id && <button className="full-secondary" type="button" disabled={busy} onClick={() => exportRun(session.experiment_id)}><Download size={14} /> Export last run</button>}
+            <button className="primary-action" type="button" disabled={busy || !live || !cascadeRunning} onClick={() => control("start")}><TimerReset size={14} /> {busy ? "Arming…" : "Arm holdover run"}</button>
+          </>}
+        </div>
+      </section>
+
+      <div className="holdover-metrics">
+        <article><span>PHASE</span><strong>{released ? formatElapsed(payload?.holdover_elapsed_s ?? 0) : `${Math.round((payload?.stable_progress ?? 0) * 100)}%`}</strong><small>{released ? "elapsed free run" : "stable dwell progress"}</small></article>
+        <article><span>WORST CURRENT WANDER</span><strong>{metricValues.length ? formatNanoseconds(worstWander) : "—"}</strong><small>absolute change from release baseline</small></article>
+        <article><span>WORST RATE ERROR</span><strong>{metricValues.length ? `${worstDrift.toFixed(3)} ppb` : "—"}</strong><small>least-squares slope · 1 ns/s = 1 ppb</small></article>
+      </div>
+
+      <section className="instrument-panel holdover-graph-panel">
+        <div className="panel-heading"><div><span className="section-kicker">RAW PHC WANDER · BASELINE ZEROED ON RELEASE</span><h2>Accumulated time error after discipline stops</h2></div><div className="holdover-capture-state"><span className={`capture-dot ${phase === "holdover" ? "recording" : ""}`} /><strong>{connection === "simulation" ? "MODELED PREVIEW" : payload?.captured_cycles ? `${payload.captured_cycles.toLocaleString()} RAW CYCLES` : "WAITING FOR RELEASE"}</strong><small>{payload && payload.display_stride > 1 ? `viewport stride ${payload.display_stride} · export retains every row` : "no smoothing · every visible point is measured"}</small></div></div>
+        <div className="holdover-legend">{selected.map((id) => { const node = nodes.find((item) => item.id === id); return node ? <span key={id}><i style={{ background: node.color }} />{id}<strong>{metrics[id]?.current_wander_ns == null ? "—" : formatNanoseconds(metrics[id].current_wander_ns!, true)}</strong></span> : null; })}</div>
+        <HoldoverWanderChart series={previewSeries} selected={selected} nodes={nodes} releaseThresholdNs={session?.stable_threshold_ns ?? stableThresholdNs} />
+        <div className="holdover-provenance"><ShieldCheck size={15} /><span><strong>Release baseline:</strong> per-node median of the final qualified PHC window. Wander = raw BC1-relative PHC offset − that baseline. Straight line segments connect samples; no filter, interpolation, or prediction is applied.</span></div>
+      </section>
+
+      <section className="instrument-panel holdover-node-panel">
+        <div className="panel-heading"><div><span className="section-kicker">CLOCK-BY-CLOCK EVIDENCE</span><h2>Release gate & free-run ledger</h2></div><span className="panel-meta">{selected.length} selected clocks</span></div>
+        <div className="holdover-node-table">
+          <div className="holdover-node-head"><span>Clock / servo</span><span>Gate state</span><span>Baseline</span><span>Current wander</span><span>Peak |wander|</span><span>Rate error</span><span>Samples</span></div>
+          {selected.map((id) => {
+            const node = nodes.find((item) => item.id === id);
+            const lock = session?.lock.nodes[id];
+            const metric = metrics[id];
+            const base = session?.baseline[id];
+            return <div className="holdover-node-row" key={id}><span><i style={{ background: node?.color }} /><strong>{id}</strong><small>{session?.servo_types[id]?.toUpperCase() ?? node?.servoType?.toUpperCase() ?? "PTP"} · {node?.phc ?? "—"}</small></span><span><em className={lock?.stable ? "state-good" : phase === "holdover" ? "state-warn" : "state-off"}>{phase === "holdover" ? "FREE RUN" : lock?.stable ? "QUALIFIED" : "WAITING"}</em><small>{lock?.reason ?? "not armed"}</small></span><span><strong>{base ? formatNanoseconds(base.offset_ns, true) : "—"}</strong><small>{base ? `${base.samples} pre-release samples` : "pending release"}</small></span><strong>{metric?.current_wander_ns == null ? "—" : formatNanoseconds(metric.current_wander_ns, true)}</strong><strong>{metric?.peak_abs_wander_ns == null ? "—" : formatNanoseconds(metric.peak_abs_wander_ns)}</strong><strong>{metric?.drift_ppb == null ? "—" : `${metric.drift_ppb >= 0 ? "+" : ""}${metric.drift_ppb.toFixed(3)} ppb`}</strong><strong>{metric?.samples?.toLocaleString() ?? "0"}</strong></div>;
+          })}
+        </div>
+        {session?.error && <div className="holdover-error"><Info size={15} /><span><strong>Transition needs attention</strong>{session.error}</span></div>}
+      </section>
+    </div>
+  );
+}
+
 function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button className={`toggle ${on ? "on" : ""}`} type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}>
@@ -2588,6 +2866,12 @@ export default function PTPBoxDashboard() {
   const [servoType, setServoType] = useState<ServoType>("pi");
   const [servoTarget, setServoTarget] = useState("BC7");
   const [servoBusy, setServoBusy] = useState(false);
+  const [holdover, setHoldover] = useState<HoldoverPayload | null>(null);
+  const [holdoverTarget, setHoldoverTarget] = useState("all");
+  const [holdoverStableDwellS, setHoldoverStableDwellS] = useState(30);
+  const [holdoverDurationS, setHoldoverDurationS] = useState(300);
+  const [holdoverStableThresholdNs, setHoldoverStableThresholdNs] = useState(1_000);
+  const [holdoverBusy, setHoldoverBusy] = useState(false);
   const [syncFrequencyHz, setSyncFrequencyHz] = useState(1);
   const [activeSyncFrequencyHz, setActiveSyncFrequencyHz] = useState(1);
   const [phcSampleRateHz, setPhcSampleRateHz] = useState(1);
@@ -3057,6 +3341,38 @@ export default function PTPBoxDashboard() {
   }, [agentConnected, paused]);
 
   useEffect(() => {
+    if (!agentConnected || paused) return;
+    let disposed = false;
+    let polling = false;
+    const controller = new AbortController();
+    const pollHoldover = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const response = await fetch(`${agentBaseUrl()}/api/holdover`, { signal: controller.signal });
+        if (!response.ok) throw new Error("holdover session unavailable");
+        const payload = await response.json() as HoldoverPayload;
+        if (!disposed) {
+          setHoldover(payload);
+          if (payload.active && payload.session?.nodes.length === 1) setHoldoverTarget(payload.session.nodes[0]);
+          else if (payload.active && payload.session?.nodes.length) setHoldoverTarget("all");
+        }
+      } catch (error) {
+        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) setHoldover((current) => current);
+      } finally {
+        polling = false;
+      }
+    };
+    void pollHoldover();
+    const timer = window.setInterval(() => void pollHoldover(), 1000);
+    return () => {
+      disposed = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [agentConnected, paused]);
+
+  useEffect(() => {
     if (paused || connection !== "simulation") return;
     const timer = window.setInterval(() => {
       tickRef.current += 1;
@@ -3204,6 +3520,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },
@@ -3211,6 +3528,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, PPS I/O, ts2phc, and safety controls", keywords: "settings tune apply pulse", section: "Configuration", icon: SlidersHorizontal },
     { id: "nav-events", group: "Navigate", label: "Event log", description: "Clock, measurement, and operator events", keywords: "logs terminal activity", section: "Event log", icon: Terminal },
     ...nodes.map((node) => ({ id: `clock-${node.id}`, group: "Clocks" as const, label: node.label, description: `${node.role} · ${node.phc} · ${node.state}`, keywords: `${node.id} ${node.role} ${node.phc} ${node.ingress} ${node.egress} offset`, section: "Overview" as Section, nodeId: node.id, icon: Clock3 })),
+    { id: "control-holdover-run", group: "Controls", label: "Run holdover analysis", description: "Synchronize selected clocks, auto-release, record wander, and recover", keywords: "clock free running drift time error capture", section: "Holdover", icon: TimerReset },
     { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg kalman adaptive imm filter nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
     { id: "control-frequency", group: "Controls", label: "Synchronization frequency", description: `${syncFrequencyHz.toFixed(1)} Hz requested · ${effectiveSyncFrequencyHz} Hz effective`, keywords: "sync rate interval hertz frequency logSyncInterval", section: "Configuration", action: "sync-frequency", icon: Radio },
     { id: "control-pps", group: "Controls", label: "PPS & ts2phc", description: `${ppsStateLabel} · ${ppsSource === "external" ? "external source" : `${ppsSource} output`} · ${ppsSinks.length} inputs`, keywords: "pps pulse per second input output extts perout ts2phc pin", section: "Configuration", action: "pps-control", icon: Zap },
@@ -3351,6 +3669,37 @@ export default function PTPBoxDashboard() {
       setToast(error instanceof Error ? error.message : "Servo control is unavailable");
     } finally {
       setServoBusy(false);
+    }
+  };
+
+  const controlHoldover = async (action: "start" | "release" | "resume" | "abort") => {
+    setHoldoverBusy(true);
+    try {
+      const selected = holdoverTarget === "all" ? nodes.slice(1).map((node) => node.id) : [holdoverTarget];
+      const response = await fetch(`${agentBaseUrl()}/api/holdover/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          nodes: selected,
+          stable_dwell_s: holdoverStableDwellS,
+          stable_threshold_ns: holdoverStableThresholdNs,
+          duration_s: holdoverDurationS,
+          auto_release: true,
+          auto_resume: true,
+        }),
+      });
+      const result = await response.json() as HoldoverPayload & { error?: string };
+      if (!response.ok) throw new Error(result.error || `holdover ${action} failed`);
+      setHoldover(result);
+      if (action === "start") setToast(`Holdover armed · qualifying ${selected.join(", ")} before automatic release`);
+      else if (action === "release") setToast("Discipline released · raw PHC wander capture is live");
+      else if (action === "resume") setToast("Synchronization restored · holdover run sealed");
+      else setToast("Holdover aborted safely · synchronization restored");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Holdover control is unavailable");
+    } finally {
+      setHoldoverBusy(false);
     }
   };
 
@@ -3525,6 +3874,7 @@ export default function PTPBoxDashboard() {
     { label: "Metrology", icon: TimerReset, badge: activeResearch.active_experiment ? "REC" : undefined },
     { label: "Path microscope", icon: Radio },
     { label: "Intelligence", icon: Gauge },
+    { label: "Holdover", icon: TimerReset, badge: holdover?.session?.phase === "holdover" ? "LIVE" : holdover?.session?.phase === "synchronizing" ? "ARM" : undefined },
     { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
@@ -3787,6 +4137,27 @@ export default function PTPBoxDashboard() {
 
           {section === "Intelligence" && (
             <IntelligenceWorkbench research={activeResearch} activeNode={activeNode} stageTune={stageTune} />
+          )}
+
+          {section === "Holdover" && (
+            <HoldoverWorkbench
+              payload={holdover}
+              history={history}
+              nodes={nodes}
+              connection={connection}
+              cascadeRunning={Boolean(agentStatus?.running)}
+              target={holdoverTarget}
+              setTarget={setHoldoverTarget}
+              stableDwellS={holdoverStableDwellS}
+              setStableDwellS={setHoldoverStableDwellS}
+              durationS={holdoverDurationS}
+              setDurationS={setHoldoverDurationS}
+              stableThresholdNs={holdoverStableThresholdNs}
+              setStableThresholdNs={setHoldoverStableThresholdNs}
+              busy={holdoverBusy}
+              control={(action) => void controlHoldover(action)}
+              exportRun={exportExperiment}
+            />
           )}
 
           {section === "Resilience" && (
