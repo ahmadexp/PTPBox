@@ -148,7 +148,7 @@ delay.
     <td width="50%"><img src="docs/screenshots/resilience-live.png" alt="Live PTPBox resilience workbench"></td>
   </tr>
   <tr>
-    <td><strong>Control intelligence</strong><br>Three-state adaptive Kalman, interacting multiple models, temperature-aware holdover, ARX identification, replay-only Gaussian-process tuning, a PI response bifurcation map, recurrence quantification, Koopman/DMD, and Bayesian online change detection.</td>
+    <td><strong>Control intelligence</strong><br>Three-state adaptive Kalman, interacting multiple models, temperature-aware holdover, ARX identification, replay-only Gaussian-process tuning, PI response bifurcation, recurrence quantification, fractal scaling, Koopman/DMD, and Bayesian online change detection.</td>
     <td><strong>Resilience lab</strong><br>Profile configuration guardrails, capability-gated DPLL/SyncE truth, LinuxPTP Authentication TLVs, and one-hop netem faults with mandatory automatic expiry.</td>
   </tr>
 </table>
@@ -177,6 +177,32 @@ divergent response regions—not proof that the physical clock cascade underwent
 a mathematical bifurcation. That stronger claim requires a controlled hardware
 gain sweep with adequate dwell and settled observations at every step.
 
+### Measure fractal scaling without inventing a chaos claim
+
+The same nonlinear workbench includes a **Fractal analysis** view with three
+complementary finite-record diagnostics:
+
+- **Grassberger–Procaccia correlation dimension \(D_2\)** reconstructs delayed
+  endpoint-phase states at embedding dimensions 2 through 5, excludes temporal
+  neighbors with a Theiler window, highlights the selected log–log scaling
+  interval, and reports whether the estimate actually converges as embedding
+  dimension increases.
+- **Higuchi graph dimension \(D_H\)** measures the roughness of endpoint phase
+  versus sample index and publishes the regression \(R^2\), sample count, and
+  maximum interval \(k\). It is deliberately labeled as trace dimension rather
+  than attractor dimension.
+- **MF-DFA** estimates generalized Hurst exponents from \(q=-4\) through \(q=4\)
+  and reports the spectrum width \(\Delta h\). Six deterministic shuffled
+  surrogates preserve the phase-value distribution while breaking temporal
+  order, helping distinguish correlation-driven width from a broad marginal
+  distribution.
+
+Higuchi starts at 32 endpoint samples, correlation dimension at 64, and MF-DFA
+at 128. Every value comes from raw captured endpoint PHC phase without
+interpolation and reports `live_changes: 0`. A non-integer dimension, high fit
+quality, or broad multifractal spectrum is **not by itself evidence of
+deterministic chaos, exact self-similarity, or a strange attractor**.
+
 ## What you can do
 
 | Surface | Purpose |
@@ -187,7 +213,7 @@ gain sweep with adequate dwell and settled observations at every step.
 | **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
 | **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
-| **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, and inspect settled response branches across an offline gain sweep. |
+| **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
 | **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |

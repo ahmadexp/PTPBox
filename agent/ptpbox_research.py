@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import math
+import random
 import sqlite3
 import statistics
 import threading
@@ -1042,6 +1043,368 @@ def replay_bifurcation_analysis(
     }
 
 
+def _linear_fit(x_values: Sequence[float], y_values: Sequence[float]) -> dict[str, float] | None:
+    if len(x_values) != len(y_values) or len(x_values) < 3:
+        return None
+    x_center = mean(x_values)
+    y_center = mean(y_values)
+    denominator = sum((value - x_center) ** 2 for value in x_values)
+    if denominator < EPSILON:
+        return None
+    slope = sum(
+        (x_value - x_center) * (y_value - y_center)
+        for x_value, y_value in zip(x_values, y_values)
+    ) / denominator
+    intercept = y_center - slope * x_center
+    residual = sum(
+        (y_value - (intercept + slope * x_value)) ** 2
+        for x_value, y_value in zip(x_values, y_values)
+    )
+    total = sum((value - y_center) ** 2 for value in y_values)
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r_squared": 1.0 - residual / max(EPSILON, total),
+    }
+
+
+def higuchi_fractal_dimension(values: Sequence[float], k_max: int | None = None) -> dict[str, Any]:
+    """Estimate the graph dimension of a scalar record with Higuchi's method."""
+    samples = [float(value) for value in values if math.isfinite(value)][-1024:]
+    if len(samples) < 32:
+        return {"status": "learning", "samples": len(samples), "points": []}
+    maximum = max(4, min(k_max or 48, len(samples) // 4))
+    points: list[dict[str, float]] = []
+    for interval in range(1, maximum + 1):
+        curve_lengths = []
+        for start in range(interval):
+            steps = (len(samples) - 1 - start) // interval
+            if steps < 2:
+                continue
+            path_length = sum(
+                abs(samples[start + step * interval] - samples[start + (step - 1) * interval])
+                for step in range(1, steps + 1)
+            )
+            normalized = path_length * (len(samples) - 1) / (steps * interval * interval)
+            if normalized > EPSILON:
+                curve_lengths.append(normalized)
+        if curve_lengths:
+            length = mean(curve_lengths)
+            points.append(
+                {
+                    "k": float(interval),
+                    "length": length,
+                    "log_inverse_k": math.log(1.0 / interval),
+                    "log_length": math.log(length),
+                }
+            )
+    fit = _linear_fit(
+        [point["log_inverse_k"] for point in points],
+        [point["log_length"] for point in points],
+    )
+    if not fit:
+        return {"status": "unavailable", "samples": len(samples), "points": points}
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "dimension": fit["slope"],
+        "r_squared": fit["r_squared"],
+        "k_max": maximum,
+        "points": points,
+        "fit": fit,
+        "interpretation": "graph roughness of endpoint phase versus sample index",
+    }
+
+
+def _correlation_fit(points: Sequence[dict[str, float]], embedding_dimension: int) -> dict[str, Any] | None:
+    valid = [
+        (index, point)
+        for index, point in enumerate(points)
+        if 0.015 <= point["correlation_sum"] <= 0.8
+    ]
+    if len(valid) < 5:
+        return None
+    best: dict[str, Any] | None = None
+    for start in range(len(valid)):
+        for stop in range(start + 5, min(len(valid), start + 11) + 1):
+            selected = valid[start:stop]
+            if any(right[0] != left[0] + 1 for left, right in zip(selected, selected[1:])):
+                continue
+            x_values = [item[1]["log_radius"] for item in selected]
+            y_values = [item[1]["log_correlation"] for item in selected]
+            fit = _linear_fit(x_values, y_values)
+            if not fit or not 0.05 < fit["slope"] <= embedding_dimension + 0.75:
+                continue
+            log_span = x_values[-1] - x_values[0]
+            score = fit["r_squared"] + min(0.08, max(0.0, log_span) * 0.025) + len(selected) * 0.002
+            candidate = {
+                **fit,
+                "score": score,
+                "start_index": selected[0][0],
+                "end_index": selected[-1][0],
+                "radius_min": selected[0][1]["radius"],
+                "radius_max": selected[-1][1]["radius"],
+                "point_count": len(selected),
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+    return best
+
+
+def correlation_dimension(values: Sequence[float]) -> dict[str, Any]:
+    """Grassberger–Procaccia D2 estimate with delay embedding and a Theiler window."""
+    samples = [float(value) for value in values if math.isfinite(value)][-1024:]
+    if len(samples) < 64:
+        return {"status": "learning", "samples": len(samples), "embeddings": [], "points": []}
+    center = mean(samples)
+    scale = max(EPSILON, math.sqrt(variance(samples)))
+    normalized = [(value - center) / scale for value in samples]
+    maximum_delay = max(2, min(32, len(normalized) // 12))
+    autocorrelations = []
+    for lag in range(1, maximum_delay + 1):
+        left = normalized[:-lag]
+        right = normalized[lag:]
+        autocorrelations.append(
+            sum(a * b for a, b in zip(left, right)) / max(EPSILON, len(left))
+        )
+    delay = next(
+        (lag for lag, value in enumerate(autocorrelations, 1) if value <= math.exp(-1.0)),
+        min(range(1, len(autocorrelations) + 1), key=lambda lag: abs(autocorrelations[lag - 1])),
+    )
+    embeddings: list[dict[str, Any]] = []
+    selected_points: list[dict[str, float]] = []
+    for dimension in range(2, 6):
+        vectors = [
+            [normalized[index - coordinate * delay] for coordinate in range(dimension)]
+            for index in range((dimension - 1) * delay, len(normalized))
+        ][-320:]
+        theiler = max(1, 2 * delay)
+        distances = [
+            math.sqrt(sum((left - right) ** 2 for left, right in zip(vectors[row], vectors[column])))
+            for row in range(len(vectors))
+            for column in range(row)
+            if row - column > theiler
+        ]
+        if len(distances) < 80:
+            embeddings.append({"dimension": dimension, "status": "learning", "pairs": len(distances)})
+            continue
+        lower = max(EPSILON, percentile(distances, 0.02))
+        upper = max(lower * 1.01, percentile(distances, 0.72))
+        radii = [
+            math.exp(math.log(lower) + index * (math.log(upper) - math.log(lower)) / 19)
+            for index in range(20)
+        ]
+        points = []
+        for radius in radii:
+            correlation_sum = sum(distance <= radius for distance in distances) / len(distances)
+            if correlation_sum > 0.0:
+                points.append(
+                    {
+                        "radius": radius,
+                        "correlation_sum": correlation_sum,
+                        "log_radius": math.log(radius),
+                        "log_correlation": math.log(correlation_sum),
+                    }
+                )
+        fit = _correlation_fit(points, dimension)
+        if fit:
+            embeddings.append(
+                {
+                    "dimension": dimension,
+                    "status": "ready",
+                    "estimate": fit["slope"],
+                    "r_squared": fit["r_squared"],
+                    "pairs": len(distances),
+                    "scaling_radius_min": fit["radius_min"],
+                    "scaling_radius_max": fit["radius_max"],
+                }
+            )
+            selected_points = points
+            selected_fit = fit
+            selected_dimension = dimension
+        else:
+            embeddings.append({"dimension": dimension, "status": "unavailable", "pairs": len(distances)})
+    ready = [item for item in embeddings if item["status"] == "ready"]
+    if not ready:
+        return {
+            "status": "unavailable",
+            "samples": len(samples),
+            "delay_samples": delay,
+            "embeddings": embeddings,
+            "points": [],
+        }
+    latest = ready[-1]
+    convergence_tail = ready[-3:]
+    converged = (
+        len(convergence_tail) == 3
+        and max(item["estimate"] for item in convergence_tail)
+        - min(item["estimate"] for item in convergence_tail)
+        <= max(0.12, 0.10 * abs(ready[-1]["estimate"]))
+    )
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "dimension": latest["estimate"],
+        "r_squared": latest["r_squared"],
+        "embedding_dimension": selected_dimension,
+        "delay_samples": delay,
+        "theiler_window_samples": 2 * delay,
+        "converged": converged,
+        "embeddings": embeddings,
+        "points": selected_points,
+        "fit": selected_fit,
+        "interpretation": "correlation-sum slope in a selected finite-data scaling window",
+    }
+
+
+def _multifractal_core(samples: Sequence[float], q_values: Sequence[float]) -> dict[str, Any] | None:
+    center = mean(samples)
+    profile = []
+    cumulative = 0.0
+    for value in samples:
+        cumulative += value - center
+        profile.append(cumulative)
+    minimum_scale = 8
+    maximum_scale = len(samples) // 4
+    if maximum_scale < minimum_scale * 2:
+        return None
+    scales = sorted(
+        {
+            max(
+                minimum_scale,
+                round(
+                    math.exp(
+                        math.log(minimum_scale)
+                        + index * (math.log(maximum_scale) - math.log(minimum_scale)) / 9
+                    )
+                ),
+            )
+            for index in range(10)
+        }
+    )
+    fluctuations: dict[float, list[dict[str, float]]] = {float(q): [] for q in q_values}
+    for scale in scales:
+        segment_variances = []
+        segment_count = len(profile) // scale
+        for reverse in (False, True):
+            source = list(reversed(profile)) if reverse else profile
+            for segment_index in range(segment_count):
+                segment = source[segment_index * scale:(segment_index + 1) * scale]
+                x_values = list(range(scale))
+                fit = _linear_fit(x_values, segment)
+                if not fit:
+                    continue
+                residual_variance = mean(
+                    [
+                        (value - (fit["intercept"] + fit["slope"] * index)) ** 2
+                        for index, value in enumerate(segment)
+                    ]
+                )
+                if residual_variance > EPSILON:
+                    segment_variances.append(residual_variance)
+        if len(segment_variances) < 4:
+            continue
+        for q_value in q_values:
+            if abs(q_value) < EPSILON:
+                fluctuation = math.exp(0.5 * mean([math.log(value) for value in segment_variances]))
+            else:
+                fluctuation = mean(
+                    [value ** (q_value / 2.0) for value in segment_variances]
+                ) ** (1.0 / q_value)
+            fluctuations[float(q_value)].append(
+                {"scale": float(scale), "fluctuation": fluctuation}
+            )
+    exponents = []
+    for q_value in q_values:
+        points = fluctuations[float(q_value)]
+        fit = _linear_fit(
+            [math.log(point["scale"]) for point in points],
+            [math.log(point["fluctuation"]) for point in points],
+        )
+        if fit:
+            exponents.append(
+                {
+                    "q": float(q_value),
+                    "h": fit["slope"],
+                    "r_squared": fit["r_squared"],
+                    "points": points,
+                }
+            )
+    if len(exponents) != len(q_values):
+        return None
+    return {
+        "exponents": exponents,
+        "width": max(item["h"] for item in exponents) - min(item["h"] for item in exponents),
+        "scales": scales,
+    }
+
+
+def multifractal_dfa(values: Sequence[float]) -> dict[str, Any]:
+    samples = [float(value) for value in values if math.isfinite(value)][-1024:]
+    if len(samples) < 128:
+        return {"status": "learning", "samples": len(samples), "exponents": []}
+    q_values = [-4.0, -2.0, 0.0, 2.0, 4.0]
+    observed = _multifractal_core(samples, q_values)
+    if not observed:
+        return {"status": "unavailable", "samples": len(samples), "exponents": []}
+    surrogate_widths = []
+    for seed in range(6):
+        surrogate = list(samples)
+        random.Random(19_883 + seed).shuffle(surrogate)
+        estimate = _multifractal_core(surrogate, q_values)
+        if estimate:
+            surrogate_widths.append(float(estimate["width"]))
+    surrogate_width = mean(surrogate_widths) if surrogate_widths else None
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "q_min": q_values[0],
+        "q_max": q_values[-1],
+        "spectrum_width": observed["width"],
+        "surrogate_width": surrogate_width,
+        "correlation_excess_width": (
+            observed["width"] - surrogate_width
+            if surrogate_width is not None
+            else None
+        ),
+        "surrogate_count": len(surrogate_widths),
+        "exponents": observed["exponents"],
+        "scales": observed["scales"],
+        "interpretation": "generalized Hurst spread with deterministic shuffled surrogates",
+    }
+
+
+def fractal_analysis(values: Sequence[float]) -> dict[str, Any]:
+    """Return complementary finite-record scaling estimates for endpoint phase."""
+    higuchi = higuchi_fractal_dimension(values)
+    correlation = correlation_dimension(values)
+    multifractal = multifractal_dfa(values)
+    component_statuses = [higuchi["status"], correlation["status"], multifractal["status"]]
+    status = (
+        "ready"
+        if all(value == "ready" for value in component_statuses)
+        else "partial"
+        if any(value == "ready" for value in component_statuses)
+        else "learning"
+        if "learning" in component_statuses
+        else "unavailable"
+    )
+    return {
+        "status": status,
+        "samples": min(1024, len([value for value in values if math.isfinite(float(value))])),
+        "higuchi": higuchi,
+        "correlation": correlation,
+        "multifractal": multifractal,
+        "method": "Higuchi graph dimension + Grassberger–Procaccia D2 + MF-DFA",
+        "provenance": "captured endpoint PHC phase; no interpolation and no clock writes",
+        "interpretation": (
+            "Finite-record scaling diagnostics. A high-quality fit or non-integer "
+            "dimension is not, by itself, evidence of deterministic chaos or a strange attractor."
+        ),
+        "live_changes": 0,
+    }
+
+
 def koopman_dmd(channels: Sequence[Sequence[float]]) -> dict[str, Any]:
     if not channels:
         return {"status": "waiting"}
@@ -1411,6 +1774,7 @@ class RollingResearchEngine:
             ki,
             active_controller=active_controller,
         )
+        fractal = fractal_analysis(endpoint_series)
         koopman = koopman_dmd(hop_channels)
         ensemble_ids = [node for node in node_ids[1:] if series.get(node)]
         ensemble_channels = [series[node] for node in ensemble_ids]
@@ -1502,6 +1866,7 @@ class RollingResearchEngine:
             "change_detection": changes,
             "recurrence": recurrence,
             "bifurcation": bifurcation,
+            "fractal": fractal,
             "koopman": koopman,
             "system_identification": system_id,
             "auto_tune": auto_tune,

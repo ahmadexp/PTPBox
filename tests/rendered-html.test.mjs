@@ -88,6 +88,11 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /true physical bifurcation claim requires a controlled hardware sweep/i);
   assert.match(page, /PI baseline is not live/i);
   assert.match(page, /NO LIVE CHANGES/);
+  assert.match(page, /Fractal analysis/);
+  assert.match(page, /CORRELATION DIMENSION/);
+  assert.match(page, /HIGUCHI GRAPH DIMENSION/);
+  assert.match(page, /MULTIFRACTAL SCALING/);
+  assert.match(page, /None alone proves chaos, self-similarity, or a strange attractor/i);
   assert.match(page, /IEEE 802\.1AS gPTP/);
   assert.match(page, /PTP message authentication/);
   assert.match(page, /Inject bounded fault/);

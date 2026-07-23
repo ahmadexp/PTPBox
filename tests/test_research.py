@@ -1,5 +1,6 @@
 import importlib.util
 import math
+import random
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,34 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual("learning", result["status"])
         self.assertEqual([], result["points"])
+        self.assertEqual(0, result["live_changes"])
+
+    def test_fractal_analysis_separates_trace_roughness_and_attractor_estimates(self) -> None:
+        smooth = [math.sin(index * 0.11) + 0.03 * math.sin(index * 0.017) for index in range(512)]
+        generator = random.Random(41)
+        noise = [generator.gauss(0.0, 1.0) for _ in range(512)]
+        smooth_result = RESEARCH.fractal_analysis(smooth)
+        noise_result = RESEARCH.fractal_analysis(noise)
+
+        self.assertEqual("ready", smooth_result["status"])
+        self.assertEqual(0, smooth_result["live_changes"])
+        self.assertGreater(
+            noise_result["higuchi"]["dimension"],
+            smooth_result["higuchi"]["dimension"],
+        )
+        self.assertTrue(smooth_result["correlation"]["converged"])
+        self.assertFalse(noise_result["correlation"]["converged"])
+        self.assertGreaterEqual(len(smooth_result["correlation"]["embeddings"]), 4)
+        self.assertEqual(6, smooth_result["multifractal"]["surrogate_count"])
+        self.assertIn("not, by itself", smooth_result["interpretation"])
+
+    def test_fractal_analysis_reports_partial_learning_thresholds(self) -> None:
+        result = RESEARCH.fractal_analysis([math.sin(index) for index in range(40)])
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual("ready", result["higuchi"]["status"])
+        self.assertEqual("learning", result["correlation"]["status"])
+        self.assertEqual("learning", result["multifractal"]["status"])
         self.assertEqual(0, result["live_changes"])
 
     def test_temperature_model_predicts_frequency_sensitivity(self) -> None:

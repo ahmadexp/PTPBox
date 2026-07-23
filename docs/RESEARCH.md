@@ -244,6 +244,75 @@ and settled measurements. The distinction follows the standard definition in
 recurrence plot remains beside the sweep because recurrence can reveal
 transitions while still not proving a deterministic attractor.
 
+### Fractal scaling diagnostics
+
+PTPBox reports three different estimators because “fractal dimension” is not one
+interchangeable scalar.
+
+#### Grassberger–Procaccia correlation dimension
+
+The endpoint phase is standardized and reconstructed with delay coordinates at
+embedding dimensions \(m=2,3,4,5\). The delay is the first autocorrelation
+crossing below \(1/e\), or the smallest available absolute autocorrelation when
+no crossing exists. Temporally adjacent vector pairs are excluded with a
+Theiler window of twice that delay.
+
+For each embedding, the correlation sum is evaluated over 20 logarithmically
+spaced radii:
+
+\[
+C_m(r)=\frac{1}{N_\mathrm{pairs}}\sum_{i<j}
+\mathbf{1}\left(\lVert x_i-x_j\rVert\leq r\right)
+\]
+
+PTPBox searches contiguous finite-data scaling intervals with
+\(0.015\leq C_m(r)\leq0.8\), at least five radii, a physically admissible
+positive slope, and high linear-fit quality. The local slope
+
+\[
+D_2 \approx \frac{d\log C_m(r)}{d\log r}
+\]
+
+is reported with \(R^2\), the selected radius range, usable pair count, delay,
+Theiler window, and all four embedding estimates. `converged` is true only when
+the last three estimates stabilize within the explicit tolerance. This follows
+the correlation-dimension method introduced by
+[Grassberger and Procaccia](https://doi.org/10.1103/PhysRevLett.50.346).
+
+#### Higuchi graph dimension
+
+Higuchi curve lengths are calculated for integer intervals from \(k=1\) through
+\(\min(48,N/4)\). A linear fit of \(\log L(k)\) against \(\log(1/k)\) yields
+the endpoint trace dimension \(D_H\), along with \(R^2\), every plotted length,
+and the fitted range. This is the roughness dimension of the sampled
+phase-versus-index graph—not the dimension of a reconstructed attractor. The
+implementation follows [Higuchi's original method](https://www.ism.ac.jp/~higuchi/index_e/papers/PhysicaD-1988.pdf).
+
+#### Multifractal detrended fluctuation analysis
+
+MF-DFA integrates centered endpoint phase, divides it into forward and backward
+segments at ten logarithmically spaced scales, removes a linear trend per
+segment, and evaluates \(q=-4,-2,0,2,4\):
+
+\[
+F_q(s)\sim s^{h(q)}
+\]
+
+The reported width is
+\(\Delta h=\max h(q)-\min h(q)\). PTPBox repeats the analysis on six
+deterministically shuffled surrogates, which preserve the value distribution
+but destroy temporal ordering. The result includes observed width, mean
+surrogate width, their signed difference, every \(h(q)\), scale points, and fit
+quality. This follows
+[Kantelhardt et al.](https://doi.org/10.1016/S0378-4371(02)01383-3).
+
+Minimum records are 32 samples for Higuchi, 64 for correlation dimension, and
+128 for MF-DFA. All three use at most the newest 1024 raw endpoint samples,
+perform no interpolation, and never write a clock. Finite records, noise,
+periodic forcing, nonstationarity, scaling-window choice, and estimator bias can
+all produce non-integer values. The Observatory therefore never equates these
+estimates with proof of chaos, exact self-similarity, or a strange attractor.
+
 ### Koopman / dynamic mode decomposition
 
 For centered snapshots \(X\) and their one-step successors \(X'\), the engine

@@ -346,6 +346,73 @@ type ResearchPayload = {
     live_changes?: number;
     reason?: string;
   };
+  fractal: {
+    status: string;
+    samples?: number;
+    higuchi: {
+      status: string;
+      samples?: number;
+      dimension?: number;
+      r_squared?: number;
+      k_max?: number;
+      points?: Array<{ k: number; length: number; log_inverse_k: number; log_length: number }>;
+      fit?: { slope: number; intercept: number; r_squared: number };
+      interpretation?: string;
+    };
+    correlation: {
+      status: string;
+      samples?: number;
+      dimension?: number;
+      r_squared?: number;
+      embedding_dimension?: number;
+      delay_samples?: number;
+      theiler_window_samples?: number;
+      converged?: boolean;
+      embeddings?: Array<{
+        dimension: number;
+        status: string;
+        estimate?: number;
+        r_squared?: number;
+        pairs?: number;
+        scaling_radius_min?: number;
+        scaling_radius_max?: number;
+      }>;
+      points?: Array<{ radius: number; correlation_sum: number; log_radius: number; log_correlation: number }>;
+      fit?: {
+        slope: number;
+        intercept: number;
+        r_squared: number;
+        start_index: number;
+        end_index: number;
+        radius_min: number;
+        radius_max: number;
+        point_count: number;
+      };
+      interpretation?: string;
+    };
+    multifractal: {
+      status: string;
+      samples?: number;
+      q_min?: number;
+      q_max?: number;
+      spectrum_width?: number;
+      surrogate_width?: number | null;
+      correlation_excess_width?: number | null;
+      surrogate_count?: number;
+      exponents?: Array<{
+        q: number;
+        h: number;
+        r_squared: number;
+        points: Array<{ scale: number; fluctuation: number }>;
+      }>;
+      scales?: number[];
+      interpretation?: string;
+    };
+    method?: string;
+    provenance?: string;
+    interpretation?: string;
+    live_changes?: number;
+  };
   koopman: {
     status: string;
     singular_values?: number[];
@@ -849,6 +916,22 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
   const bifurcationCurrent = bifurcationSummaries.reduce((closest, item) => Math.abs(item.gain_scale - 1) < Math.abs(closest.gain_scale - 1) ? item : closest, bifurcationSummaries[0]);
   const bifurcationVisibleValues = bifurcationPoints.filter((point) => !point.clipped).map((point) => Math.abs(point.residual_ns));
   const bifurcationDisplayLimit = Math.min(bifurcationHardLimit, Math.max(25, bifurcationEnvelope * 1.25, percentile(bifurcationVisibleValues, .99) * 1.08));
+  const modeledCorrelationPoints = Array.from({ length: 20 }, (_, index) => {
+    const radius = .08 * (1.18 ** index);
+    const correlationSum = Math.min(.78, .42 * (radius ** 1.37));
+    return { radius, correlation_sum: correlationSum, log_radius: Math.log(radius), log_correlation: Math.log(correlationSum) };
+  });
+  const modeledHiguchiPoints = Array.from({ length: 32 }, (_, index) => {
+    const k = index + 1;
+    const length = 18 * ((1 / k) ** 1.28) * (1 + .015 * Math.sin(index * .8));
+    return { k, length, log_inverse_k: Math.log(1 / k), log_length: Math.log(length) };
+  });
+  const modeledMultifractalExponents = [-4, -2, 0, 2, 4].map((q) => ({
+    q,
+    h: .82 - q * .018,
+    r_squared: .97,
+    points: [8, 12, 18, 27, 40, 60].map((scale) => ({ scale, fluctuation: (scale ** (.82 - q * .018)) * 2.4 })),
+  }));
   const variances = nodes.slice(1).map((node) => Math.max(1, node.rms ** 2));
   const rawWeights = variances.map((value) => 1 / value);
   const weightTotal = rawWeights.reduce((sum, value) => sum + value, 0);
@@ -913,6 +996,51 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
       method: "settled extrema from bounded offline PI replay",
       provenance: "modeled endpoint phase; centered and replayed without writing a clock",
       interpretation: "A response-branch screening map. A true hardware bifurcation requires a controlled gain sweep with settled observations at every step.",
+      live_changes: 0,
+    },
+    fractal: {
+      status: endpointValues.length >= 128 ? "ready" : endpointValues.length >= 32 ? "partial" : "learning",
+      samples: endpointValues.length,
+      higuchi: {
+        status: endpointValues.length >= 32 ? "ready" : "learning",
+        samples: endpointValues.length,
+        dimension: 1.28,
+        r_squared: .986,
+        k_max: 32,
+        points: modeledHiguchiPoints,
+        fit: { slope: 1.28, intercept: Math.log(18), r_squared: .986 },
+        interpretation: "graph roughness of modeled endpoint phase versus sample index",
+      },
+      correlation: {
+        status: endpointValues.length >= 64 ? "ready" : "learning",
+        samples: endpointValues.length,
+        dimension: 1.37,
+        r_squared: .974,
+        embedding_dimension: 5,
+        delay_samples: 3,
+        theiler_window_samples: 6,
+        converged: true,
+        embeddings: [2, 3, 4, 5].map((dimension, index) => ({ dimension, status: "ready", estimate: 1.19 + index * .06, r_squared: .96 + index * .004, pairs: 4096 })),
+        points: modeledCorrelationPoints,
+        fit: { slope: 1.37, intercept: Math.log(.42), r_squared: .974, start_index: 3, end_index: 14, radius_min: modeledCorrelationPoints[3].radius, radius_max: modeledCorrelationPoints[14].radius, point_count: 12 },
+        interpretation: "correlation-sum slope in a selected modeled scaling window",
+      },
+      multifractal: {
+        status: endpointValues.length >= 128 ? "ready" : "learning",
+        samples: endpointValues.length,
+        q_min: -4,
+        q_max: 4,
+        spectrum_width: .144,
+        surrogate_width: .061,
+        correlation_excess_width: .083,
+        surrogate_count: 6,
+        exponents: modeledMultifractalExponents,
+        scales: [8, 12, 18, 27, 40, 60],
+        interpretation: "generalized Hurst spread with deterministic shuffled surrogates",
+      },
+      method: "Higuchi graph dimension + Grassberger–Procaccia D2 + MF-DFA",
+      provenance: "modeled endpoint phase; no interpolation and no clock writes",
+      interpretation: "Finite-record scaling diagnostics. A non-integer dimension is not, by itself, evidence of deterministic chaos or a strange attractor.",
       live_changes: 0,
     },
     koopman: { status: "ready", singular_values: [1.014, .982, .941, .72, .38, .17], spectral_norm: 1.014, residual_sigma_ns: 2.84, interpretation: "amplifying" },
@@ -2005,6 +2133,84 @@ function BifurcationDiagram({ analysis }: { analysis: ResearchPayload["bifurcati
   );
 }
 
+function FractalDiagnostics({ analysis }: { analysis: ResearchPayload["fractal"] }) {
+  const correlationPoints = analysis.correlation.points ?? [];
+  const higuchiPoints = analysis.higuchi.points ?? [];
+  const multifractalPoints = analysis.multifractal.exponents ?? [];
+  if (!correlationPoints.length && !higuchiPoints.length && !multifractalPoints.length) {
+    return <div className="bifurcation-empty"><Orbit size={20} /><span>Collecting endpoint phase samples for fractal scaling ({analysis.samples ?? 0}/64; MF-DFA begins at 128)</span></div>;
+  }
+  const width = 620;
+  const height = 270;
+  const facetWidth = width / 3;
+  const plotTop = 48;
+  const plotBottom = 226;
+  const localLeft = 36;
+  const localRight = 12;
+  const extent = (values: number[]) => {
+    if (!values.length) return [0, 1] as const;
+    const minimum = Math.min(...values);
+    const maximum = Math.max(...values);
+    const padding = Math.max(.01, (maximum - minimum) * .08);
+    return [minimum - padding, maximum + padding] as const;
+  };
+  const correlationX = extent(correlationPoints.map((point) => point.log_radius));
+  const correlationY = extent(correlationPoints.map((point) => point.log_correlation));
+  const higuchiX = extent(higuchiPoints.map((point) => point.log_inverse_k));
+  const higuchiY = extent(higuchiPoints.map((point) => point.log_length));
+  const multifractalX = extent(multifractalPoints.map((point) => point.q));
+  const multifractalY = extent(multifractalPoints.map((point) => point.h));
+  const mapX = (facet: number, value: number, range: readonly [number, number]) => facet * facetWidth + localLeft + (value - range[0]) / Math.max(.001, range[1] - range[0]) * (facetWidth - localLeft - localRight);
+  const mapY = (value: number, range: readonly [number, number]) => plotTop + (range[1] - value) / Math.max(.001, range[1] - range[0]) * (plotBottom - plotTop);
+  const path = (facet: number, points: Array<[number, number]>, xRange: readonly [number, number], yRange: readonly [number, number]) => points.map(([xValue, yValue], index) => `${index ? "L" : "M"} ${mapX(facet, xValue, xRange).toFixed(2)} ${mapY(yValue, yRange).toFixed(2)}`).join(" ");
+  const correlationFit = analysis.correlation.fit;
+  const scalingPoints = correlationFit ? correlationPoints.slice(correlationFit.start_index, correlationFit.end_index + 1) : [];
+  const higuchiFit = analysis.higuchi.fit;
+  const correlationValue = analysis.correlation.dimension;
+  const higuchiValue = analysis.higuchi.dimension;
+  const multifractalValue = analysis.multifractal.spectrum_width;
+  return (
+    <div className="fractal-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="fractal-title fractal-description">
+        <title id="fractal-title">Endpoint PHC fractal scaling diagnostics</title>
+        <desc id="fractal-description">Three finite-record diagnostics: Grassberger–Procaccia correlation sum and scaling window, Higuchi curve-length scaling, and generalized Hurst exponents from multifractal detrended fluctuation analysis.</desc>
+        {[0, 1, 2].map((facet) => <rect key={facet} className="fractal-frame" x={facet * facetWidth + localLeft} y={plotTop} width={facetWidth - localLeft - localRight} height={plotBottom - plotTop} />)}
+        {[1, 2].map((facet) => <line key={facet} className="fractal-separator" x1={facet * facetWidth} x2={facet * facetWidth} y1="8" y2={height - 8} />)}
+        <text className="fractal-title" x="9" y="17">CORRELATION DIMENSION</text>
+        <text className="fractal-value" x="9" y="34">{correlationValue == null ? "D₂ learning" : `D₂ ${correlationValue.toFixed(3)}`}</text>
+        <text className="fractal-title" x={facetWidth + 9} y="17">HIGUCHI GRAPH DIMENSION</text>
+        <text className="fractal-value" x={facetWidth + 9} y="34">{higuchiValue == null ? "Dᴴ learning" : `Dᴴ ${higuchiValue.toFixed(3)}`}</text>
+        <text className="fractal-title" x={facetWidth * 2 + 9} y="17">MULTIFRACTAL SCALING</text>
+        <text className="fractal-value" x={facetWidth * 2 + 9} y="34">{multifractalValue == null ? "Δh learning" : `Δh ${multifractalValue.toFixed(3)}`}</text>
+
+        {correlationPoints.length ? <>
+          <path className="fractal-trace correlation" d={path(0, correlationPoints.map((point) => [point.log_radius, point.log_correlation]), correlationX, correlationY)} />
+          {scalingPoints.length > 1 && <path className="fractal-scaling-fit" d={path(0, scalingPoints.map((point) => [point.log_radius, point.log_correlation]), correlationX, correlationY)} />}
+          {correlationPoints.map((point, index) => <circle className={correlationFit && index >= correlationFit.start_index && index <= correlationFit.end_index ? "fractal-point fit" : "fractal-point"} key={index} cx={mapX(0, point.log_radius, correlationX)} cy={mapY(point.log_correlation, correlationY)} r="1.8" />)}
+          <text className="fractal-tick" x={mapX(0, correlationX[0], correlationX)} y={plotBottom + 14} textAnchor="start">{correlationX[0].toFixed(1)}</text>
+          <text className="fractal-tick" x={mapX(0, correlationX[1], correlationX)} y={plotBottom + 14} textAnchor="end">{correlationX[1].toFixed(1)}</text>
+          <text className="fractal-axis-title" x={facetWidth / 2 + 10} y={height - 8} textAnchor="middle">log radius · highlighted scaling window</text>
+        </> : <text className="fractal-empty" x={facetWidth / 2} y={(plotTop + plotBottom) / 2} textAnchor="middle">64 samples required</text>}
+
+        {higuchiPoints.length ? <>
+          <path className="fractal-trace higuchi" d={path(1, higuchiPoints.map((point) => [point.log_inverse_k, point.log_length]), higuchiX, higuchiY)} />
+          {higuchiFit && <line className="fractal-fit-line" x1={mapX(1, higuchiX[0], higuchiX)} y1={mapY(higuchiFit.intercept + higuchiFit.slope * higuchiX[0], higuchiY)} x2={mapX(1, higuchiX[1], higuchiX)} y2={mapY(higuchiFit.intercept + higuchiFit.slope * higuchiX[1], higuchiY)} />}
+          {higuchiPoints.map((point, index) => <circle className="fractal-point higuchi" key={index} cx={mapX(1, point.log_inverse_k, higuchiX)} cy={mapY(point.log_length, higuchiY)} r="1.7" />)}
+          <text className="fractal-tick" x={mapX(1, higuchiX[0], higuchiX)} y={plotBottom + 14} textAnchor="start">{higuchiX[0].toFixed(1)}</text>
+          <text className="fractal-tick" x={mapX(1, higuchiX[1], higuchiX)} y={plotBottom + 14} textAnchor="end">{higuchiX[1].toFixed(1)}</text>
+          <text className="fractal-axis-title" x={facetWidth * 1.5 + 10} y={height - 8} textAnchor="middle">log 1/k · curve-length regression</text>
+        </> : <text className="fractal-empty" x={facetWidth * 1.5} y={(plotTop + plotBottom) / 2} textAnchor="middle">32 samples required</text>}
+
+        {multifractalPoints.length ? <>
+          <path className="fractal-trace multifractal" d={path(2, multifractalPoints.map((point) => [point.q, point.h]), multifractalX, multifractalY)} />
+          {multifractalPoints.map((point) => <g key={point.q}><rect className="fractal-point multifractal" x={mapX(2, point.q, multifractalX) - 2.3} y={mapY(point.h, multifractalY) - 2.3} width="4.6" height="4.6" transform={`rotate(45 ${mapX(2, point.q, multifractalX)} ${mapY(point.h, multifractalY)})`} /><text className="fractal-q-label" x={mapX(2, point.q, multifractalX)} y={plotBottom + 14} textAnchor="middle">{point.q.toFixed(0)}</text></g>)}
+          <text className="fractal-axis-title" x={facetWidth * 2.5 + 10} y={height - 8} textAnchor="middle">moment q · generalized Hurst h(q)</text>
+        </> : <text className="fractal-empty" x={facetWidth * 2.5} y={(plotTop + plotBottom) / 2} textAnchor="middle">128 samples required</text>}
+      </svg>
+    </div>
+  );
+}
+
 function MetrologyWorkbench({
   research,
   nodes,
@@ -2164,9 +2370,23 @@ function IntelligenceWorkbench({
   const probabilities = activeNode.servoType === "imm" ? activeNode.kalman?.model_probabilities : undefined;
   const temperature = research.temperature_holdover[activeNode.id];
   const changeProbability = research.change_detection.latest_probability ?? 0;
-  const [nonlinearView, setNonlinearView] = useState<"bifurcation" | "recurrence">("bifurcation");
+  const [nonlinearView, setNonlinearView] = useState<"bifurcation" | "recurrence" | "fractal">("bifurcation");
   const bifurcation = research.bifurcation ?? { status: "learning", samples: 0, points: [], summaries: [], live_changes: 0 };
+  const fractal = research.fractal ?? {
+    status: "learning",
+    samples: 0,
+    higuchi: { status: "learning", points: [] },
+    correlation: { status: "learning", points: [], embeddings: [] },
+    multifractal: { status: "learning", exponents: [] },
+    live_changes: 0,
+  };
   const currentBranch = bifurcation.current;
+  const nonlinearTitle = nonlinearView === "bifurcation" ? "Replay bifurcation map" : nonlinearView === "fractal" ? "Fractal scaling diagnostics" : "Recurrence quantification";
+  const nonlinearBadge = nonlinearView === "bifurcation"
+    ? (bifurcation.status === "ready" ? "NO LIVE CHANGES" : bifurcation.status.toUpperCase())
+    : nonlinearView === "fractal"
+      ? (fractal.status === "ready" ? "FINITE RECORD" : fractal.status.toUpperCase())
+      : `${((research.recurrence.recurrence_rate ?? 0) * 100).toFixed(1)}% RR`;
   return (
     <div className="intelligence-layout">
       <section className="instrument-panel estimator-hero">
@@ -2196,8 +2416,8 @@ function IntelligenceWorkbench({
         {research.auto_tune.recommendation ? <><div className="tune-recommendation"><div><span>RECOMMENDED PI</span><strong>Kp {research.auto_tune.recommendation.kp.toFixed(2)} · Ki {research.auto_tune.recommendation.ki.toFixed(2)}</strong><small>{research.auto_tune.safe_candidates}/{research.auto_tune.evaluated_candidates} replay-safe candidates</small></div><em><strong>{research.auto_tune.predicted_improvement_pct?.toFixed(1)}%</strong><span>predicted RMS improvement</span></em></div><div className="frontier-row">{research.auto_tune.frontier?.slice(0, 5).map((candidate, index) => <div key={`${candidate.kp}-${candidate.ki}`} style={{ height: `${35 + (1 - index / 5) * 45}%` }}><span>{candidate.score.toFixed(1)}</span></div>)}</div><button type="button" className="full-secondary" onClick={() => stageTune(research.auto_tune.recommendation!.kp, research.auto_tune.recommendation!.ki)}><SlidersHorizontal size={14} /> Stage recommendation for review</button></> : <div className="capability-empty"><Gauge size={20} /><div><strong>More samples required</strong><span>Optimization never explores gains on live hardware. It ranks candidates against captured data and enforces peak/error constraints.</span></div></div>}
       </section>
       <section className="instrument-panel recurrence-panel nonlinear-panel">
-        <div className="panel-heading"><div><span className="section-kicker">NONLINEAR RETURN ANALYSIS</span><h2>{nonlinearView === "bifurcation" ? "Replay bifurcation map" : "Recurrence quantification"}</h2></div><span className={`quality-badge ${nonlinearView === "bifurcation" && bifurcation.status !== "ready" ? "pending" : ""}`}>{nonlinearView === "bifurcation" ? (bifurcation.status === "ready" ? "NO LIVE CHANGES" : bifurcation.status.toUpperCase()) : `${((research.recurrence.recurrence_rate ?? 0) * 100).toFixed(1)}% RR`}</span></div>
-        <div className="nonlinear-switch" aria-label="Nonlinear analysis view"><div className="segmented-control"><button type="button" className={nonlinearView === "bifurcation" ? "active" : ""} onClick={() => setNonlinearView("bifurcation")}>Bifurcation map</button><button type="button" className={nonlinearView === "recurrence" ? "active" : ""} onClick={() => setNonlinearView("recurrence")}>Recurrence plot</button></div><span>{nonlinearView === "bifurcation" ? `${bifurcation.samples ?? 0} endpoint samples · ${bifurcation.summaries?.length ?? 0} replay gains` : `${research.recurrence.samples ?? 0} aligned hop states`}</span></div>
+        <div className="panel-heading"><div><span className="section-kicker">NONLINEAR RETURN ANALYSIS</span><h2>{nonlinearTitle}</h2></div><span className={`quality-badge ${nonlinearView !== "recurrence" && ((nonlinearView === "bifurcation" ? bifurcation.status : fractal.status) !== "ready") ? "pending" : ""}`}>{nonlinearBadge}</span></div>
+        <div className="nonlinear-switch" aria-label="Nonlinear analysis view"><div className="segmented-control"><button type="button" className={nonlinearView === "bifurcation" ? "active" : ""} onClick={() => setNonlinearView("bifurcation")}>Bifurcation map</button><button type="button" className={nonlinearView === "recurrence" ? "active" : ""} onClick={() => setNonlinearView("recurrence")}>Recurrence plot</button><button type="button" className={nonlinearView === "fractal" ? "active" : ""} onClick={() => setNonlinearView("fractal")}>Fractal analysis</button></div><span>{nonlinearView === "bifurcation" ? `${bifurcation.samples ?? 0} endpoint samples · ${bifurcation.summaries?.length ?? 0} replay gains` : nonlinearView === "fractal" ? `${fractal.samples ?? 0} endpoint samples · three scaling estimators` : `${research.recurrence.samples ?? 0} aligned hop states`}</span></div>
         {nonlinearView === "bifurcation" ? <>
           <BifurcationDiagram analysis={bifurcation} />
           <div className="bifurcation-ledger">
@@ -2206,6 +2426,14 @@ function IntelligenceWorkbench({
             <div><span>PI baseline</span><strong>{bifurcation.base_gains ? `Kp ${bifurcation.base_gains.kp.toFixed(2)} · Ki ${bifurcation.base_gains.ki.toFixed(2)}` : "—"}</strong><small>{bifurcation.baseline_is_live ? "active endpoint controller" : `candidate only · active ${bifurcation.active_controller?.replaceAll("-", " ") ?? "servo"}`}</small></div>
           </div>
           <div className="bifurcation-note"><Info size={13} /><span>Settled extrema come from offline replay of captured endpoint PHC phase. {bifurcation.baseline_is_live ? "The 1.00× line matches the active endpoint PI gains." : `The endpoint is running ${bifurcation.active_controller?.replaceAll("-", " ") ?? "another servo"}; the PI baseline is not live.`} A true physical bifurcation claim requires a controlled hardware sweep with dwell at every gain.</span></div>
+        </> : nonlinearView === "fractal" ? <>
+          <FractalDiagnostics analysis={fractal} />
+          <div className="bifurcation-ledger fractal-ledger">
+            <div><span>Correlation D₂</span><strong>{fractal.correlation.dimension == null ? "—" : fractal.correlation.dimension.toFixed(3)}</strong><small>{fractal.correlation.r_squared == null ? `${fractal.correlation.samples ?? 0}/64 samples` : `R² ${fractal.correlation.r_squared.toFixed(3)} · m${fractal.correlation.embedding_dimension} · ${fractal.correlation.converged ? "converged" : "not converged"}`}</small></div>
+            <div><span>Higuchi Dᴴ</span><strong>{fractal.higuchi.dimension == null ? "—" : fractal.higuchi.dimension.toFixed(3)}</strong><small>{fractal.higuchi.r_squared == null ? `${fractal.higuchi.samples ?? 0}/32 samples` : `R² ${fractal.higuchi.r_squared.toFixed(3)} · k≤${fractal.higuchi.k_max}`}</small></div>
+            <div><span>MF-DFA width Δh</span><strong>{fractal.multifractal.spectrum_width == null ? "—" : fractal.multifractal.spectrum_width.toFixed(3)}</strong><small>{fractal.multifractal.surrogate_width == null ? `${fractal.multifractal.samples ?? 0}/128 samples` : `shuffled ${fractal.multifractal.surrogate_width.toFixed(3)} · excess ${(fractal.multifractal.correlation_excess_width ?? 0).toFixed(3)}`}</small></div>
+          </div>
+          <div className="bifurcation-note fractal-note"><Info size={13} /><span>These are finite-record scaling estimates from raw endpoint PHC phase. Dᴴ measures trace roughness; D₂ must stabilize across embeddings; Δh is compared with six shuffled surrogates. None alone proves chaos, self-similarity, or a strange attractor.</span></div>
         </> : <div className="recurrence-body"><RecurrenceCanvas matrix={research.recurrence.matrix ?? []} /><div><div><span>Determinism</span><strong>{((research.recurrence.determinism ?? 0) * 100).toFixed(1)}%</strong></div><div><span>Diagonal lines</span><strong>{research.recurrence.diagonal_lines ?? 0}</strong></div><div><span>Threshold</span><strong>{(research.recurrence.threshold_sigma ?? 0).toFixed(2)} σ</strong></div><p>Diagonal structures indicate repeatable evolution, not proof of chaos or a deterministic attractor.</p></div></div>}
       </section>
       <section className="instrument-panel koopman-panel">
@@ -2975,7 +3203,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-state", group: "Navigate", label: "State-space atlas", description: "Modal trajectory and empirical Poincaré map", keywords: "pca poincare phase portrait", section: "State space", icon: Activity },
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
-    { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, IMM, system ID, bifurcation, recurrence, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },

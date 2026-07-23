@@ -4,6 +4,12 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a fractal-analysis view beside recurrence and bifurcation diagnostics:
+  Higuchi endpoint-trace dimension, Grassberger–Procaccia correlation dimension
+  across four delay embeddings with an explicit scaling window and convergence
+  test, plus MF-DFA \(h(q)\) and spectrum width against six deterministic
+  shuffled surrogates. All estimates expose sample thresholds, regression
+  quality, provenance, and `live_changes: 0` without claiming chaos.
 - Added a nonlinear-analysis switch from recurrence quantification to a
   replay-safe PI bifurcation map: 46 gain-scale columns, settled endpoint-phase
   extrema, response-band counts, PI-baseline and first-bound markers,
