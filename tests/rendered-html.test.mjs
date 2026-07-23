@@ -46,6 +46,11 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /Cascade phase pendulum/);
   assert.match(page, /Automatic equilibrium zeroing/);
   assert.match(page, /not a simulated gravity model/i);
+  assert.match(page, /Covariance lab/);
+  assert.match(page, /Cross-hop covariance matrix/);
+  assert.match(page, /Rolling pair matrix/);
+  assert.match(page, /Eigen spectrum/);
+  assert.match(page, /Pendulum zeroing does not enter this path/);
   assert.match(page, /Experiments/);
   assert.match(page, /Interfaces/);
   assert.match(page, /Configuration/);

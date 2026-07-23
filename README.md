@@ -70,12 +70,29 @@ This is a measurement mapping, not a gravity simulation. It is designed to make
 stable jitter, a changing equilibrium, and downstream amplification apparent at
 a glance while preserving the exact values for analysis.
 
+## Find coupled motion and dominant modes
+
+<img src="docs/images/covariance-lab.jpg" alt="Live PTPBox covariance lab showing the six-hop covariance matrix, eigen spectrum, rolling pair relationships, and eigenvalue trends" width="100%">
+
+The covariance lab aligns all six previous-hop measurements by their common PHC
+comparison cycle, calculates each phase-change rate in ns/s, and analyzes a
+selectable 12, 24, or 48-change rolling window. Switch between the dimensional
+covariance matrix and normalized correlation, select any hop pair, and follow
+all fifteen unique relationships through time. The eigen spectrum shows how
+much matrix trace each orthogonal mode explains, while signed λ1 loadings expose
+which hops move together and which move against the dominant cascade mode.
+
+The computation uses raw previous-hop differences before visualization
+zeroing. Constant equilibrium subtraction therefore cancels naturally and
+cannot manufacture correlation.
+
 ## What you can do
 
 | Surface | Purpose |
 | --- | --- |
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
 | **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
+| **Covariance lab** | Compare synchronized phase-change rates as covariance or correlation, follow every pair through time, and inspect eigenvalues plus dominant-mode loadings. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
@@ -198,6 +215,8 @@ fixed operations and no arbitrary command line. See
 - Holdover elapsed time and frequency drift from the continuing raw PHC trace
 - MTIE windows and mask verdicts
 - Offset distribution, P95, skew, and contribution share
+- Rolling phase-change covariance/correlation, full pair timelines, eigenvalues,
+  explained trace, effective rank, and dominant eigenvector loadings
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
 - Experiment metadata, servo constants, and capture lifecycle
 
@@ -273,11 +292,11 @@ telemetry charts. The host agent uses only the Python standard library.
 
 The Observatory is running on the reference hardware with selectable live
 servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
-the multi-pendulum phase view, notifications, a standalone host bundle, live
-inventory, configuration staging, and guarded lifecycle control. The next
-milestones are durable experiment storage, PPS comparison datasets, automated
-MTIE/TDEV/Allan deviation, and reusable topology presets. See
-[CHANGELOG.md](CHANGELOG.md).
+the multi-pendulum phase view, covariance and eigenmode analysis, notifications,
+a standalone host bundle, live inventory, configuration staging, and guarded
+lifecycle control. The next milestones are durable experiment storage, PPS
+comparison datasets, automated MTIE/TDEV/Allan deviation, and reusable topology
+presets. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 

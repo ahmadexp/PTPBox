@@ -4,6 +4,11 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a covariance lab for synchronized previous-hop phase-change rates with
+  switchable covariance/correlation matrices, operator-selected rolling
+  windows, a full pair-relationship timeline, sorted eigenvalues, explained
+  trace, effective rank, dominant eigenvector loadings, and rolling eigenmode
+  energy.
 - Added a live multi-pendulum observation page that maps each previous-hop PHC
   residual to one rod angle, learns a robust per-hop equilibrium, detects
   coherent regime shifts with MAD-based auto-zeroing, and exposes manual zero,

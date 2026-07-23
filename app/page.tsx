@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Section = "Overview" | "Multi-pendulum" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type ServoType = "pi" | "linreg" | "nullf";
@@ -353,14 +353,18 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
 }
 
 function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
-  return payload.clocks
-    .flatMap((clock) => clock.phc_samples.filter((sample) => sample.valid && sample.offset_ns !== null).map((sample) => ({
-      t: sample.observed_at,
-      values: { [clock.id]: sample.offset_ns as number },
-      hopValues: sample.previous_hop_offset_ns === null ? undefined : { [clock.id]: sample.previous_hop_offset_ns },
-      key: `${clock.id}:${sample.sample_id}`,
-    })))
-    .sort((left, right) => left.t - right.t);
+  const synchronized = new Map<string, HistoryPoint>();
+  for (const clock of payload.clocks) {
+    for (const sample of clock.phc_samples) {
+      if (!sample.valid || sample.offset_ns === null) continue;
+      const cycle = sample.sample_id.replace(/:[^:]+$/, "");
+      const point = synchronized.get(cycle) ?? { t: sample.observed_at, values: {}, hopValues: {}, key: cycle };
+      point.values[clock.id] = sample.offset_ns;
+      if (sample.previous_hop_offset_ns !== null) point.hopValues![clock.id] = sample.previous_hop_offset_ns;
+      synchronized.set(cycle, point);
+    }
+  }
+  return [...synchronized.values()].sort((left, right) => left.t - right.t);
 }
 
 function waitingNodes(source: string): ClockNode[] {
@@ -722,6 +726,306 @@ function MultiPendulum({
   );
 }
 
+type MatrixMode = "covariance" | "correlation";
+
+type PhaseChangeRow = {
+  t: number;
+  dt: number;
+  values: number[];
+};
+
+type MatrixSnapshot = {
+  t: number;
+  covariance: number[][];
+  correlation: number[][];
+  matrix: number[][];
+  eigenvalues: number[];
+};
+
+function phaseChangeRows(history: HistoryPoint[], nodeIds: string[]): PhaseChangeRow[] {
+  const synchronized = history
+    .filter((point) => nodeIds.every((id) => Number.isFinite(point.hopValues?.[id])))
+    .map((point) => ({ t: point.t, values: nodeIds.map((id) => point.hopValues![id]) }))
+    .sort((left, right) => left.t - right.t);
+  const changes: PhaseChangeRow[] = [];
+  for (let index = 1; index < synchronized.length; index += 1) {
+    const previous = synchronized[index - 1];
+    const current = synchronized[index];
+    const dt = current.t - previous.t;
+    if (dt < 0.05 || dt > 5) continue;
+    changes.push({ t: current.t, dt, values: current.values.map((value, column) => (value - previous.values[column]) / dt) });
+  }
+  return changes;
+}
+
+function covarianceMatrix(rows: PhaseChangeRow[], width: number) {
+  const matrix = Array.from({ length: width }, () => Array(width).fill(0) as number[]);
+  if (rows.length < 2) return matrix;
+  const means = Array.from({ length: width }, (_, column) => rows.reduce((sum, row) => sum + row.values[column], 0) / rows.length);
+  for (let row = 0; row < width; row += 1) {
+    for (let column = row; column < width; column += 1) {
+      const value = rows.reduce((sum, point) => sum + (point.values[row] - means[row]) * (point.values[column] - means[column]), 0) / (rows.length - 1);
+      matrix[row][column] = value;
+      matrix[column][row] = value;
+    }
+  }
+  return matrix;
+}
+
+function correlationMatrix(covariance: number[][]) {
+  return covariance.map((row, rowIndex) => row.map((value, columnIndex) => {
+    const scale = Math.sqrt(Math.max(0, covariance[rowIndex][rowIndex] * covariance[columnIndex][columnIndex]));
+    return scale ? Math.max(-1, Math.min(1, value / scale)) : 0;
+  }));
+}
+
+function eigenDecomposeSymmetric(input: number[][]) {
+  const size = input.length;
+  if (!size) return { values: [] as number[], vectors: [] as number[][] };
+  const matrix = input.map((row) => [...row]);
+  const vectors = Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? 1 : 0));
+
+  for (let iteration = 0; iteration < size * size * 24; iteration += 1) {
+    let pivotRow = 0;
+    let pivotColumn = 1;
+    let largest = 0;
+    for (let row = 0; row < size; row += 1) {
+      for (let column = row + 1; column < size; column += 1) {
+        const magnitude = Math.abs(matrix[row][column]);
+        if (magnitude > largest) {
+          largest = magnitude;
+          pivotRow = row;
+          pivotColumn = column;
+        }
+      }
+    }
+    const scale = Math.max(1, ...matrix.map((row, index) => Math.abs(row[index])));
+    if (largest <= scale * 1e-12) break;
+
+    const app = matrix[pivotRow][pivotRow];
+    const aqq = matrix[pivotColumn][pivotColumn];
+    const apq = matrix[pivotRow][pivotColumn];
+    const tau = (aqq - app) / (2 * apq);
+    const tangent = (tau >= 0 ? 1 : -1) / (Math.abs(tau) + Math.sqrt(1 + tau * tau));
+    const cosine = 1 / Math.sqrt(1 + tangent * tangent);
+    const sine = tangent * cosine;
+
+    matrix[pivotRow][pivotRow] = app - tangent * apq;
+    matrix[pivotColumn][pivotColumn] = aqq + tangent * apq;
+    matrix[pivotRow][pivotColumn] = 0;
+    matrix[pivotColumn][pivotRow] = 0;
+    for (let index = 0; index < size; index += 1) {
+      if (index !== pivotRow && index !== pivotColumn) {
+        const aip = matrix[index][pivotRow];
+        const aiq = matrix[index][pivotColumn];
+        matrix[index][pivotRow] = cosine * aip - sine * aiq;
+        matrix[pivotRow][index] = matrix[index][pivotRow];
+        matrix[index][pivotColumn] = sine * aip + cosine * aiq;
+        matrix[pivotColumn][index] = matrix[index][pivotColumn];
+      }
+      const vip = vectors[index][pivotRow];
+      const viq = vectors[index][pivotColumn];
+      vectors[index][pivotRow] = cosine * vip - sine * viq;
+      vectors[index][pivotColumn] = sine * vip + cosine * viq;
+    }
+  }
+
+  const pairs = matrix.map((row, index) => ({ value: Math.max(0, row[index]), vector: vectors.map((vectorRow) => vectorRow[index]) }))
+    .sort((left, right) => right.value - left.value);
+  return { values: pairs.map((pair) => pair.value), vectors: pairs.map((pair) => pair.vector) };
+}
+
+function rollingMatrixSnapshots(rows: PhaseChangeRow[], width: number, rollingSamples: number, mode: MatrixMode) {
+  if (rows.length < 4) return [] as MatrixSnapshot[];
+  const minimum = Math.min(rows.length, Math.max(4, rollingSamples));
+  const available = rows.length - minimum + 1;
+  const step = Math.max(1, Math.ceil(available / 52));
+  const snapshots: MatrixSnapshot[] = [];
+  const append = (end: number) => {
+    const covariance = covarianceMatrix(rows.slice(Math.max(0, end - rollingSamples), end), width);
+    const correlation = correlationMatrix(covariance);
+    const matrix = mode === "covariance" ? covariance : correlation;
+    snapshots.push({ t: rows[end - 1].t, covariance, correlation, matrix, eigenvalues: eigenDecomposeSymmetric(matrix).values });
+  };
+  for (let end = minimum; end <= rows.length; end += step) append(end);
+  if (snapshots.at(-1)?.t !== rows.at(-1)?.t) append(rows.length);
+  return snapshots;
+}
+
+function compactMatrixValue(value: number, mode: MatrixMode) {
+  if (mode === "correlation") return (Math.abs(value) < 0.005 ? 0 : value).toFixed(2);
+  const magnitude = Math.abs(value);
+  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+  if (magnitude >= 1_000_000) return `${sign}${(magnitude / 1_000_000).toFixed(2)}M`;
+  if (magnitude >= 1_000) return `${sign}${(magnitude / 1_000).toFixed(1)}k`;
+  if (magnitude >= 100) return `${sign}${magnitude.toFixed(0)}`;
+  return `${sign}${magnitude.toFixed(1)}`;
+}
+
+function covarianceColor(value: number, scale: number) {
+  const intensity = Math.min(0.72, 0.06 + Math.sqrt(Math.abs(value) / Math.max(scale, 1e-12)) * 0.58);
+  return value >= 0 ? `rgba(97, 220, 227, ${intensity})` : `rgba(241, 136, 114, ${intensity})`;
+}
+
+function EigenTrendChart({ snapshots }: { snapshots: MatrixSnapshot[] }) {
+  const width = 760;
+  const height = 255;
+  const padding = { left: 42, right: 18, top: 18, bottom: 30 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const shares = snapshots.map((snapshot) => {
+    const total = snapshot.eigenvalues.reduce((sum, value) => sum + value, 0);
+    return snapshot.eigenvalues.slice(0, 3).map((value) => total ? value / total : 0);
+  });
+  const colors = ["#61dce3", "#c4a0ef", "#f3c36f"];
+  const pathFor = (mode: number) => shares.map((values, index) => {
+    const x = padding.left + (snapshots.length < 2 ? plotWidth : index / (snapshots.length - 1) * plotWidth);
+    const y = padding.top + (1 - (values[mode] ?? 0)) * plotHeight;
+    return `${index ? "L" : "M"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+  const latest = shares.at(-1) ?? [0, 0, 0];
+
+  return (
+    <div className="eigen-trend-wrap">
+      <div className="eigen-trend-legend">{colors.map((color, index) => <span key={color}><i style={{ background: color }} />λ{index + 1}<strong>{((latest[index] ?? 0) * 100).toFixed(1)}%</strong></span>)}</div>
+      <svg className="eigen-trend-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Rolling percentage of covariance carried by the first three eigenmodes">
+        <title>Rolling eigenmode energy</title>
+        <desc>The first three eigenvalues are divided by the matrix trace at each rolling window.</desc>
+        {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
+          const y = padding.top + (1 - tick) * plotHeight;
+          return <g key={tick}><line className="covariance-gridline" x1={padding.left} y1={y} x2={width - padding.right} y2={y} /><text className="covariance-axis-label" x={padding.left - 8} y={y + 3} textAnchor="end">{Math.round(tick * 100)}%</text></g>;
+        })}
+        {colors.map((color, index) => <path key={color} className="eigen-trend-line" d={pathFor(index)} stroke={color} />)}
+        <text className="covariance-axis-label" x={padding.left} y={height - 8}>window start</text>
+        <text className="covariance-axis-label" x={width - padding.right} y={height - 8} textAnchor="end">now</text>
+      </svg>
+    </div>
+  );
+}
+
+function CovarianceLab({
+  history,
+  nodes,
+  range,
+  setRange,
+  paused,
+  connection,
+}: {
+  history: HistoryPoint[];
+  nodes: ClockNode[];
+  range: string;
+  setRange: (value: string) => void;
+  paused: boolean;
+  connection: ConnectionMode;
+}) {
+  const hopNodes = nodes.slice(1);
+  const nodeIds = useMemo(() => hopNodes.map((node) => node.id), [hopNodes]);
+  const changes = useMemo(() => phaseChangeRows(history, nodeIds), [history, nodeIds]);
+  const [matrixMode, setMatrixMode] = useState<MatrixMode>("covariance");
+  const [rollingSamples, setRollingSamples] = useState(24);
+  const [selectedPair, setSelectedPair] = useState<[number, number]>([0, 1]);
+  const activeRows = changes.slice(-rollingSamples);
+  const covariance = useMemo(() => covarianceMatrix(activeRows, hopNodes.length), [activeRows, hopNodes.length]);
+  const correlation = useMemo(() => correlationMatrix(covariance), [covariance]);
+  const matrix = matrixMode === "covariance" ? covariance : correlation;
+  const eigen = useMemo(() => eigenDecomposeSymmetric(matrix), [matrix]);
+  const snapshots = useMemo(() => rollingMatrixSnapshots(changes, hopNodes.length, rollingSamples, matrixMode), [changes, hopNodes.length, matrixMode, rollingSamples]);
+  const matrixScale = matrixMode === "correlation" ? 1 : Math.max(1, ...matrix.flat().map(Math.abs));
+  const timelineScale = matrixMode === "correlation" ? 1 : Math.max(1, ...snapshots.flatMap((snapshot) => snapshot.matrix.flat().map(Math.abs)));
+  const trace = eigen.values.reduce((sum, value) => sum + value, 0);
+  const eigenShares = eigen.values.map((value) => trace ? value / trace : 0);
+  const effectiveRank = Math.exp(-eigenShares.filter((share) => share > 0).reduce((sum, share) => sum + share * Math.log(share), 0));
+  const dominantVectorRaw = eigen.vectors[0] ?? Array(hopNodes.length).fill(0);
+  const dominantPivot = dominantVectorRaw.reduce((best, value, index) => Math.abs(value) > Math.abs(dominantVectorRaw[best] ?? 0) ? index : best, 0);
+  const dominantSign = (dominantVectorRaw[dominantPivot] ?? 0) < 0 ? -1 : 1;
+  const dominantVector = dominantVectorRaw.map((value) => value * dominantSign);
+  const hasPositiveLoading = dominantVector.some((value) => value > 0.15);
+  const hasNegativeLoading = dominantVector.some((value) => value < -0.15);
+  const dominantModeLabel = hasPositiveLoading && hasNegativeLoading ? "Differential cascade mode" : "Common-direction mode";
+  const pairs = hopNodes.flatMap((_, row) => hopNodes.map((__, column) => row < column ? [row, column] as [number, number] : null).filter((pair): pair is [number, number] => pair !== null));
+  const selectedRow = Math.min(selectedPair[0], Math.max(0, hopNodes.length - 1));
+  const selectedColumn = Math.min(selectedPair[1], Math.max(0, hopNodes.length - 1));
+  const selectedCovariance = covariance[selectedRow]?.[selectedColumn] ?? 0;
+  const selectedCorrelation = correlation[selectedRow]?.[selectedColumn] ?? 0;
+  const latestChange = changes.at(-1)?.values ?? [];
+  const strongestPair = pairs.reduce<[number, number] | null>((best, pair) => !best || Math.abs(correlation[pair[0]]?.[pair[1]] ?? 0) > Math.abs(correlation[best[0]]?.[best[1]] ?? 0) ? pair : best, null);
+  const strongestCorrelation = strongestPair ? correlation[strongestPair[0]][strongestPair[1]] : 0;
+  const dataState = paused ? "FROZEN" : connection === "live" ? "LIVE" : connection === "simulation" ? "MODELED" : connection.toUpperCase();
+
+  return (
+    <div className="covariance-layout">
+      <section className="instrument-panel covariance-matrix-panel">
+        <div className="panel-heading covariance-heading">
+          <div><span className="section-kicker">SYNCHRONIZED PHASE-CHANGE RATE</span><h2>Cross-hop covariance matrix</h2></div>
+          <span className={`quality-badge ${connection === "live" ? "" : "holdover"}`}>{dataState}</span>
+        </div>
+        <div className="covariance-controls" aria-label="Covariance analysis controls">
+          <div><span>History</span><div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+          <div><span>Matrix</span><div className="segmented-control"><button className={matrixMode === "covariance" ? "active" : ""} type="button" onClick={() => setMatrixMode("covariance")}>Covariance</button><button className={matrixMode === "correlation" ? "active" : ""} type="button" onClick={() => setMatrixMode("correlation")}>Correlation</button></div></div>
+          <div><span>Rolling window</span><div className="segmented-control">{[12, 24, 48].map((item) => <button className={rollingSamples === item ? "active" : ""} type="button" key={item} onClick={() => setRollingSamples(item)}>{item}</button>)}</div></div>
+        </div>
+        <div className="covariance-matrix-wrap">
+          <div className="covariance-matrix-grid" style={{ gridTemplateColumns: `62px repeat(${Math.max(1, hopNodes.length)}, minmax(54px, 1fr))` }} role="grid" aria-label={`${matrixMode} matrix of synchronized previous-hop phase-change rates`}>
+            <span className="matrix-corner">Δ/ns·s⁻¹</span>
+            {hopNodes.map((node, index) => <span className="matrix-column-label" key={node.id}>H{index + 1}</span>)}
+            {hopNodes.flatMap((rowNode, row) => [
+              <span className="matrix-row-label" key={`${rowNode.id}-label`}>H{row + 1}<small>{rowNode.id}</small></span>,
+              ...hopNodes.map((columnNode, column) => {
+                const value = matrix[row]?.[column] ?? 0;
+                const selected = (row === selectedRow && column === selectedColumn) || (row === selectedColumn && column === selectedRow);
+                return <button key={`${rowNode.id}-${columnNode.id}`} type="button" className={`matrix-cell ${selected ? "selected" : ""} ${row === column ? "diagonal" : ""}`} style={{ background: covarianceColor(value, matrixScale) }} aria-label={`H${row + 1} and H${column + 1}: ${compactMatrixValue(value, matrixMode)}${matrixMode === "covariance" ? " squared nanoseconds per squared second" : " correlation"}`} onClick={() => row !== column && setSelectedPair([row, column])}><strong>{compactMatrixValue(value, matrixMode)}</strong><small>{row === column ? "variance" : row < column ? "" : "mirror"}</small></button>;
+              }),
+            ])}
+          </div>
+          <div className="covariance-scale"><span>negative</span><i /><span>0</span><b /><span>positive</span></div>
+        </div>
+        <div className="selected-covariance">
+          <div><span>Selected relationship</span><strong>H{selectedRow + 1} · {hopNodes[selectedRow]?.id ?? "—"} ↔ H{selectedColumn + 1} · {hopNodes[selectedColumn]?.id ?? "—"}</strong></div>
+          <div><span>Covariance</span><strong>{compactMatrixValue(selectedCovariance, "covariance")} <small>(ns/s)²</small></strong></div>
+          <div><span>Correlation</span><strong>{selectedCorrelation >= 0 ? "+" : ""}{selectedCorrelation.toFixed(3)}</strong></div>
+          <div><span>Latest Δ rate</span><strong>{compactMatrixValue(latestChange[selectedRow] ?? 0, "covariance")} / {compactMatrixValue(latestChange[selectedColumn] ?? 0, "covariance")} <small>ns/s</small></strong></div>
+        </div>
+        <div className="pendulum-provenance covariance-provenance"><Info size={14} /><span><strong>Method:</strong> covariance is calculated from synchronized first differences of the raw previous-hop PHC deltas, divided by the measured sample interval. Pendulum zeroing does not enter this path. Cell color uses a signed square-root scale; the printed values are exact.</span></div>
+      </section>
+
+      <section className="instrument-panel eigen-panel">
+        <div className="panel-heading"><div><span className="section-kicker">ORTHOGONAL MODES</span><h2>Eigen spectrum</h2></div><span className="panel-meta">displayed matrix</span></div>
+        <div className="eigen-summary">
+          <div><span>Dominant share</span><strong>{((eigenShares[0] ?? 0) * 100).toFixed(1)}%</strong><small>{dominantModeLabel}</small></div>
+          <div><span>Effective rank</span><strong>{Number.isFinite(effectiveRank) ? effectiveRank.toFixed(2) : "—"}</strong><small>of {hopNodes.length} possible modes</small></div>
+          <div><span>Phase changes</span><strong>{changes.length}</strong><small>{activeRows.length} in current matrix</small></div>
+        </div>
+        <div className="eigen-spectrum" aria-label="Eigenvalues and explained matrix trace">
+          {eigen.values.map((value, index) => <div className="eigenvalue-row" key={index}><span>λ{index + 1}</span><div><i style={{ width: `${Math.max(1.5, (eigenShares[index] ?? 0) * 100)}%` }} /></div><strong>{compactMatrixValue(value, matrixMode)}</strong><small>{((eigenShares[index] ?? 0) * 100).toFixed(1)}%</small></div>)}
+        </div>
+        <div className="eigen-loadings">
+          <div className="subpanel-heading"><span>λ1 eigenvector</span><strong>signed hop loading</strong></div>
+          {hopNodes.map((node, index) => {
+            const loading = dominantVector[index] ?? 0;
+            return <div className="loading-row" key={node.id}><span>H{index + 1}</span><div><i className={loading < 0 ? "negative" : "positive"} style={loading < 0 ? { right: "50%", width: `${Math.abs(loading) * 50}%` } : { left: "50%", width: `${Math.abs(loading) * 50}%` }} /></div><strong>{loading >= 0 ? "+" : ""}{loading.toFixed(3)}</strong></div>;
+          })}
+        </div>
+      </section>
+
+      <section className="instrument-panel covariance-timeline-panel">
+        <div className="panel-heading"><div><span className="section-kicker">RELATIONSHIPS THROUGH TIME</span><h2>Rolling pair matrix</h2></div><span className="panel-meta">{snapshots.length} windows · {rollingSamples} changes each</span></div>
+        <div className="pair-timeline" role="img" aria-label={`Rolling ${matrixMode} for every unique pair of pendulum links`}>
+          {pairs.map(([row, column]) => {
+            const selected = (row === selectedRow && column === selectedColumn) || (row === selectedColumn && column === selectedRow);
+            return <div className={`pair-timeline-row ${selected ? "selected" : ""}`} key={`${row}-${column}`} style={{ gridTemplateColumns: `72px repeat(${Math.max(1, snapshots.length)}, minmax(4px, 1fr))` }}><span>H{row + 1}↔H{column + 1}</span>{snapshots.map((snapshot, index) => <i key={index} style={{ background: covarianceColor(snapshot.matrix[row]?.[column] ?? 0, timelineScale) }} />)}</div>;
+          })}
+        </div>
+        <div className="timeline-axis"><span>window start</span><strong>{strongestPair ? `Strongest now H${strongestPair[0] + 1}↔H${strongestPair[1] + 1} · ρ ${strongestCorrelation >= 0 ? "+" : ""}${strongestCorrelation.toFixed(2)}` : "Awaiting synchronized changes"}</strong><span>now</span></div>
+      </section>
+
+      <section className="instrument-panel eigen-trend-panel">
+        <div className="panel-heading"><div><span className="section-kicker">MODE ENERGY THROUGH TIME</span><h2>Rolling eigenvalue share</h2></div><span className="panel-meta">λ / trace</span></div>
+        {snapshots.length ? <EigenTrendChart snapshots={snapshots} /> : <div className="covariance-empty">Waiting for four synchronized phase changes…</div>}
+      </section>
+    </div>
+  );
+}
+
 function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button className={`toggle ${on ? "on" : ""}`} type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}>
@@ -805,6 +1109,7 @@ export default function PTPBoxDashboard() {
   const hardwareClocks = new Set(interfaceInventory.map((item) => item.phc).filter(Boolean)).size;
   const interfaceDrivers = [...new Set(interfaceInventory.map((item) => item.driver).filter((item): item is string => Boolean(item)))];
   const hundredGigTimingPorts = timingInterfaces.filter((item) => item.speed_mbps === 100000).length;
+  const bufferedPhcComparisons = history.reduce((total, point) => total + Object.keys(point.values).length, 0);
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -1040,7 +1345,7 @@ export default function PTPBoxDashboard() {
         { label: "Endpoint servo RMS", value: final.ptpMeasured ? formatNanoseconds(final.rms) : "—", delta: "PTP RAW", note: `${final.servoSampleCount} valid offset samples`, icon: Activity, good: final.ptpMeasured },
         { label: "Peak PHC difference", value: values.length ? formatNanoseconds(peak) : "—", delta: "UNFILTERED", note: `${range} vs BC1`, icon: Zap, good: values.length > 0 },
         { label: "Locked receivers", value: `${locked}/${receiverCount}`, delta: telemetryStatus?.mode.toUpperCase() ?? "WAITING", note: "LinuxPTP servo state", icon: ShieldCheck, good: locked === receiverCount && receiverCount > 0 },
-        { label: "PHC comparisons", value: history.length.toLocaleString(), delta: "NO CONTROL", note: "read-only browser buffer", icon: TimerReset, good: history.length > 0 },
+        { label: "PHC comparisons", value: bufferedPhcComparisons.toLocaleString(), delta: "NO CONTROL", note: "read-only browser buffer", icon: TimerReset, good: bufferedPhcComparisons > 0 },
       ];
     }
     return [
@@ -1049,7 +1354,7 @@ export default function PTPBoxDashboard() {
       { label: "Modeled locks", value: `${locked}/${receiverCount}`, delta: "SIM", note: "not hardware state", icon: ShieldCheck, good: false },
       { label: "Generated samples", value: history.length.toLocaleString(), delta: "SIM", note: "deterministic fallback", icon: TimerReset, good: false },
     ];
-  }, [connection, history, nodes, range, telemetryStatus]);
+  }, [bufferedPhcComparisons, connection, history, nodes, range, telemetryStatus]);
 
   const selectNode = (id: string) => {
     setSelectedNode(id);
@@ -1210,6 +1515,7 @@ export default function PTPBoxDashboard() {
   const navItems: { label: Section; icon: typeof LayoutDashboard; badge?: string }[] = [
     { label: "Overview", icon: LayoutDashboard },
     { label: "Multi-pendulum", icon: Orbit },
+    { label: "Covariance", icon: Network },
     { label: "Analytics", icon: BarChart3 },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -1296,8 +1602,8 @@ export default function PTPBoxDashboard() {
           <div className="page-heading">
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
-              <h1>{section === "Overview" ? "Cascade overview" : section}</h1>
-              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <h1>{section === "Overview" ? "Cascade overview" : section === "Covariance" ? "Covariance lab" : section}</h1>
+              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -1308,7 +1614,7 @@ export default function PTPBoxDashboard() {
           <div className={`data-provenance ${connection}`}>
             <span><Radio size={13} /> {connection === "simulation" ? "DETERMINISTIC FALLBACK" : connection === "checking" ? "PTPBOX AGENT PROBE" : "CROSS-TIMESTAMPED PHC COMPARISON"}</span>
             <code>{connection === "simulation" ? "synthetic" : connection === "checking" ? "measurement mode pending" : activeNode.phcMethod ?? "read-only kernel cross timestamps"}</code>
-            <span>{history.length.toLocaleString()} PHC samples buffered</span>
+            <span>{bufferedPhcComparisons.toLocaleString()} PHC samples buffered</span>
             {invalidWindowSamples > 0 && <span className="rejected-samples">{invalidWindowSamples} ptp4l samples rejected</span>}
             <span>{newestSampleAge === null ? "no raw sample yet" : `newest ${newestSampleAge.toFixed(1)} s ago`}</span>
             {agentStatus && connection !== "simulation" && (
@@ -1418,6 +1724,17 @@ export default function PTPBoxDashboard() {
               setAutoZero={setPendulumAutoZero}
               zeroState={pendulumZeroState}
               onZero={zeroPendulum}
+              paused={paused}
+              connection={connection}
+            />
+          )}
+
+          {section === "Covariance" && (
+            <CovarianceLab
+              history={history}
+              nodes={nodes}
+              range={range}
+              setRange={setRange}
               paused={paused}
               connection={connection}
             />
