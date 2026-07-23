@@ -32,10 +32,35 @@ and whether privileged lifecycle control is installed.
   "namespaces": [],
   "processes": [],
   "running": false,
+  "pps": {
+    "enabled": false,
+    "running": false,
+    "source": "BC1",
+    "sinks": [],
+    "servo": "pi",
+    "nodes": {
+      "BC1": {
+        "role": "source",
+        "state": "ready",
+        "capable": true,
+        "device": "/dev/ptp1",
+        "pin": {
+          "name": "mlx5_pps0",
+          "function": "none",
+          "channel": 0
+        }
+      }
+    }
+  },
   "observer_only": false,
-  "agent_version": "1.4.0"
+  "agent_version": "1.8.0"
 }
 ```
+
+`pps.nodes` is hardware-backed. It combines the staged role with the PHC's
+sysfs PPS capabilities, current pin function, managed `ts2phc` process state,
+device, connector, and channel. Node state is one of `ready`, `active`,
+`starting`, `stopped`, `external`, or `unavailable`.
 
 ## Interface inventory
 
@@ -215,6 +240,29 @@ Validates and atomically stages a complete configuration document.
     "step_threshold_ns": 0,
     "first_step_threshold_ns": 20000,
     "sanity_freq_limit_ppb": 200000
+  },
+  "pps": {
+    "enabled": false,
+    "source": "BC1",
+    "sinks": ["BC2", "BC3", "BC4", "BC5", "BC6", "BC7"],
+    "output_pin": 0,
+    "input_pin": 0,
+    "channel": 0,
+    "polarity": "rising",
+    "pulse_width_ns": 100000000,
+    "perout_phase_ns": 0,
+    "extts_correction_ns": 0,
+    "ts2phc": {
+      "servo": "pi",
+      "kp": 0.7,
+      "ki": 0.3,
+      "step_threshold_ns": 0,
+      "first_step_threshold_ns": 20000,
+      "holdover_seconds": 0,
+      "stable_threshold_ns": 100,
+      "stable_samples": 10,
+      "logging_level": 6
+    }
   }
 }
 ```
@@ -232,6 +280,11 @@ it never labels an unrepresentable request as an on-wire frequency.
 Staging does not alter a running process. The Observatory's guarded “Apply to
 cascade” flow follows a successful stage with `POST /api/control` using the
 `restart` action so every managed `ptp4l` instance reads the same new interval.
+If PPS is enabled, the controller first validates periodic-output,
+external-timestamp, programmable-pin, channel, and `/dev/ptp*` availability,
+then generates `/etc/linuxptp/ptpbox-ts2phc.conf` and starts one tracked
+`ts2phc` process. With PPS disabled, it neither changes PHC pins nor starts
+`ts2phc`.
 
 ## Servo and holdover control
 

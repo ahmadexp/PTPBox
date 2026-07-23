@@ -96,6 +96,68 @@ class TelemetryTests(unittest.TestCase):
         value["log_sync_interval"] = -4
         self.assertIn("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)", AGENT.validate_config(value))
 
+    def test_pps_config_requires_distinct_hardware_source_and_sinks(self) -> None:
+        value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
+        value["pps"].update({"enabled": True, "source": "BC1", "sinks": ["BC7"]})
+        self.assertEqual([], AGENT.validate_config(value))
+
+        value["pps"]["sinks"] = ["BC1"]
+        self.assertIn("pps.source cannot also be a sink", AGENT.validate_config(value))
+
+        value["pps"]["source"] = "unknown"
+        self.assertIn("pps.source must be external or a topology clock", AGENT.validate_config(value))
+
+        value["pps"].update({"source": "BC1", "sinks": ["BC7"], "polarity": "both"})
+        value["pps"]["ts2phc"]["holdover_seconds"] = 30
+        self.assertIn("pps.ts2phc holdover is not supported when pps.polarity is both", AGENT.validate_config(value))
+
+    def test_pps_status_reports_live_pin_functions_per_topology_node(self) -> None:
+        value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
+        value["pps"].update({"enabled": True, "source": "BC1", "sinks": ["BC7"]})
+        inventory = [
+            {"id": "BC1", "measurement_phc": "ptp0"},
+            {"id": "BC7", "measurement_phc": "ptp1"},
+            {"id": "BC4", "measurement_phc": "ptp2"},
+        ]
+        managed = [{"label": "PPS-ts2phc", "kind": "ts2phc", "pid": os.getpid()}]
+
+        def fake_load_json(path, fallback=None):
+            if path == AGENT.PHC_MAP_FILE:
+                return inventory
+            if path == AGENT.PPS_PROCESS_FILE:
+                return managed
+            if path == AGENT.TOPOLOGY_FILE:
+                return {
+                    "nodes": [
+                        {"name": "BC1", "ingress": "p1", "egress": "p2"},
+                        {"name": "BC7", "ingress": "p3", "egress": "p4"},
+                        {"name": "BC4", "ingress": "p5", "egress": "p6"},
+                    ]
+                }
+            return fallback
+
+        def capabilities(phc):
+            function = "periodic-output" if phc == "ptp0" else "external-timestamp" if phc == "ptp1" else "none"
+            return {
+                "available": True,
+                "external_timestamp_channels": 1,
+                "periodic_output_channels": 1,
+                "programmable_pins": 2,
+                "pins": [{"index": 0, "name": "mlx5_pps0", "function": function, "channel": 0}],
+            }
+
+        with (
+            mock.patch.object(AGENT, "load_config", return_value=value),
+            mock.patch.object(AGENT, "load_json", side_effect=fake_load_json),
+            mock.patch.object(AGENT, "phc_pps_capabilities", side_effect=capabilities),
+        ):
+            status = AGENT.pps_status()
+
+        self.assertTrue(status["running"])
+        self.assertEqual(("source", "active"), (status["nodes"]["BC1"]["role"], status["nodes"]["BC1"]["state"]))
+        self.assertEqual(("sink", "active"), (status["nodes"]["BC7"]["role"], status["nodes"]["BC7"]["state"]))
+        self.assertEqual(("disabled", "ready"), (status["nodes"]["BC4"]["role"], status["nodes"]["BC4"]["state"]))
+
     def test_phc_sampler_matches_the_applied_sync_cadence(self) -> None:
         class StopAfterOneSample:
             def __init__(self) -> None:

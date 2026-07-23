@@ -65,9 +65,13 @@ time-series interpolation, or synthetic fill is applied in live mode.
   every downstream clock;
 - enter LinuxPTP `free_running` holdover while keeping both PTP diagnostics and
   the independent PHC comparison sampler alive;
+- validate PHC periodic-output, external-timestamp, pin, and channel
+  capabilities before an enabled PPS experiment;
+- generate one explicit `ts2phc` topology that programs a selected PHC as PPS
+  out (or accepts generic external PPS) and selected PHCs as PPS in;
 - write the authoritative PHC measurement map for the unprivileged agent;
-- never run a local PHC discipline loop—the NICs synchronize only through
-  `ptp4l` over the physical chain;
+- keep PPS control disabled by default; in the normal cascade the NICs
+  synchronize only through `ptp4l` over the physical chain;
 - track child processes and logs.
 
 Every daemon receives a unique management socket below `/run/ptpbox`; network
@@ -183,8 +187,8 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, current experiment metadata |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs, servo state, and read-only PHC map |
-| `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible generated LinuxPTP config |
+| `/run/ptpbox` | root | boot | managed process IDs, servo state, and read-only PHC/PPS map |
+| `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible `ptp4l` and optional `ts2phc` config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |
 
@@ -217,7 +221,7 @@ deterministic demonstration model. No control operation is attempted.
 - `ptpboxctl` never executes user-provided shell text.
 - The controller refuses overlap between assigned and management interfaces.
 - The systemd service is unprivileged and receives only the `clock`
-  supplementary group for read-only PHC device access.
+  supplementary group for read-only PHC device and PPS sysfs observation.
 - Root control is restricted to five exact `ptpboxctl` command lines; the HTTP
   agent cannot supply controller arguments or shell text.
 - Public exposure requires a separate authenticated TLS reverse proxy.

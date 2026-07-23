@@ -25,6 +25,7 @@ PHC_MAP_FILE = STATE_DIR / "phcs.json"
 SERVO_STATE_FILE = STATE_DIR / "servo-state.json"
 SERVO_REQUEST_FILE = CONFIG_FILE.with_name("servo-request.json")
 SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
+PPS_CONFIG_FILE = LINUXPTP_CONFIG_DIR / "ptpbox-ts2phc.conf"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "domain": 24,
@@ -40,6 +41,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
+    },
+    "pps": {
+        "enabled": False,
+        "source": "BC1",
+        "sinks": [],
+        "output_pin": 0,
+        "input_pin": 0,
+        "channel": 0,
+        "polarity": "rising",
+        "pulse_width_ns": 100_000_000,
+        "perout_phase_ns": 0,
+        "extts_correction_ns": 0,
+        "ts2phc": {
+            "servo": "pi",
+            "kp": 0.7,
+            "ki": 0.3,
+            "step_threshold_ns": 0,
+            "first_step_threshold_ns": 20_000,
+            "holdover_seconds": 0,
+            "stable_threshold_ns": 100,
+            "stable_samples": 10,
+            "logging_level": 6,
+        },
     },
 }
 
@@ -147,10 +171,15 @@ def config() -> dict[str, Any]:
     if not isinstance(value, dict):
         value = DEFAULT_CONFIG
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
-    if isinstance(value, dict):
-        merged.update({key: item for key, item in value.items() if key != "servo"})
-        if isinstance(value.get("servo"), dict):
-            merged["servo"].update(value["servo"])
+
+    def merge(target: dict[str, Any], update: dict[str, Any]) -> None:
+        for key, item in update.items():
+            if isinstance(item, dict) and isinstance(target.get(key), dict):
+                merge(target[key], item)
+            else:
+                target[key] = item
+
+    merge(merged, value)
     return merged
 
 
@@ -393,6 +422,124 @@ def spawn(label: str, args: list[str], processes: list[dict[str, Any]]) -> None:
     processes.append({"label": label, "pid": process.pid, "command": args, "log": str(log_path)})
 
 
+def phc_capability(phc: str, field: str) -> int:
+    value = Path("/sys/class/ptp", phc, field)
+    try:
+        return int(value.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def pps_device(inventory: dict[str, dict[str, Any]], node: str) -> str:
+    phc = inventory.get(node, {}).get("measurement_phc")
+    if not isinstance(phc, str) or not re.fullmatch(r"ptp\d+", phc):
+        raise ValueError(f"{node} has no measurement PHC for PPS")
+    device = f"/dev/{phc}"
+    if not Path(device).exists():
+        raise ValueError(f"PPS device is unavailable for {node}: {device}")
+    return device
+
+
+def validate_pps_hardware(values: dict[str, Any], inventory: dict[str, dict[str, Any]]) -> tuple[str | None, list[str]]:
+    pps = values["pps"]
+    source_name = pps["source"]
+    sink_names = pps["sinks"]
+    channel = int(pps["channel"])
+    output_pin = int(pps["output_pin"])
+    input_pin = int(pps["input_pin"])
+    source_device: str | None = None
+
+    if source_name != "external":
+        source_device = pps_device(inventory, source_name)
+        source_phc = source_device.removeprefix("/dev/")
+        if phc_capability(source_phc, "n_periodic_outputs") <= channel:
+            raise ValueError(f"{source_name} PHC does not expose periodic-output channel {channel}")
+        if phc_capability(source_phc, "n_programmable_pins") <= output_pin:
+            raise ValueError(f"{source_name} PHC does not expose PPS output pin {output_pin}")
+
+    sink_devices: list[str] = []
+    for name in sink_names:
+        device = pps_device(inventory, name)
+        phc = device.removeprefix("/dev/")
+        if phc_capability(phc, "n_external_timestamps") <= channel:
+            raise ValueError(f"{name} PHC does not expose external-timestamp channel {channel}")
+        if phc_capability(phc, "n_programmable_pins") <= input_pin:
+            raise ValueError(f"{name} PHC does not expose PPS input pin {input_pin}")
+        sink_devices.append(device)
+    return source_device, sink_devices
+
+
+def render_ts2phc_config(
+    path: Path,
+    values: dict[str, Any],
+    inventory: dict[str, dict[str, Any]],
+) -> tuple[str | None, list[str]]:
+    """Render a hardware-backed PPS distribution and ts2phc servo."""
+    pps = values["pps"]
+    ts2phc = pps["ts2phc"]
+    source_device, sink_devices = validate_pps_hardware(values, inventory)
+    sections: list[str] = []
+    if source_device:
+        sections.append(
+            f"""[{source_device}]
+ts2phc.master 1
+ts2phc.channel {int(pps['channel'])}
+ts2phc.pin_index {int(pps['output_pin'])}
+"""
+        )
+    for device in sink_devices:
+        sections.append(
+            f"""[{device}]
+ts2phc.channel {int(pps['channel'])}
+ts2phc.extts_polarity {pps['polarity']}
+ts2phc.extts_correction {int(pps['extts_correction_ns'])}
+ts2phc.pin_index {int(pps['input_pin'])}
+"""
+        )
+    perout_phase = f"ts2phc.perout_phase {int(pps['perout_phase_ns'])}\n" if source_device else ""
+    text = f"""[global]
+use_syslog 0
+verbose 1
+logging_level {int(ts2phc['logging_level'])}
+clock_servo {ts2phc['servo']}
+pi_proportional_const {float(ts2phc['kp'])}
+pi_integral_const {float(ts2phc['ki'])}
+step_threshold {float(ts2phc['step_threshold_ns']) / 1_000_000_000:.9f}
+first_step_threshold {float(ts2phc['first_step_threshold_ns']) / 1_000_000_000:.9f}
+servo_offset_threshold {int(ts2phc['stable_threshold_ns'])}
+servo_num_offset_values {int(ts2phc['stable_samples'])}
+ts2phc.holdover {int(ts2phc['holdover_seconds'])}
+ts2phc.pulsewidth {int(pps['pulse_width_ns'])}
+{perout_phase}
+
+{''.join(sections)}"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o644)
+    return source_device, sink_devices
+
+
+def start_pps(values: dict[str, Any], inventory: dict[str, dict[str, Any]], processes: list[dict[str, Any]]) -> None:
+    pps = values["pps"]
+    if not pps["enabled"]:
+        return
+    source_device, sink_devices = render_ts2phc_config(PPS_CONFIG_FILE, values, inventory)
+    args = ["ts2phc", "-f", str(PPS_CONFIG_FILE)]
+    if source_device is None:
+        args.extend(["-s", "generic"])
+    args.extend(["-m", "-q"])
+    spawn("PPS-ts2phc", args, processes)
+    processes[-1].update(
+        {
+            "kind": "ts2phc",
+            "pps_source": pps["source"],
+            "pps_sinks": list(pps["sinks"]),
+            "source_device": source_device,
+            "sink_devices": sink_devices,
+        }
+    )
+
+
 def start() -> dict[str, Any]:
     require_root()
     current = status()
@@ -439,6 +586,7 @@ def start() -> dict[str, Any]:
             args.extend(["-m", "-q"])
             spawn(label, args, processes)
             processes[-1].update({"node": node["name"], "servo": node_servo})
+        start_pps(config(), phcs_by_id, processes)
     except Exception:
         for item in reversed(processes):
             try:

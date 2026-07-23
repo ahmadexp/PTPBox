@@ -72,6 +72,79 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("clock_servo linreg", text)
         self.assertIn("free_running 1", text)
 
+    def test_ts2phc_config_maps_periodic_output_and_external_timestamp_pins(self) -> None:
+        path = Path(self.temporary.name) / "ptpbox-ts2phc.conf"
+        values = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))
+        values["pps"].update(
+            {
+                "enabled": True,
+                "source": "BC1",
+                "sinks": ["BC2"],
+                "output_pin": 1,
+                "input_pin": 0,
+                "polarity": "both",
+                "pulse_width_ns": 100_000_000,
+                "perout_phase_ns": 250,
+                "extts_correction_ns": -17,
+            }
+        )
+        values["pps"]["ts2phc"].update({"servo": "linreg", "holdover_seconds": 30})
+
+        with patch.object(
+            CONTROLLER,
+            "validate_pps_hardware",
+            return_value=("/dev/ptp1", ["/dev/ptp2"]),
+        ):
+            source, sinks = CONTROLLER.render_ts2phc_config(path, values, {})
+
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual("/dev/ptp1", source)
+        self.assertEqual(["/dev/ptp2"], sinks)
+        self.assertIn("clock_servo linreg", text)
+        self.assertIn("ts2phc.holdover 30", text)
+        self.assertIn("[/dev/ptp1]\nts2phc.master 1", text)
+        self.assertIn("ts2phc.pin_index 1", text)
+        self.assertIn("[/dev/ptp2]", text)
+        self.assertIn("ts2phc.extts_polarity both", text)
+        self.assertIn("ts2phc.extts_correction -17", text)
+
+        values["pps"]["source"] = "external"
+        external_path = Path(self.temporary.name) / "ptpbox-ts2phc-external.conf"
+        with patch.object(
+            CONTROLLER,
+            "validate_pps_hardware",
+            return_value=(None, ["/dev/ptp2"]),
+        ):
+            CONTROLLER.render_ts2phc_config(external_path, values, {})
+        self.assertNotIn("ts2phc.perout_phase", external_path.read_text(encoding="utf-8"))
+
+    def test_pps_start_is_safe_when_disabled_and_managed_when_enabled(self) -> None:
+        values = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))
+        processes = [{"label": "BC1-GM", "pid": 1}]
+        with patch.object(CONTROLLER, "spawn") as spawn:
+            CONTROLLER.start_pps(values, {}, processes)
+        spawn.assert_not_called()
+
+        values["pps"].update({"enabled": True, "source": "BC1", "sinks": ["BC2"]})
+
+        def fake_spawn(label, args, spawned):
+            spawned.append({"label": label, "pid": 99, "command": args})
+
+        with (
+            patch.object(
+                CONTROLLER,
+                "render_ts2phc_config",
+                return_value=("/dev/ptp1", ["/dev/ptp2"]),
+            ),
+            patch.object(CONTROLLER, "spawn", side_effect=fake_spawn),
+        ):
+            CONTROLLER.start_pps(values, {}, processes)
+
+        self.assertEqual("PPS-ts2phc", processes[-1]["label"])
+        self.assertEqual("ts2phc", processes[-1]["kind"])
+        self.assertEqual(["BC2"], processes[-1]["pps_sinks"])
+        self.assertIn("ptpbox-ts2phc.conf", " ".join(processes[-1]["command"]))
+
     def test_endpoint_configs_force_their_roles(self) -> None:
         server = Path(self.temporary.name) / "server.conf"
         client = Path(self.temporary.name) / "client.conf"

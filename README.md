@@ -216,12 +216,20 @@ flowchart LR
     Agent -. "sudo: fixed lifecycle + servo verbs" .-> Helper
     Helper --> NS
     NS --> PTP
+    Helper -. "guarded PPS config" .-> PPS["optional ts2phc\nPHC PPS out / in"]
 ```
 
 The agent runs as the operator, not root. Observation stays unprivileged.
 Lifecycle and servo control cross a narrow sudo boundary that accepts five
 fixed operations and no arbitrary command line. See
 [Architecture](docs/ARCHITECTURE.md) and [Security](SECURITY.md).
+
+The Configuration page also exposes a safe-off-by-default PPS lab: select a PHC
+source or external PPS, choose PPS input clocks, pins, edge, pulse width, phase,
+correction, and the `ts2phc` servo. Apply validates the real periodic-output and
+external-timestamp capabilities before a managed process is started. The
+Overview reports each clock's actual PPS role, connector function, and runtime
+state from sysfs and the managed process table.
 
 ## What gets measured
 
@@ -241,6 +249,8 @@ fixed operations and no arbitrary command line. See
 - Six-dimensional state-space projections, covariance ellipses, empirical
   Poincaré crossings, modal coordinates, and rolling eigenvalue shares
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
+- Per-node PPS availability, configured in/out role, live PHC pin function,
+  channel, connector, and managed `ts2phc` state
 - Experiment metadata, servo constants, and capture lifecycle
 
 The live agent reads mapped PHCs without changing them and separately parses
@@ -318,7 +328,7 @@ servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
 the multi-pendulum phase view, covariance and eigenmode analysis, notifications,
 the state-space and Poincaré atlas, a standalone host bundle, live inventory,
 configuration staging, and guarded lifecycle control. The next milestones are
-durable experiment storage, PPS comparison datasets, automated
+durable experiment storage, PPS edge/offset datasets, automated
 MTIE/TDEV/Allan deviation, and reusable topology presets. See
 [CHANGELOG.md](CHANGELOG.md).
 

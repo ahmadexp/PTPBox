@@ -42,6 +42,8 @@ type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "A
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type ServoType = "pi" | "linreg" | "nullf";
+type PpsPolarity = "rising" | "falling" | "both";
+type PpsNodeState = "active" | "starting" | "stopped" | "ready" | "external" | "unavailable";
 
 type ServoNodeControl = {
   mode: "reference" | "active" | "holdover";
@@ -52,6 +54,35 @@ type ServoNodeControl = {
 };
 
 type ServoControlState = { updated_at: number | null; nodes: Record<string, ServoNodeControl> };
+
+type PpsPinStatus = {
+  index: number;
+  name: string;
+  function: "none" | "external-timestamp" | "periodic-output" | "physical-sync" | string;
+  channel: number;
+};
+
+type PpsNodeStatus = {
+  role: "source" | "sink" | "disabled";
+  state: PpsNodeState;
+  configured: boolean;
+  running: boolean;
+  capable: boolean;
+  phc: string | null;
+  device: string | null;
+  pin: PpsPinStatus | null;
+  channel: number;
+};
+
+type PpsStatus = {
+  enabled: boolean;
+  running: boolean;
+  source: string;
+  sinks: string[];
+  servo: ServoType;
+  pulse_width_ns: number;
+  nodes: Record<string, PpsNodeStatus>;
+};
 
 type ObservatoryNotification = {
   id: string;
@@ -73,7 +104,7 @@ type CommandItem = {
   keywords: string;
   section?: Section;
   nodeId?: string;
-  action?: "notifications" | "apply" | "servo-control" | "sync-frequency";
+  action?: "notifications" | "apply" | "servo-control" | "sync-frequency" | "pps-control";
   icon: typeof Search;
 };
 
@@ -126,6 +157,7 @@ type AgentStatus = {
   running?: boolean;
   phc_sample_rate_hz?: number;
   servo_control?: ServoControlState;
+  pps?: PpsStatus;
 };
 
 type HostInterface = {
@@ -1422,6 +1454,21 @@ export default function PTPBoxDashboard() {
   const [syncFrequencyHz, setSyncFrequencyHz] = useState(1);
   const [activeSyncFrequencyHz, setActiveSyncFrequencyHz] = useState(1);
   const [phcSampleRateHz, setPhcSampleRateHz] = useState(1);
+  const [ppsEnabled, setPpsEnabled] = useState(false);
+  const [ppsSource, setPpsSource] = useState("BC1");
+  const [ppsSinks, setPpsSinks] = useState<string[]>(["BC2", "BC3", "BC4", "BC5", "BC6", "BC7"]);
+  const [ppsOutputPin, setPpsOutputPin] = useState(0);
+  const [ppsInputPin, setPpsInputPin] = useState(0);
+  const [ppsChannel, setPpsChannel] = useState(0);
+  const [ppsPolarity, setPpsPolarity] = useState<PpsPolarity>("rising");
+  const [ppsPulseWidthNs, setPpsPulseWidthNs] = useState(100_000_000);
+  const [ppsPhaseNs, setPpsPhaseNs] = useState(0);
+  const [ppsCorrectionNs, setPpsCorrectionNs] = useState(0);
+  const [ppsServo, setPpsServo] = useState<ServoType>("pi");
+  const [ppsStepThresholdNs, setPpsStepThresholdNs] = useState(0);
+  const [ppsFirstStepThresholdNs, setPpsFirstStepThresholdNs] = useState(20_000);
+  const [ppsHoldoverSeconds, setPpsHoldoverSeconds] = useState(0);
+  const [ppsStableThresholdNs, setPpsStableThresholdNs] = useState(100);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -1479,6 +1526,27 @@ export default function PTPBoxDashboard() {
   const { effectiveHz: effectiveSyncFrequencyHz, logInterval: syncLogInterval } = synchronizationRate(syncFrequencyHz);
   const syncFrequencyExact = Math.abs(syncFrequencyHz - effectiveSyncFrequencyHz) < 0.001;
   const syncSliderProgress = ((syncFrequencyHz - 0.5) / 9.5) * 100;
+  const ppsHardwareStatus = agentStatus?.pps;
+  const ppsConfiguredRoles = (ppsSource === "external" ? 0 : 1) + ppsSinks.length;
+  const ppsStateLabel = ppsHardwareStatus?.running ? "PPS ACTIVE" : ppsEnabled ? "RESTART TO APPLY" : "PPS OFF";
+
+  const setPpsSourceSafely = (value: string) => {
+    setPpsSource(value);
+    if (value !== "external") setPpsSinks((current) => current.filter((id) => id !== value));
+  };
+
+  const togglePpsSink = (id: string) => {
+    if (id === ppsSource) return;
+    setPpsSinks((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const ppsNodeLabel = (id: string) => {
+    const pps = ppsHardwareStatus?.nodes[id];
+    if (!pps) return "PPS · CHECKING";
+    const role = pps.role === "source" ? "PPS OUT" : pps.role === "sink" ? "PPS IN" : "PPS";
+    const state = pps.state === "active" ? "ACTIVE" : pps.state === "starting" ? "ARMING" : pps.state === "stopped" ? "STOPPED" : pps.state === "external" ? "IN USE" : pps.state === "unavailable" ? "N/A" : "READY";
+    return `${role} · ${state}`;
+  };
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -1541,6 +1609,25 @@ export default function PTPBoxDashboard() {
           two_step?: boolean;
           hardware_timestamping?: boolean;
           servo?: { type?: ServoType; kp?: number; ki?: number; step_threshold_ns?: number; sanity_freq_limit_ppb?: number };
+          pps?: {
+            enabled?: boolean;
+            source?: string;
+            sinks?: string[];
+            output_pin?: number;
+            input_pin?: number;
+            channel?: number;
+            polarity?: PpsPolarity;
+            pulse_width_ns?: number;
+            perout_phase_ns?: number;
+            extts_correction_ns?: number;
+            ts2phc?: {
+              servo?: ServoType;
+              step_threshold_ns?: number;
+              first_step_threshold_ns?: number;
+              holdover_seconds?: number;
+              stable_threshold_ns?: number;
+            };
+          };
         };
         if (value.profile) setProfile(value.profile);
         if (Number.isInteger(value.log_sync_interval)) {
@@ -1559,6 +1646,21 @@ export default function PTPBoxDashboard() {
         if (typeof value.servo?.ki === "number") setKi(value.servo.ki);
         if (typeof value.servo?.step_threshold_ns === "number") setStepThreshold(value.servo.step_threshold_ns);
         if (typeof value.servo?.sanity_freq_limit_ppb === "number") setSanity(value.servo.sanity_freq_limit_ppb > 0);
+        if (typeof value.pps?.enabled === "boolean") setPpsEnabled(value.pps.enabled);
+        if (typeof value.pps?.source === "string") setPpsSource(value.pps.source);
+        if (Array.isArray(value.pps?.sinks) && value.pps.sinks.length) setPpsSinks(value.pps.sinks);
+        if (typeof value.pps?.output_pin === "number") setPpsOutputPin(value.pps.output_pin);
+        if (typeof value.pps?.input_pin === "number") setPpsInputPin(value.pps.input_pin);
+        if (typeof value.pps?.channel === "number") setPpsChannel(value.pps.channel);
+        if (value.pps?.polarity && ["rising", "falling", "both"].includes(value.pps.polarity)) setPpsPolarity(value.pps.polarity);
+        if (typeof value.pps?.pulse_width_ns === "number") setPpsPulseWidthNs(value.pps.pulse_width_ns);
+        if (typeof value.pps?.perout_phase_ns === "number") setPpsPhaseNs(value.pps.perout_phase_ns);
+        if (typeof value.pps?.extts_correction_ns === "number") setPpsCorrectionNs(value.pps.extts_correction_ns);
+        if (value.pps?.ts2phc?.servo && ["pi", "linreg", "nullf"].includes(value.pps.ts2phc.servo)) setPpsServo(value.pps.ts2phc.servo);
+        if (typeof value.pps?.ts2phc?.step_threshold_ns === "number") setPpsStepThresholdNs(value.pps.ts2phc.step_threshold_ns);
+        if (typeof value.pps?.ts2phc?.first_step_threshold_ns === "number") setPpsFirstStepThresholdNs(value.pps.ts2phc.first_step_threshold_ns);
+        if (typeof value.pps?.ts2phc?.holdover_seconds === "number") setPpsHoldoverSeconds(value.pps.ts2phc.holdover_seconds);
+        if (typeof value.pps?.ts2phc?.stable_threshold_ns === "number") setPpsStableThresholdNs(value.pps.ts2phc.stable_threshold_ns);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) configHydratedRef.current = false;
       }
@@ -1575,7 +1677,10 @@ export default function PTPBoxDashboard() {
       if (polling) return;
       polling = true;
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 6500);
+      // The first status request after an agent upgrade can overlap the initial
+      // seven-PHC sampling pass. Keep that cold-start path from being mistaken
+      // for an unreachable host; steady-state status returns in milliseconds.
+      const timeout = window.setTimeout(() => controller.abort(), 12_000);
       try {
         const response = await fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
         if (!response.ok) throw new Error("agent unavailable");
@@ -1857,14 +1962,15 @@ export default function PTPBoxDashboard() {
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },
     { id: "nav-interfaces", group: "Navigate", label: "Interfaces & PHCs", description: "NIC, namespace, link, and timestamp inventory", keywords: "hardware ports network nic", section: "Interfaces", icon: Cable },
-    { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, and safety controls", keywords: "settings tune apply", section: "Configuration", icon: SlidersHorizontal },
+    { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, PPS I/O, ts2phc, and safety controls", keywords: "settings tune apply pulse", section: "Configuration", icon: SlidersHorizontal },
     { id: "nav-events", group: "Navigate", label: "Event log", description: "Clock, measurement, and operator events", keywords: "logs terminal activity", section: "Event log", icon: Terminal },
     ...nodes.map((node) => ({ id: `clock-${node.id}`, group: "Clocks" as const, label: node.label, description: `${node.role} · ${node.phc} · ${node.state}`, keywords: `${node.id} ${node.role} ${node.phc} ${node.ingress} ${node.egress} offset`, section: "Overview" as Section, nodeId: node.id, icon: Clock3 })),
     { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
     { id: "control-frequency", group: "Controls", label: "Synchronization frequency", description: `${syncFrequencyHz.toFixed(1)} Hz requested · ${effectiveSyncFrequencyHz} Hz effective`, keywords: "sync rate interval hertz frequency logSyncInterval", section: "Configuration", action: "sync-frequency", icon: Radio },
+    { id: "control-pps", group: "Controls", label: "PPS & ts2phc", description: `${ppsStateLabel} · ${ppsSource === "external" ? "external source" : `${ppsSource} output`} · ${ppsSinks.length} inputs`, keywords: "pps pulse per second input output extts perout ts2phc pin", section: "Configuration", action: "pps-control", icon: Zap },
     { id: "control-notifications", group: "Controls", label: "Notification center", description: `${unreadNotificationCount} unread timing alert${unreadNotificationCount === 1 ? "" : "s"}`, keywords: "bell alerts warnings health", action: "notifications", icon: Bell },
     { id: "control-apply", group: "Controls", label: "Review & apply settings", description: "Validate, stage, restart, and verify the cascade", keywords: "save configuration restart", action: "apply", icon: ShieldCheck },
-  ], [effectiveSyncFrequencyHz, nodes, syncFrequencyHz, unreadNotificationCount]);
+  ], [effectiveSyncFrequencyHz, nodes, ppsSinks.length, ppsSource, ppsStateLabel, syncFrequencyHz, unreadNotificationCount]);
 
   const filteredCommandItems = useMemo(() => {
     const query = commandQuery.trim().toLowerCase();
@@ -1896,8 +2002,8 @@ export default function PTPBoxDashboard() {
     if (item.nodeId) selectNode(item.nodeId);
     if (item.action === "notifications") setNotificationsOpen(true);
     if (item.action === "apply") setApplyOpen(true);
-    if (item.action === "servo-control" || item.action === "sync-frequency") {
-      const target = item.action === "sync-frequency" ? "sync-frequency-control" : "servo-control";
+    if (item.action === "servo-control" || item.action === "sync-frequency" || item.action === "pps-control") {
+      const target = item.action === "sync-frequency" ? "sync-frequency-control" : item.action === "pps-control" ? "pps-control" : "servo-control";
       window.setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
     }
     setCommandOpen(false);
@@ -2021,6 +2127,29 @@ export default function PTPBoxDashboard() {
         step_threshold_ns: stepThreshold,
         first_step_threshold_ns: 20_000,
         sanity_freq_limit_ppb: sanity ? 200_000 : 0,
+      },
+      pps: {
+        enabled: ppsEnabled,
+        source: ppsSource,
+        sinks: ppsSinks.filter((id) => id !== ppsSource),
+        output_pin: ppsOutputPin,
+        input_pin: ppsInputPin,
+        channel: ppsChannel,
+        polarity: ppsPolarity,
+        pulse_width_ns: ppsPulseWidthNs,
+        perout_phase_ns: ppsPhaseNs,
+        extts_correction_ns: ppsCorrectionNs,
+        ts2phc: {
+          servo: ppsServo,
+          kp: 0.7,
+          ki: 0.3,
+          step_threshold_ns: ppsStepThresholdNs,
+          first_step_threshold_ns: ppsFirstStepThresholdNs,
+          holdover_seconds: ppsHoldoverSeconds,
+          stable_threshold_ns: ppsStableThresholdNs,
+          stable_samples: 10,
+          logging_level: 6,
+        },
       },
     };
     setApplyBusy(true);
@@ -2167,7 +2296,7 @@ export default function PTPBoxDashboard() {
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
               <h1>{section === "Overview" ? "Cascade overview" : section === "Covariance" ? "Covariance lab" : section === "State space" ? "State-space atlas" : section}</h1>
-              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "State space" ? "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "State space" ? "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol, servo, PPS I/O, and ts2phc behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -2212,6 +2341,12 @@ export default function PTPBoxDashboard() {
                           <strong>{node.label}</strong>
                           <span className="node-offset">{formatOffset(node.offset, node.measured)}</span>
                           <div className="node-state"><span /> {node.state}</div>
+                          <div
+                            className={`node-pps ${agentStatus?.pps?.nodes[node.id]?.state ?? "checking"} ${agentStatus?.pps?.nodes[node.id]?.role ?? "disabled"}`}
+                            title={agentStatus?.pps?.nodes[node.id]?.pin ? `${agentStatus?.pps?.nodes[node.id]?.device} · ${agentStatus?.pps?.nodes[node.id]?.pin?.name} · channel ${agentStatus?.pps?.nodes[node.id]?.channel}` : "Reading hardware PPS capability"}
+                          >
+                            <Zap size={8} /> {ppsNodeLabel(node.id)}
+                          </div>
                           <div className="node-ports"><code>{node.ingress}</code><ArrowRight size={11} /><code>{node.egress}</code></div>
                         </button>
                       </div>
@@ -2462,6 +2597,46 @@ export default function PTPBoxDashboard() {
                     <button className="primary-action" type="button" disabled={servoBusy || !agentStatus?.running} onClick={() => void controlServo(true)}><Play size={14} /> {servoBusy ? "Applying…" : targetInHoldover ? "Resume servo" : "Apply & run"}</button>
                   </div>
                 </section>
+                <section className="instrument-panel config-section pps-config-section" id="pps-control">
+                  <div className="panel-heading"><div><span className="section-kicker">PPS I/O & TS2PHC</span><h2>Hardware pulse distribution</h2></div><span className={`quality-badge pps-quality ${ppsHardwareStatus?.running ? "" : ppsEnabled ? "pending" : "off"}`}>{ppsStateLabel}</span></div>
+                  <div className="pps-enable-row">
+                    <div><Zap size={18} /><div><strong>Managed PPS experiment</strong><small>Configure PHC periodic output, external timestamp inputs, and one LinuxPTP ts2phc servo.</small></div></div>
+                    <Toggle on={ppsEnabled} onChange={setPpsEnabled} label="Enable managed PPS experiment" />
+                  </div>
+                  <div className="form-grid pps-io-grid">
+                    <label><span>PPS source</span><select className="select-control" value={ppsSource} onChange={(event) => setPpsSourceSafely(event.target.value)}><option value="external">External PPS · generic ToD</option>{nodes.map((node) => <option value={node.id} key={node.id}>{node.label} · {node.phc}</option>)}</select><small>A PHC source programs PPS out; external expects a lab PPS input.</small></label>
+                    <label><span>Output pin</span><select className="select-control" value={ppsOutputPin} disabled={ppsSource === "external"} onChange={(event) => setPpsOutputPin(Number(event.target.value))}><option value={0}>Pin 0 · mlx5_pps0</option><option value={1}>Pin 1 · mlx5_pps1</option></select><small>Programmable periodic-output connector on the source NIC.</small></label>
+                    <label><span>Input pin</span><select className="select-control" value={ppsInputPin} onChange={(event) => setPpsInputPin(Number(event.target.value))}><option value={0}>Pin 0 · mlx5_pps0</option><option value={1}>Pin 1 · mlx5_pps1</option></select></label>
+                    <label><span>Hardware channel</span><select className="select-control" value={ppsChannel} onChange={(event) => setPpsChannel(Number(event.target.value))}><option value={0}>Channel 0</option></select></label>
+                    <label><span>Input edge</span><select className="select-control" value={ppsPolarity} onChange={(event) => setPpsPolarity(event.target.value as PpsPolarity)}><option value="rising">Rising edge</option><option value="falling">Falling edge</option><option value="both">Both · pulse rejection</option></select></label>
+                    <label><span>Pulse width</span><div className="input-unit"><input type="number" min="1" max="990" value={ppsPulseWidthNs / 1_000_000} onChange={(event) => setPpsPulseWidthNs(Math.round(Number(event.target.value) * 1_000_000))} /><em>ms</em></div></label>
+                    <label><span>Output phase</span><div className="input-unit"><input type="number" min="0" max="999999999" value={ppsPhaseNs} onChange={(event) => setPpsPhaseNs(Number(event.target.value))} /><em>ns</em></div></label>
+                    <label><span>Input correction</span><div className="input-unit"><input type="number" value={ppsCorrectionNs} onChange={(event) => setPpsCorrectionNs(Number(event.target.value))} /><em>ns</em></div></label>
+                  </div>
+                  <div className="pps-sink-selector">
+                    <div><span className="section-kicker">PPS INPUT CLOCKS</span><strong>Select ts2phc sinks</strong><small>Each selected measurement PHC timestamps the same physical pulse.</small></div>
+                    <div>{nodes.map((node) => {
+                      const selected = ppsSinks.includes(node.id);
+                      const sourceNode = ppsSource === node.id;
+                      return <button type="button" key={node.id} disabled={sourceNode} className={selected ? "active" : ""} onClick={() => togglePpsSink(node.id)}><i>{selected ? <Check size={11} /> : <Clock3 size={11} />}</i><span><strong>{node.id}</strong><small>{sourceNode ? "PPS OUT" : selected ? "PPS IN" : "AVAILABLE"}</small></span></button>;
+                    })}</div>
+                  </div>
+                  <div className="pps-ts2phc">
+                    <div className="pps-subheading"><div><span className="section-kicker">LINUXPTP 4.4</span><strong>ts2phc discipline</strong></div><code>{ppsConfiguredRoles} PHC role{ppsConfiguredRoles === 1 ? "" : "s"}</code></div>
+                    <div className="form-grid">
+                      <label><span>Servo</span><select className="select-control" value={ppsServo} onChange={(event) => setPpsServo(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency</option></select></label>
+                      <label><span>Stable-lock threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStableThresholdNs} onChange={(event) => setPpsStableThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
+                      <label><span>First-step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsFirstStepThresholdNs} onChange={(event) => setPpsFirstStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
+                      <label><span>Step threshold</span><div className="input-unit"><input type="number" min="0" value={ppsStepThresholdNs} onChange={(event) => setPpsStepThresholdNs(Number(event.target.value))} /><em>ns</em></div></label>
+                      <label><span>ToD holdover</span><div className="input-unit"><input type="number" min="0" value={ppsHoldoverSeconds} onChange={(event) => setPpsHoldoverSeconds(Number(event.target.value))} /><em>s</em></div><small>Continues only from a stable servo when time-of-day is lost.</small></label>
+                      <label><span>Stable samples</span><div className="input-unit"><input value="10" readOnly /><em>samples</em></div></label>
+                    </div>
+                  </div>
+                  <div className={`pps-live-note ${ppsHardwareStatus?.running ? "active" : ""}`}>
+                    <Radio size={15} />
+                    <div><strong>{ppsHardwareStatus?.running ? `ts2phc is running · ${ppsHardwareStatus.servo.toUpperCase()} servo` : ppsEnabled ? "PPS changes are staged in the editor" : "PPS hardware remains untouched"}</strong><span>{ppsHardwareStatus?.running ? `${ppsHardwareStatus.source === "external" ? "External PPS" : `${ppsHardwareStatus.source} PPS out`} is feeding ${ppsHardwareStatus.sinks.length} configured input${ppsHardwareStatus.sinks.length === 1 ? "" : "s"}.` : "Review & apply restarts the managed cascade; enabling ts2phc will adjust sink PHCs, so use PTP holdover when isolating PPS behavior."}</span></div>
+                  </div>
+                </section>
                 <section className="instrument-panel config-section">
                   <div className="panel-heading"><div><span className="section-kicker">GUARDRAILS</span><h2>Safety & recovery</h2></div></div>
                   <div className="toggle-list">
@@ -2472,7 +2647,7 @@ export default function PTPBoxDashboard() {
                 </section>
               </div>
               <aside className="config-aside">
-                <div className="change-card"><span className="section-kicker">REVIEW CONFIGURATION</span><strong>4 controlled values</strong><p>PTPBox validates the complete document, stages it atomically, then restarts the managed LinuxPTP cascade.</p><div><span>BC2…BC7</span><em>Servo gains</em></div><div><span>All clocks</span><em>Sync {effectiveSyncFrequencyHz.toFixed(1)} Hz</em></div><div><span>All clocks</span><em>Step threshold</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button" onClick={() => { setKp(0.7); setKi(0.3); setStepThreshold(0); setSyncFrequencyHz(1); }}> <RotateCcw size={14} /> Reset safe defaults</button></div>
+                <div className="change-card"><span className="section-kicker">REVIEW CONFIGURATION</span><strong>PTP + PPS controls</strong><p>PTPBox validates the complete document, stages it atomically, then restarts the managed LinuxPTP processes.</p><div><span>BC2…BC7</span><em>Servo gains</em></div><div><span>All clocks</span><em>Sync {effectiveSyncFrequencyHz.toFixed(1)} Hz</em></div><div><span>PPS fabric</span><em>{ppsEnabled ? `${ppsConfiguredRoles} roles` : "Disabled"}</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button" onClick={() => { setKp(0.7); setKi(0.3); setStepThreshold(0); setSyncFrequencyHz(1); setPpsEnabled(false); setPpsSource("BC1"); setPpsSinks(nodes.slice(1).map((node) => node.id)); setPpsOutputPin(0); setPpsInputPin(0); setPpsChannel(0); setPpsPolarity("rising"); setPpsPulseWidthNs(100_000_000); setPpsPhaseNs(0); setPpsCorrectionNs(0); setPpsServo("pi"); setPpsStepThresholdNs(0); setPpsFirstStepThresholdNs(20_000); setPpsHoldoverSeconds(0); setPpsStableThresholdNs(100); }}> <RotateCcw size={14} /> Reset safe defaults</button></div>
                 <div className="config-note"><ShieldCheck size={18} /><div><strong>Safe apply</strong><p>PTPBox validates interface ownership, clock state, and config syntax before touching the running chain.</p></div></div>
               </aside>
             </div>
@@ -2562,8 +2737,9 @@ export default function PTPBoxDashboard() {
               <div><span>Integral constant</span><strong>{ki.toFixed(2)}</strong></div>
               <div><span>Sync frequency</span><p><ins>{syncFrequencyHz.toFixed(1)} Hz requested</ins><ArrowRight size={13} /><ins>{effectiveSyncFrequencyHz.toFixed(1)} Hz effective</ins></p></div>
               <div><span>Step threshold</span><strong>{stepThreshold} ns</strong></div>
+              <div><span>PPS distribution</span><strong>{ppsEnabled ? `${ppsSource === "external" ? "External" : `${ppsSource} out`} → ${ppsSinks.length} input${ppsSinks.length === 1 ? "" : "s"} · ${ppsServo.toUpperCase()}` : "Disabled · pins released"}</strong></div>
             </div>
-            <div className="rollout-plan"><span>ROLLOUT PLAN</span><ol><li><i>1</i><div><strong>Validate & stage</strong><small>Atomically save a complete LinuxPTP configuration</small></div></li><li><i>2</i><div><strong>Restart managed cascade</strong><small>Recreate every namespace clock with the new Sync interval</small></div></li><li><i>3</i><div><strong>Observe reacquisition</strong><small>Raw PHC monitoring follows the clocks back to lock</small></div></li></ol></div>
+            <div className="rollout-plan"><span>ROLLOUT PLAN</span><ol><li><i>1</i><div><strong>Validate & stage</strong><small>Check topology, PPS pin/channel ranges, and a complete LinuxPTP document</small></div></li><li><i>2</i><div><strong>Restart managed timing processes</strong><small>Recreate namespace clocks and {ppsEnabled ? "start the hardware-backed ts2phc loop" : "leave every PPS pin released"}</small></div></li><li><i>3</i><div><strong>Observe reacquisition</strong><small>Raw PHC monitoring and per-node PPS state remain visible</small></div></li></ol></div>
             <div className="drawer-actions"><button className="full-secondary" disabled={applyBusy} onClick={() => setApplyOpen(false)}>Cancel</button><button className="primary-action" disabled={applyBusy} onClick={handleApply}><Zap size={15} /> {applyBusy ? "Applying…" : "Apply to cascade"}</button></div>
           </section>
         </div>

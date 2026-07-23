@@ -4,6 +4,12 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a safe-off-by-default PPS and `ts2phc` control surface with selectable
+  PHC or external source, per-clock PPS inputs, Mellanox pin/channel selection,
+  edge, pulse, phase, correction, servo, stable-lock, step, and ToD-holdover
+  settings; the controller validates real PHC capabilities before starting one
+  tracked `ts2phc` process, and Overview reports each node's live sysfs PPS
+  role, pin function, connector, and process state.
 - Matched the read-only BC1-relative PHC sampler to the applied 0.5–8 Hz Sync
   cadence and added a lightweight incremental `/api/phc` browser stream, so
   the topology and raw PHC chart update up to eight times per second without

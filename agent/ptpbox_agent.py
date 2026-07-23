@@ -40,6 +40,7 @@ WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "stati
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", Path(__file__).with_name("topology.json")))
 PHC_MAP_FILE = Path(os.environ.get("PTPBOX_PHC_MAP", "/run/ptpbox/phcs.json"))
+PPS_PROCESS_FILE = Path(os.environ.get("PTPBOX_PROCESS_STATE", "/run/ptpbox/processes.json"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
@@ -73,6 +74,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "step_threshold_ns": 0,
         "first_step_threshold_ns": 20_000,
         "sanity_freq_limit_ppb": 200_000,
+    },
+    "pps": {
+        "enabled": False,
+        "source": "BC1",
+        "sinks": [],
+        "output_pin": 0,
+        "input_pin": 0,
+        "channel": 0,
+        "polarity": "rising",
+        "pulse_width_ns": 100_000_000,
+        "perout_phase_ns": 0,
+        "extts_correction_ns": 0,
+        "ts2phc": {
+            "servo": "pi",
+            "kp": 0.7,
+            "ki": 0.3,
+            "step_threshold_ns": 0,
+            "first_step_threshold_ns": 20_000,
+            "holdover_seconds": 0,
+            "stable_threshold_ns": 100,
+            "stable_samples": 10,
+            "logging_level": 6,
+        },
     },
 }
 
@@ -607,11 +631,23 @@ def phc_sampler_loop(stop: threading.Event) -> None:
 
 
 def load_config() -> dict[str, Any]:
+    merged = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
         value = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else DEFAULT_CONFIG.copy()
+        if not isinstance(value, dict):
+            return merged
     except (OSError, json.JSONDecodeError):
-        return json.loads(json.dumps(DEFAULT_CONFIG))
+        return merged
+
+    def merge(target: dict[str, Any], update: dict[str, Any]) -> None:
+        for key, item in update.items():
+            if isinstance(item, dict) and isinstance(target.get(key), dict):
+                merge(target[key], item)
+            else:
+                target[key] = item
+
+    merge(merged, value)
+    return merged
 
 
 def configured_phc_sample_rate_hz() -> float:
@@ -644,6 +680,70 @@ def validate_config(value: dict[str, Any]) -> list[str]:
                 errors.append(f"servo.{key} must be between 0 and 10")
         if not isinstance(servo.get("step_threshold_ns"), (int, float)) or servo["step_threshold_ns"] < 0:
             errors.append("servo.step_threshold_ns must be non-negative")
+    pps = value.get("pps")
+    node_ids = [node["name"] for node in topology_nodes()]
+    if not isinstance(pps, dict):
+        errors.append("pps settings are required")
+    else:
+        if not isinstance(pps.get("enabled"), bool):
+            errors.append("pps.enabled must be boolean")
+        source = pps.get("source")
+        if source != "external" and source not in node_ids:
+            errors.append("pps.source must be external or a topology clock")
+        sinks = pps.get("sinks")
+        if not isinstance(sinks, list) or any(item not in node_ids for item in sinks) or len(set(sinks or [])) != len(sinks or []):
+            errors.append("pps.sinks must contain unique topology clocks")
+        elif source in sinks:
+            errors.append("pps.source cannot also be a sink")
+        elif pps.get("enabled") and not sinks:
+            errors.append("pps.sinks must select at least one clock when PPS is enabled")
+        for key in ("output_pin", "input_pin"):
+            if isinstance(pps.get(key), bool) or not isinstance(pps.get(key), int) or not 0 <= pps[key] <= 31:
+                errors.append(f"pps.{key} must be an integer from 0 through 31")
+        if isinstance(pps.get("channel"), bool) or not isinstance(pps.get("channel"), int) or not 0 <= pps["channel"] <= 31:
+            errors.append("pps.channel must be an integer from 0 through 31")
+        if pps.get("polarity") not in {"rising", "falling", "both"}:
+            errors.append("pps.polarity must be rising, falling, or both")
+        if (
+            isinstance(pps.get("pulse_width_ns"), bool)
+            or not isinstance(pps.get("pulse_width_ns"), int)
+            or not 1_000_000 <= pps["pulse_width_ns"] <= 990_000_000
+        ):
+            errors.append("pps.pulse_width_ns must be an integer from 1000000 through 990000000")
+        if (
+            isinstance(pps.get("perout_phase_ns"), bool)
+            or not isinstance(pps.get("perout_phase_ns"), int)
+            or not 0 <= pps["perout_phase_ns"] <= 999_999_999
+        ):
+            errors.append("pps.perout_phase_ns must be an integer from 0 through 999999999")
+        if isinstance(pps.get("extts_correction_ns"), bool) or not isinstance(pps.get("extts_correction_ns"), int):
+            errors.append("pps.extts_correction_ns must be an integer")
+        ts2phc = pps.get("ts2phc")
+        if not isinstance(ts2phc, dict):
+            errors.append("pps.ts2phc settings are required")
+        else:
+            if ts2phc.get("servo") not in SUPPORTED_SERVOS:
+                errors.append("pps.ts2phc.servo must be pi, linreg, or nullf")
+            for key in ("kp", "ki"):
+                if not isinstance(ts2phc.get(key), (int, float)) or not 0 <= float(ts2phc[key]) <= 10:
+                    errors.append(f"pps.ts2phc.{key} must be between 0 and 10")
+            for key in ("step_threshold_ns", "first_step_threshold_ns", "holdover_seconds", "stable_threshold_ns"):
+                if isinstance(ts2phc.get(key), bool) or not isinstance(ts2phc.get(key), (int, float)) or ts2phc[key] < 0:
+                    errors.append(f"pps.ts2phc.{key} must be non-negative")
+            if (
+                isinstance(ts2phc.get("stable_samples"), bool)
+                or not isinstance(ts2phc.get("stable_samples"), int)
+                or not 1 <= ts2phc["stable_samples"] <= 1000
+            ):
+                errors.append("pps.ts2phc.stable_samples must be an integer from 1 through 1000")
+            if (
+                isinstance(ts2phc.get("logging_level"), bool)
+                or not isinstance(ts2phc.get("logging_level"), int)
+                or not 0 <= ts2phc["logging_level"] <= 7
+            ):
+                errors.append("pps.ts2phc.logging_level must be an integer from 0 through 7")
+            if pps.get("polarity") == "both" and isinstance(ts2phc.get("holdover_seconds"), (int, float)) and ts2phc["holdover_seconds"] > 0:
+                errors.append("pps.ts2phc holdover is not supported when pps.polarity is both")
     return errors
 
 
@@ -850,6 +950,155 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
     }
 
 
+def read_integer(path: Path) -> int:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def phc_pps_capabilities(phc: str | None) -> dict[str, Any]:
+    if not phc or not re.fullmatch(r"ptp\d+", phc):
+        return {
+            "available": False,
+            "external_timestamp_channels": 0,
+            "periodic_output_channels": 0,
+            "programmable_pins": 0,
+            "pins": [],
+        }
+    root = Path("/sys/class/ptp", phc)
+    pins: list[dict[str, Any]] = []
+    try:
+        pin_paths = sorted((root / "pins").iterdir(), key=lambda item: item.name)
+    except OSError:
+        pin_paths = []
+    functions = {0: "none", 1: "external-timestamp", 2: "periodic-output", 3: "physical-sync"}
+    for index, path in enumerate(pin_paths):
+        values = read_text(path).split()
+        try:
+            function = int(values[0])
+            channel = int(values[1])
+        except (IndexError, ValueError):
+            function = -1
+            channel = -1
+        pins.append(
+            {
+                "index": index,
+                "name": path.name,
+                "function": functions.get(function, f"unknown-{function}"),
+                "channel": channel,
+            }
+        )
+    return {
+        "available": read_integer(root / "pps_available") > 0,
+        "external_timestamp_channels": read_integer(root / "n_external_timestamps"),
+        "periodic_output_channels": read_integer(root / "n_periodic_outputs"),
+        "programmable_pins": read_integer(root / "n_programmable_pins"),
+        "pins": pins,
+    }
+
+
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def pps_status(processes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    pps = load_config()["pps"]
+    topology = topology_nodes()
+    inventory_value = load_json(PHC_MAP_FILE, [])
+    inventory = {
+        item["id"]: item
+        for item in inventory_value
+        if isinstance(inventory_value, list) and isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    managed_value = load_json(PPS_PROCESS_FILE, [])
+    managed = managed_value if isinstance(managed_value, list) else []
+    managed_ts2phc = next(
+        (
+            item
+            for item in managed
+            if isinstance(item, dict)
+            and (item.get("kind") == "ts2phc" or item.get("label") == "PPS-ts2phc")
+        ),
+        None,
+    )
+    managed_pid = managed_ts2phc.get("pid") if isinstance(managed_ts2phc, dict) else None
+    managed_running = isinstance(managed_pid, int) and process_is_alive(managed_pid)
+    if not managed_running and processes:
+        managed_running = any(
+            item.get("name") == "ts2phc" and "ptpbox-ts2phc.conf" in str(item.get("command", ""))
+            for item in processes
+        )
+
+    source = pps["source"]
+    sinks = set(pps["sinks"])
+    nodes: dict[str, dict[str, Any]] = {}
+    for node in topology:
+        name = node["name"]
+        mapped = inventory.get(name, {})
+        phc = mapped.get("measurement_phc") if isinstance(mapped, dict) else None
+        capabilities = phc_pps_capabilities(phc if isinstance(phc, str) else None)
+        role = "source" if source == name else "sink" if name in sinks else "disabled"
+        pin_index = int(pps["output_pin"] if role == "source" else pps["input_pin"])
+        pins = capabilities["pins"]
+        pin = pins[pin_index] if 0 <= pin_index < len(pins) else None
+        expected_function = "periodic-output" if role == "source" else "external-timestamp" if role == "sink" else None
+        role_capable = bool(
+            capabilities["available"]
+            and (
+                role == "disabled"
+                or (
+                    role == "source"
+                    and capabilities["periodic_output_channels"] > int(pps["channel"])
+                    and capabilities["programmable_pins"] > pin_index
+                )
+                or (
+                    role == "sink"
+                    and capabilities["external_timestamp_channels"] > int(pps["channel"])
+                    and capabilities["programmable_pins"] > pin_index
+                )
+            )
+        )
+        configured = bool(pps["enabled"] and role != "disabled")
+        pin_active = bool(pin and pin["function"] == expected_function and pin["channel"] == int(pps["channel"]))
+        if not role_capable:
+            state = "unavailable"
+        elif not configured:
+            state = "external" if pin and pin["function"] != "none" else "ready"
+        elif managed_running and pin_active:
+            state = "active"
+        elif managed_running:
+            state = "starting"
+        else:
+            state = "stopped"
+        nodes[name] = {
+            "role": role,
+            "state": state,
+            "configured": configured,
+            "running": configured and managed_running,
+            "capable": role_capable,
+            "phc": phc,
+            "device": f"/dev/{phc}" if phc else None,
+            "pin": pin,
+            "channel": int(pps["channel"]),
+            "capabilities": capabilities,
+        }
+    return {
+        "enabled": bool(pps["enabled"]),
+        "running": managed_running,
+        "source": source,
+        "sinks": list(pps["sinks"]),
+        "servo": pps["ts2phc"]["servo"],
+        "pulse_width_ns": int(pps["pulse_width_ns"]),
+        "nodes": nodes,
+        "timestamp": time.time(),
+    }
+
+
 def status() -> dict[str, Any]:
     ports = interfaces()
     processes = running_processes()
@@ -863,9 +1112,10 @@ def status() -> dict[str, Any]:
         "running": bool(processes),
         "phc_sample_rate_hz": configured_phc_sample_rate_hz(),
         "servo_control": load_servo_state(),
+        "pps": pps_status(processes),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.7.0",
+        "agent_version": "1.8.0",
         "timestamp": time.time(),
     }
 
