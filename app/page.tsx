@@ -124,6 +124,7 @@ type AgentStatus = {
   ptp_interfaces?: number;
   namespaces?: string[];
   running?: boolean;
+  phc_sample_rate_hz?: number;
   servo_control?: ServoControlState;
 };
 
@@ -204,11 +205,34 @@ type TelemetryPayload = {
   phc_reference_device: string | null;
   phc_fresh_clocks: number;
   phc_method: string;
+  phc_sample_rate_hz?: number;
   servo_control: ServoControlState;
   measurement_source: string;
   raw: true;
   smoothing: "none";
   history_seconds: number;
+};
+
+type PhcTelemetryClock = {
+  id: string;
+  phc: string;
+  measurement: PhcSample | null;
+  samples: PhcSample[];
+  window_sample_count: number;
+  rms_ns: number | null;
+};
+
+type PhcTelemetryPayload = {
+  timestamp: number;
+  reference: string | null;
+  reference_phc: string | null;
+  clocks: PhcTelemetryClock[];
+  fresh_clocks: number;
+  mode: "live" | "stale" | "waiting";
+  sample_rate_hz?: number;
+  method: string;
+  raw: true;
+  smoothing: "none";
 };
 
 function agentBaseUrl() {
@@ -390,6 +414,64 @@ function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
     }
   }
   return [...synchronized.values()].sort((left, right) => left.t - right.t);
+}
+
+function historyFromPhcTelemetry(payload: PhcTelemetryPayload): HistoryPoint[] {
+  const synchronized = new Map<string, HistoryPoint>();
+  for (const clock of payload.clocks) {
+    for (const sample of clock.samples) {
+      if (!sample.valid || sample.offset_ns === null) continue;
+      const cycle = sample.sample_id.replace(/:[^:]+$/, "");
+      const point = synchronized.get(cycle) ?? { t: sample.observed_at, values: {}, hopValues: {}, key: cycle };
+      point.values[clock.id] = sample.offset_ns;
+      if (sample.previous_hop_offset_ns !== null) point.hopValues![clock.id] = sample.previous_hop_offset_ns;
+      synchronized.set(cycle, point);
+    }
+  }
+  return [...synchronized.values()].sort((left, right) => left.t - right.t);
+}
+
+function nodesWithPhcTelemetry(current: ClockNode[], payload: PhcTelemetryPayload) {
+  const byId = new Map(payload.clocks.map((clock) => [clock.id, clock]));
+  return current.map((node) => {
+    const clock = byId.get(node.id);
+    const measurement = clock?.measurement;
+    if (!clock || !measurement || measurement.observed_at < (node.lastSampleAt ?? 0)) return node;
+    return {
+      ...node,
+      phc: `/dev/${clock.phc}`,
+      offset: measurement.offset_ns ?? 0,
+      hopOffset: measurement.previous_hop_offset_ns ?? 0,
+      measured: Boolean(measurement.valid && measurement.offset_ns !== null),
+      sampleCount: clock.window_sample_count,
+      phcReadSpan: measurement.read_span_ns,
+      phcUncertainty: measurement.comparison_uncertainty_ns ?? null,
+      phcMethod: measurement.cross_timestamp_method,
+      source: measurement.error ?? `direct /dev/${clock.phc} read`,
+      lastSampleAt: measurement.observed_at,
+    };
+  });
+}
+
+function preserveNewerPhcTelemetry(incoming: ClockNode[], current: ClockNode[]) {
+  const currentById = new Map(current.map((node) => [node.id, node]));
+  return incoming.map((node) => {
+    const newer = currentById.get(node.id);
+    if (!newer || (newer.lastSampleAt ?? 0) <= (node.lastSampleAt ?? 0)) return node;
+    return {
+      ...node,
+      phc: newer.phc,
+      offset: newer.offset,
+      hopOffset: newer.hopOffset,
+      measured: newer.measured,
+      sampleCount: newer.sampleCount,
+      phcReadSpan: newer.phcReadSpan,
+      phcUncertainty: newer.phcUncertainty,
+      phcMethod: newer.phcMethod,
+      source: newer.source,
+      lastSampleAt: newer.lastSampleAt,
+    };
+  });
 }
 
 function waitingNodes(source: string): ClockNode[] {
@@ -1338,6 +1420,8 @@ export default function PTPBoxDashboard() {
   const [servoTarget, setServoTarget] = useState("BC7");
   const [servoBusy, setServoBusy] = useState(false);
   const [syncFrequencyHz, setSyncFrequencyHz] = useState(1);
+  const [activeSyncFrequencyHz, setActiveSyncFrequencyHz] = useState(1);
+  const [phcSampleRateHz, setPhcSampleRateHz] = useState(1);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -1347,6 +1431,7 @@ export default function PTPBoxDashboard() {
   const [pendulumZeroState, setPendulumZeroState] = useState<PendulumZeroState>({ at: null, baselines: {} });
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
+  const latestPhcAtRef = useRef(0);
   const servoSelectionHydratedRef = useRef(false);
   const configHydratedRef = useRef(false);
   const configuredServoTypeRef = useRef<ServoType>("pi");
@@ -1370,6 +1455,7 @@ export default function PTPBoxDashboard() {
   }, []);
 
   const activeNode = nodes.find((node) => node.id === selectedNode) ?? nodes[nodes.length - 1];
+  const agentConnected = agentStatus !== null;
   const controlledServoNodes = useMemo(() => servoTarget === "all" ? nodes.filter((node) => node.role !== "Grandmaster") : nodes.filter((node) => node.id === servoTarget), [nodes, servoTarget]);
   const targetInHoldover = controlledServoNodes.length > 0 && controlledServoNodes.every((node) => node.servoEnabled === false);
   const targetHasHoldover = controlledServoNodes.some((node) => node.servoEnabled === false);
@@ -1457,7 +1543,12 @@ export default function PTPBoxDashboard() {
           servo?: { type?: ServoType; kp?: number; ki?: number; step_threshold_ns?: number; sanity_freq_limit_ppb?: number };
         };
         if (value.profile) setProfile(value.profile);
-        if (Number.isInteger(value.log_sync_interval)) setSyncFrequencyHz(frequencyFromLogInterval(value.log_sync_interval as number));
+        if (Number.isInteger(value.log_sync_interval)) {
+          const configuredFrequency = frequencyFromLogInterval(value.log_sync_interval as number);
+          setSyncFrequencyHz(configuredFrequency);
+          setActiveSyncFrequencyHz(configuredFrequency);
+          setPhcSampleRateHz(configuredFrequency);
+        }
         if (typeof value.two_step === "boolean") setTwoStep(value.two_step);
         if (typeof value.hardware_timestamping === "boolean") setHardwareTs(value.hardware_timestamping);
         if (value.servo?.type && ["pi", "linreg", "nullf"].includes(value.servo.type)) {
@@ -1491,6 +1582,10 @@ export default function PTPBoxDashboard() {
         const status = await response.json() as AgentStatus;
         if (disposed) return;
         setAgentStatus(status);
+        if (typeof status.phc_sample_rate_hz === "number") {
+          setActiveSyncFrequencyHz(status.phc_sample_rate_hz);
+          setPhcSampleRateHz(status.phc_sample_rate_hz);
+        }
         if (initialProbe) {
           setConnection("waiting");
           setHistory([]);
@@ -1517,7 +1612,7 @@ export default function PTPBoxDashboard() {
   }, []);
 
   useEffect(() => {
-    if (!agentStatus || paused) return;
+    if (!agentConnected || paused) return;
     latestTelemetryAtRef.current = 0;
     let disposed = false;
     let polling = false;
@@ -1538,13 +1633,14 @@ export default function PTPBoxDashboard() {
         const newest = incoming.reduce((value, point) => Math.max(value, point.t), latestTelemetryAtRef.current);
         latestTelemetryAtRef.current = newest;
         setTelemetryStatus(payload);
+        if (typeof payload.phc_sample_rate_hz === "number") setPhcSampleRateHz(payload.phc_sample_rate_hz);
         const initialServo = payload.servo_control?.nodes?.BC7?.type;
         if (!servoSelectionHydratedRef.current && initialServo) {
           setServoType(initialServo);
           servoSelectionHydratedRef.current = true;
         }
         setConnection(payload.phc_mode);
-        setNodes(nodesFromTelemetry(payload));
+        setNodes((current) => preserveNewerPhcTelemetry(nodesFromTelemetry(payload), current));
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
 
         const ids = payload.clocks.map((clock) => clock.id);
@@ -1568,7 +1664,50 @@ export default function PTPBoxDashboard() {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [agentStatus, paused, range]);
+  }, [agentConnected, paused, range]);
+
+  useEffect(() => {
+    if (!agentConnected || paused) return;
+    latestPhcAtRef.current = 0;
+    let disposed = false;
+    let polling = false;
+    const controller = new AbortController();
+    const seconds = rangeSeconds(range);
+    const intervalMs = Math.max(125, Math.round(1000 / activeSyncFrequencyHz));
+
+    const pollPhc = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const query = new URLSearchParams({ history: String(seconds) });
+        if (latestPhcAtRef.current) query.set("since", String(latestPhcAtRef.current));
+        const response = await fetch(`${agentBaseUrl()}/api/phc?${query}`, { signal: controller.signal });
+        if (!response.ok) throw new Error("PHC telemetry unavailable");
+        const payload = await response.json() as PhcTelemetryPayload;
+        if (disposed) return;
+        const incoming = historyFromPhcTelemetry(payload);
+        latestPhcAtRef.current = incoming.reduce((value, point) => Math.max(value, point.t), latestPhcAtRef.current);
+        if (typeof payload.sample_rate_hz === "number") setPhcSampleRateHz(payload.sample_rate_hz);
+        setConnection(payload.mode);
+        setNodes((current) => nodesWithPhcTelemetry(current, payload));
+        setHistory((current) => mergeRawHistory(current, incoming, seconds));
+      } catch (error) {
+        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) {
+          setConnection((current) => current === "live" ? "stale" : current);
+        }
+      } finally {
+        polling = false;
+      }
+    };
+
+    void pollPhc();
+    const timer = window.setInterval(() => void pollPhc(), intervalMs);
+    return () => {
+      disposed = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [activeSyncFrequencyHz, agentConnected, paused, range]);
 
   useEffect(() => {
     if (paused || connection !== "simulation") return;
@@ -1894,6 +2033,8 @@ export default function PTPBoxDashboard() {
         });
         const result = await response.json() as { error?: string; details?: string[] };
         if (!response.ok) throw new Error(result.details?.join(" · ") || result.error || "agent rejected configuration");
+        setActiveSyncFrequencyHz(effectiveSyncFrequencyHz);
+        setPhcSampleRateHz(effectiveSyncFrequencyHz);
         if (agentStatus.running) {
           const restartResponse = await fetch(`${agentBaseUrl()}/api/control`, {
             method: "POST",
@@ -2097,7 +2238,7 @@ export default function PTPBoxDashboard() {
                 <section className="instrument-panel chart-panel">
                   <div className="panel-heading chart-heading">
                     <div><span className="section-kicker">RAW PHC DIFFERENCE</span><h2>NIC clocks relative to BC1</h2></div>
-                    <div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div>
+                    <div className="chart-heading-tools"><span className="phc-rate-badge"><Radio size={12} /> {phcSampleRateHz.toFixed(1)} Hz PHC sampling</span><div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div></div>
                   </div>
                   <div className="chart-legend">
                     {visibleTraces.map((id) => {
@@ -2107,7 +2248,7 @@ export default function PTPBoxDashboard() {
                     <span className="chart-unit">PHC Δ VS BC1 · AUTO-SCALED</span>
                   </div>
                   <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch; BC1 is interpolated only between its two bracketing reads. No phc2sys loop or time-series smoothing is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch; BC1 is interpolated only between its two bracketing reads. Read-only PHC sampling follows the applied Sync cadence at {phcSampleRateHz.toFixed(1)} Hz; no phc2sys loop or smoothing is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">

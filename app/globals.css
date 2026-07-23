@@ -169,7 +169,7 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .metric-card > strong { display: block; margin: 9px 0 8px; font-size: 23px; line-height: 1; font-weight: 500; letter-spacing: -.055em; }.metric-card > div:last-child { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 8px; }.metric-card em { padding: 2px 5px; border-radius: 3px; font-style: normal; font-weight: 700; }.metric-card em.good { background: rgba(119,226,179,.08); color: var(--mint); }.metric-card em.warn { background: rgba(243,195,111,.08); color: var(--amber); }
 
 .overview-grid { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(288px, .72fr); gap: 10px; margin-top: 10px; }
-.chart-panel { min-height: 442px; }.chart-heading { border-bottom: 0; padding-bottom: 6px; }
+.chart-panel { min-height: 442px; }.chart-heading { border-bottom: 0; padding-bottom: 6px; }.chart-heading-tools { display:flex; align-items:center; gap:9px; }.phc-rate-badge { height:29px; display:inline-flex; align-items:center; gap:6px; padding:0 9px; border:1px solid rgba(119,226,179,.16); border-radius:5px; background:rgba(119,226,179,.045); color:var(--mint); font:7px var(--font-geist-mono); white-space:nowrap; }
 .segmented-control { display: flex; padding: 2px; border: 1px solid var(--line); border-radius: 5px; background: #091015; }.segmented-control button { height: 24px; padding: 0 8px; border: 0; border-radius: 3px; background: transparent; color: #647a81; font-size: 8px; }.segmented-control button.active { background: #18252c; color: #d7e3e4; box-shadow: inset 0 0 0 1px #263b45; }
 .chart-legend { display: flex; align-items: center; gap: 7px; padding: 3px 16px 6px; }
 .chart-legend button, .analytics-traces button { display: flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #6f858c; font-size: 8px; }.chart-legend button:hover, .chart-legend button.active { border-color: #263a43; background: #0f191e; color: #c2d1d3; }.chart-legend button i, .analytics-traces button i { width: 5px; height: 5px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }.chart-legend button strong { color: inherit; font-family: var(--font-geist-mono); font-weight: 500; }.chart-unit { margin-left: auto; color: #536970; font: 7px var(--font-geist-mono); letter-spacing: .09em; }
@@ -250,7 +250,7 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 
 @media (max-width: 680px) {
   .topbar { height:58px; }.breadcrumb { display:none; }.utc-clock, .topbar .primary-action { display:none; }
-  .page-heading { align-items:flex-start; }.page-heading p { max-width: 420px; line-height:1.5; }.heading-actions .secondary-button { display:none; }
+  .page-heading { align-items:flex-start; }.page-heading p { max-width: 420px; line-height:1.5; }.heading-actions .secondary-button { display:none; }.chart-heading { align-items:flex-start; }.chart-heading-tools { align-items:flex-end; flex-direction:column-reverse; }.phc-rate-badge { height:22px; border:0; padding:0; background:transparent; }
   .content-shell { padding:18px 12px 30px; }
   .panel-heading { min-height:58px; }.panel-tools > span { display:none; }
   .metric-grid { grid-template-columns:1fr 1fr; }.metric-card { min-height:100px; }.metric-card > strong { font-size:20px; }

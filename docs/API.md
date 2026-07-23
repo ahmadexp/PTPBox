@@ -71,18 +71,23 @@ all physical interfaces while the cascade is running.
 
 ### `GET /api/phc`
 
-Returns one-hertz, read-only PHC comparisons. The first mapped NIC is the
-reference. Every PHC is cross timestamped against `CLOCK_MONOTONIC_RAW` using
+Returns read-only PHC comparisons at the applied PTP Sync cadence: 0.5, 1, 2,
+4, or 8 Hz. The `sample_rate_hz` response field reports the active cadence.
+The first mapped NIC is the reference. Every PHC is cross timestamped against `CLOCK_MONOTONIC_RAW` using
 the shortest of nine kernel-bracketed samples. BC1 is measured before and after
 the targets and interpolated to each target's measurement epoch. `offset_ns` is
 the cumulative difference from BC1; `previous_hop_offset_ns` is the delta from
-the preceding NIC. The sampler never sets, steps, or adjusts a clock.
+the preceding NIC. The sampler never sets, steps, or adjusts a clock. Clients
+can use `since` for incremental updates; the Observatory polls this lightweight
+endpoint at the reported cadence while full LinuxPTP parsing stays on a slower
+supervisory path.
 
 ```json
 {
   "reference": "BC1",
   "reference_phc": "ptp2",
   "method": "common-system cross timestamps with interpolated BC1 reference",
+  "sample_rate_hz": 8.0,
   "raw": true,
   "smoothing": "none",
   "clocks": [
@@ -240,8 +245,8 @@ state. The safe built-in choices are `pi`, `linreg`, and `nullf`.
 Applies a servo to one downstream clock or every receiver. Setting `enabled`
 to `false` enters measured holdover: LinuxPTP continues receiving Sync messages
 and reporting raw offsets, but the generated configuration uses
-`free_running 1` so it does not adjust the PHC. The independent one-hertz PHC
-comparison sampler continues unchanged.
+`free_running 1` so it does not adjust the PHC. The independent PHC comparison
+sampler continues at the applied Sync cadence.
 
 ```json
 {

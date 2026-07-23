@@ -96,6 +96,30 @@ class TelemetryTests(unittest.TestCase):
         value["log_sync_interval"] = -4
         self.assertIn("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)", AGENT.validate_config(value))
 
+    def test_phc_sampler_matches_the_applied_sync_cadence(self) -> None:
+        class StopAfterOneSample:
+            def __init__(self) -> None:
+                self.delays: list[float] = []
+
+            def is_set(self) -> bool:
+                return bool(self.delays)
+
+            def wait(self, delay: float) -> bool:
+                self.delays.append(delay)
+                return True
+
+        stop = StopAfterOneSample()
+        with (
+            mock.patch.object(AGENT, "load_config", return_value={"log_sync_interval": -3}),
+            mock.patch.object(AGENT, "record_phc_sample"),
+            mock.patch.object(AGENT.time, "monotonic", side_effect=[100.0, 100.01]),
+        ):
+            self.assertEqual(8.0, AGENT.configured_phc_sample_rate_hz())
+            AGENT.phc_sampler_loop(stop)  # type: ignore[arg-type]
+
+        self.assertEqual(1, len(stop.delays))
+        self.assertAlmostEqual(0.115, stop.delays[0], places=6)
+
     def test_telemetry_uses_physical_topology_order_and_incremental_cutoff(self) -> None:
         self.write_log("BC7")
         self.write_log("BC4")
@@ -208,6 +232,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(120.0, payload["clocks"][2]["measurement"]["previous_hop_offset_ns"])
         self.assertEqual(35.0, payload["clocks"][1]["measurement"]["comparison_uncertainty_ns"])
         self.assertEqual("extended", payload["clocks"][1]["measurement"]["cross_timestamp_method"])
+        self.assertEqual(1.0, payload["sample_rate_hz"])
         self.assertTrue(all(clock["measurement"]["raw"] for clock in payload["clocks"]))
 
     def test_extended_cross_timestamp_selects_shortest_kernel_bracket(self) -> None:

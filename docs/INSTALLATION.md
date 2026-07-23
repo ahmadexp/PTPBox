@@ -179,7 +179,7 @@ downstream clocks) and choose one of:
 
 **Enter holdover** restarts only the selected clock with `free_running 1`.
 LinuxPTP keeps receiving PTP messages and logging raw master offsets, while the
-PHC comparison sampler keeps measuring every clock at one hertz. The UI derives
+PHC comparison sampler keeps measuring every clock at the applied Sync cadence. The UI derives
 holdover drift from those real PHC samples. **Resume servo** applies the chosen
 implementation with `free_running 0` and shows acquisition through `s0`, `s1`,
 and `s2` lock states.

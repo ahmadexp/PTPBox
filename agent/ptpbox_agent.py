@@ -45,7 +45,7 @@ TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
 TELEMETRY_STALE_AFTER_SECONDS = 5.0
 TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
-PHC_HISTORY_MAX_SAMPLES = 900
+PHC_HISTORY_MAX_SAMPLES = 7200
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
 SUPPORTED_SERVOS = {"pi", "linreg", "nullf"}
@@ -591,6 +591,7 @@ def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) ->
         "clocks": clocks,
         "fresh_clocks": fresh,
         "mode": mode,
+        "sample_rate_hz": configured_phc_sample_rate_hz(),
         "raw": True,
         "smoothing": "none",
         "method": "common-system cross timestamps with interpolated BC1 reference",
@@ -601,7 +602,8 @@ def phc_sampler_loop(stop: threading.Event) -> None:
     while not stop.is_set():
         started = time.monotonic()
         record_phc_sample()
-        stop.wait(max(0.0, 1.0 - (time.monotonic() - started)))
+        period = 1.0 / configured_phc_sample_rate_hz()
+        stop.wait(max(0.0, period - (time.monotonic() - started)))
 
 
 def load_config() -> dict[str, Any]:
@@ -610,6 +612,14 @@ def load_config() -> dict[str, Any]:
         return value if isinstance(value, dict) else DEFAULT_CONFIG.copy()
     except (OSError, json.JSONDecodeError):
         return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def configured_phc_sample_rate_hz() -> float:
+    """Match read-only PHC observation to the applied IEEE 1588 Sync cadence."""
+    log_interval = load_config().get("log_sync_interval", 0)
+    if isinstance(log_interval, bool) or not isinstance(log_interval, int) or not -3 <= log_interval <= 1:
+        log_interval = 0
+    return float(2 ** -log_interval)
 
 
 def validate_config(value: dict[str, Any]) -> list[str]:
@@ -831,6 +841,7 @@ def telemetry(history_seconds: float = 120.0, since: float | None = None, limit:
         "phc_reference_device": phc_payload["reference_phc"],
         "phc_fresh_clocks": phc_payload["fresh_clocks"],
         "phc_method": phc_payload["method"],
+        "phc_sample_rate_hz": phc_payload["sample_rate_hz"],
         "servo_control": load_servo_state(),
         "raw": True,
         "smoothing": "none",
@@ -850,10 +861,11 @@ def status() -> dict[str, Any]:
         "namespaces": namespaces(),
         "processes": processes,
         "running": bool(processes),
+        "phc_sample_rate_hz": configured_phc_sample_rate_hz(),
         "servo_control": load_servo_state(),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "1.6.0",
+        "agent_version": "1.7.0",
         "timestamp": time.time(),
     }
 

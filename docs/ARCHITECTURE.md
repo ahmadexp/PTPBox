@@ -37,7 +37,7 @@ operator account and reads:
 - `ps` for active `ptp4l` processes;
 - `/run/ptpbox/phcs.json` for the controller-verified NIC-to-PHC map and the
   timing-interface metadata captured inside each namespace;
-- mapped `/dev/ptp*` clocks for one-hertz, read-only kernel cross-timestamp
+- mapped `/dev/ptp*` clocks for cadence-matched, read-only kernel cross-timestamp
   comparisons;
 - raw LinuxPTP client logs in `/var/log/ptpbox`, with a legacy fallback below
   `PTPBOX_ROOT/BC*`, for offset, frequency adjustment, path delay, and servo

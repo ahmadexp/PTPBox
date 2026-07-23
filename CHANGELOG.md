@@ -4,6 +4,10 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Matched the read-only BC1-relative PHC sampler to the applied 0.5–8 Hz Sync
+  cadence and added a lightweight incremental `/api/phc` browser stream, so
+  the topology and raw PHC chart update up to eight times per second without
+  multiplying full LinuxPTP log parsing load.
 - Completed the top-bar command palette with instant page, clock, measurement,
   and control search; mouse and keyboard selection; direct BC focus; and exact
   jumps to servo, Sync-frequency, notification, and apply surfaces.

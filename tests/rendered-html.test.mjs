@@ -70,6 +70,9 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /Synchronization frequency/);
   assert.match(page, /nearest valid rate/);
   assert.match(page, /logSyncInterval/);
+  assert.match(page, /\/api\/phc/);
+  assert.match(page, /PHC sampling/);
+  assert.match(page, /sampling follows the applied Sync cadence/);
   assert.match(layout, /PTPBox — Precision Time Lab/);
   assert.match(agent, /\/api\/telemetry/);
   assert.match(agent, /\/api\/config\/apply/);
