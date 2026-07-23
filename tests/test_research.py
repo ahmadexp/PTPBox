@@ -238,6 +238,65 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual("ready", result["status"])
         self.assertAlmostEqual(5.0 + 0.8 * temperatures[-1], result["predicted_frequency_ppb"], delta=0.5)
 
+    def test_frequency_domain_analysis_uses_sampled_data_stability_first(self) -> None:
+        result = RESEARCH.arx_frequency_domain_diagnostics(
+            a1=1.5,
+            a2=-0.56,
+            b1=0.08,
+            b2=0.02,
+            sample_period_s=0.5,
+            sample_count=256,
+        )
+
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(72, len(result["frequency_response"]["points"]))
+        self.assertAlmostEqual(1.0, result["frequency_response"]["nyquist_frequency_hz"])
+        self.assertTrue(result["discrete_stability"]["stable"])
+        self.assertTrue(all(condition["pass"] for condition in result["discrete_stability"]["conditions"]))
+        self.assertTrue(result["routh_hurwitz"]["stable"])
+        self.assertEqual(0, result["routh_hurwitz"]["sign_changes"])
+        self.assertTrue(result["nyquist"]["minus_one_reference_only"])
+        self.assertEqual("not-evaluated", result["nyquist"]["encirclement_claim"])
+        self.assertIn("open-loop transfer", result["nyquist"]["interpretation"])
+
+    def test_routh_equivalent_and_jury_reject_an_unstable_arx_model(self) -> None:
+        result = RESEARCH.arx_frequency_domain_diagnostics(
+            a1=1.4,
+            a2=-0.2,
+            b1=0.05,
+            b2=0.01,
+            sample_period_s=1.0,
+            sample_count=128,
+        )
+
+        self.assertFalse(result["discrete_stability"]["stable"])
+        self.assertFalse(result["routh_hurwitz"]["stable"])
+        self.assertGreater(result["routh_hurwitz"]["sign_changes"], 0)
+        self.assertTrue(any(not condition["pass"] for condition in result["discrete_stability"]["conditions"]))
+
+    def test_identified_arx_publishes_auditable_frequency_response(self) -> None:
+        inputs = [math.sin(index * 0.17) + 0.3 * math.sin(index * 0.051) for index in range(320)]
+        outputs = [0.0, 0.0]
+        for index in range(2, len(inputs)):
+            outputs.append(
+                1.45 * outputs[-1]
+                - 0.52 * outputs[-2]
+                + 0.07 * inputs[index - 1]
+                + 0.015 * inputs[index - 2]
+            )
+        result = RESEARCH.identify_arx(inputs, outputs, 0.5)
+
+        self.assertEqual("stable", result["status"])
+        self.assertGreater(result["r_squared"], 0.99)
+        self.assertEqual(
+            "measured servo frequency correction",
+            result["frequency_domain"]["model"]["input"],
+        )
+        self.assertEqual(
+            "identified from measured frequency correction to raw PHC phase offset",
+            result["frequency_domain"]["provenance"],
+        )
+
     def test_bayesian_tuner_is_replay_bounded_and_never_changes_live_gains(self) -> None:
         samples = [80.0 * math.sin(index / 7.0) + 0.08 * index for index in range(160)]
         result = RESEARCH.safe_bayesian_tune(samples, 1.0, 0.7, 0.3)

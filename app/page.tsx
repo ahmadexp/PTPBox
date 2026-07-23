@@ -541,12 +541,62 @@ type ResearchPayload = {
   system_identification: {
     status: string;
     samples?: number;
+    coefficients?: { a1: number; a2: number; b1: number; b2: number; bias: number };
     spectral_radius?: number;
     settling_time_s?: number | null;
     dc_gain?: number;
     r_squared?: number;
     residual_sigma_ns?: number;
     poles?: Array<{ real: number; imag: number; magnitude: number }>;
+    frequency_domain?: {
+      status: string;
+      model: {
+        form: string;
+        input: string;
+        output: string;
+        sample_period_s: number;
+      };
+      frequency_response: {
+        points: Array<{
+          frequency_hz: number;
+          magnitude: number;
+          magnitude_db: number;
+          phase_deg: number;
+          real: number;
+          imag: number;
+        }>;
+        minimum_frequency_hz?: number | null;
+        nyquist_frequency_hz?: number | null;
+        low_frequency_gain_db?: number | null;
+        peak_gain_db?: number | null;
+        peak_frequency_hz?: number | null;
+        bandwidth_hz?: number | null;
+      };
+      nyquist: {
+        minimum_minus_one_distance?: number | null;
+        closest_frequency_hz?: number | null;
+        minus_one_reference_only: boolean;
+        encirclement_claim: string;
+        interpretation: string;
+      };
+      discrete_stability: {
+        criterion: string;
+        stable: boolean;
+        conditions: Array<{ name: string; value: number; pass: boolean }>;
+        interpretation: string;
+      };
+      routh_hurwitz: {
+        criterion: string;
+        stable: boolean;
+        coefficients: { s2: number; s1: number; s0: number };
+        first_column: number[];
+        sign_changes: number;
+        table: Array<{ order: string; values: number[] }>;
+        interpretation: string;
+      };
+      provenance: string;
+      interpretation: string;
+    };
   };
   auto_tune: {
     status: string;
@@ -1126,6 +1176,79 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
     const total = Object.values(squared).reduce((sum, value) => sum + value, 0);
     return [node.id, { rss_ns: Math.sqrt(total), components_ns: components, contribution_pct: Object.fromEntries(Object.entries(squared).map(([key, value]) => [key, 100 * value / Math.max(1e-9, total)])) }];
   }));
+  const modeledArx = { a1: 1.82, a2: -.85, b1: .018, b2: .0072, bias: 0 };
+  let previousModeledPhase: number | null = null;
+  const modeledFrequencyPoints = Array.from({ length: 72 }, (_, index) => {
+    const minimumFrequency = 1 / 256;
+    const maximumFrequency = .49;
+    const frequency = minimumFrequency * ((maximumFrequency / minimumFrequency) ** (index / 71));
+    const omega = 2 * Math.PI * frequency;
+    const z1 = { real: Math.cos(omega), imag: -Math.sin(omega) };
+    const z2 = { real: Math.cos(2 * omega), imag: -Math.sin(2 * omega) };
+    const numerator = { real: modeledArx.b1 * z1.real + modeledArx.b2 * z2.real, imag: modeledArx.b1 * z1.imag + modeledArx.b2 * z2.imag };
+    const denominator = { real: 1 - modeledArx.a1 * z1.real - modeledArx.a2 * z2.real, imag: -modeledArx.a1 * z1.imag - modeledArx.a2 * z2.imag };
+    const divisor = Math.max(1e-12, denominator.real ** 2 + denominator.imag ** 2);
+    const real = (numerator.real * denominator.real + numerator.imag * denominator.imag) / divisor;
+    const imag = (numerator.imag * denominator.real - numerator.real * denominator.imag) / divisor;
+    const magnitude = Math.hypot(real, imag);
+    let phase = Math.atan2(imag, real) * 180 / Math.PI;
+    if (previousModeledPhase != null) {
+      while (phase - previousModeledPhase > 180) phase -= 360;
+      while (phase - previousModeledPhase < -180) phase += 360;
+    }
+    previousModeledPhase = phase;
+    return { frequency_hz: frequency, magnitude, magnitude_db: 20 * Math.log10(Math.max(1e-12, magnitude)), phase_deg: phase, real, imag };
+  });
+  const modeledLowGain = modeledFrequencyPoints[0].magnitude_db;
+  const modeledPeak = modeledFrequencyPoints.reduce((peak, point) => point.magnitude_db > peak.magnitude_db ? point : peak);
+  const modeledBandwidth = modeledFrequencyPoints.find((point) => point.magnitude_db <= modeledLowGain - 3)?.frequency_hz ?? null;
+  const modeledClosestNyquist = modeledFrequencyPoints.reduce((closest, point) => Math.hypot(point.real + 1, point.imag) < Math.hypot(closest.real + 1, closest.imag) ? point : closest);
+  const modeledFrequencyDomain: NonNullable<ResearchPayload["system_identification"]["frequency_domain"]> = {
+    status: "ready",
+    model: {
+      form: "G(z)=(b1 z^-1 + b2 z^-2)/(1 - a1 z^-1 - a2 z^-2)",
+      input: "modeled servo frequency correction",
+      output: "modeled PHC phase offset",
+      sample_period_s: 1,
+    },
+    frequency_response: {
+      points: modeledFrequencyPoints,
+      minimum_frequency_hz: modeledFrequencyPoints[0].frequency_hz,
+      nyquist_frequency_hz: .5,
+      low_frequency_gain_db: modeledLowGain,
+      peak_gain_db: modeledPeak.magnitude_db,
+      peak_frequency_hz: modeledPeak.frequency_hz,
+      bandwidth_hz: modeledBandwidth,
+    },
+    nyquist: {
+      minimum_minus_one_distance: Math.hypot(modeledClosestNyquist.real + 1, modeledClosestNyquist.imag),
+      closest_frequency_hz: modeledClosestNyquist.frequency_hz,
+      minus_one_reference_only: true,
+      encirclement_claim: "not-evaluated",
+      interpretation: "The -1 point is a geometric reference only. Formal Nyquist encirclement requires the identified open-loop transfer L(z).",
+    },
+    discrete_stability: {
+      criterion: "second-order Jury / Schur",
+      stable: true,
+      conditions: [
+        { name: "P(+1) > 0", value: .03, pass: true },
+        { name: "P(-1) > 0", value: 3.67, pass: true },
+        { name: "|a₂| < 1", value: .15, pass: true },
+      ],
+      interpretation: "Direct sampled-data stability test; every pole must remain inside the unit circle.",
+    },
+    routh_hurwitz: {
+      criterion: "Routh-Hurwitz on the bilinear-mapped equivalent",
+      stable: true,
+      coefficients: { s2: .9175, s1: .15, s0: .03 },
+      first_column: [.9175, .15, .03],
+      sign_changes: 0,
+      table: [{ order: "s²", values: [.9175, .03] }, { order: "s¹", values: [.15, 0] }, { order: "s⁰", values: [.03, 0] }],
+      interpretation: "Continuous equivalent produced by a bilinear transform; it cross-checks, but does not replace, the direct Jury result.",
+    },
+    provenance: "deterministic hardware-model frequency correction to modeled PHC phase offset",
+    interpretation: "Bode bandwidth and resonance are descriptive for this empirical plant model. Classical margins require a separately identified controller and open-loop transfer.",
+  };
   return {
     generated_at: Date.now() / 1000,
     mode: "simulation",
@@ -1262,7 +1385,7 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
       live_changes: 0,
     },
     koopman: { status: "ready", singular_values: [1.014, .982, .941, .72, .38, .17], spectral_norm: 1.014, residual_sigma_ns: 2.84, interpretation: "amplifying" },
-    system_identification: { status: "stable", samples: history.length, spectral_radius: .921, settling_time_s: 48.6, dc_gain: .84, r_squared: .91, residual_sigma_ns: 4.2, poles: [{ real: .91, imag: .14, magnitude: .921 }, { real: .91, imag: -.14, magnitude: .921 }] },
+    system_identification: { status: "stable", samples: history.length, coefficients: modeledArx, spectral_radius: .921, settling_time_s: 48.6, dc_gain: .84, r_squared: .91, residual_sigma_ns: 4.2, poles: [{ real: .91, imag: .14, magnitude: .921 }, { real: .91, imag: -.14, magnitude: .921 }], frequency_domain: modeledFrequencyDomain },
     auto_tune: {
       status: "recommended",
       samples: history.length,
@@ -2728,6 +2851,134 @@ function PathMicroscopeView({ research, nodes }: { research: ResearchPayload; no
   );
 }
 
+function formatFrequencyHz(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 1) return `${value.toFixed(value >= 10 ? 1 : 2)} Hz`;
+  if (value >= .001) return `${(value * 1_000).toFixed(value >= .1 ? 0 : 1)} mHz`;
+  return `${value.toExponential(2)} Hz`;
+}
+
+function BodeResponsePlot({ domain }: { domain: NonNullable<ResearchPayload["system_identification"]["frequency_domain"]> }) {
+  const points = domain.frequency_response.points ?? [];
+  if (domain.status !== "ready" || points.length < 2) return <div className="frequency-domain-empty"><Activity size={20} /><span>Collecting enough ARX samples to evaluate the unit-circle response.</span></div>;
+  const width = 700;
+  const height = 326;
+  const left = 57;
+  const right = 18;
+  const plotWidth = width - left - right;
+  const magnitudeTop = 26;
+  const magnitudeBottom = 139;
+  const phaseTop = 180;
+  const phaseBottom = 293;
+  const logMin = Math.log10(points[0].frequency_hz);
+  const logMax = Math.log10(points.at(-1)!.frequency_hz);
+  const magnitudeValues = points.map((point) => point.magnitude_db);
+  const phaseValues = points.map((point) => point.phase_deg);
+  const range = (values: number[], minimumSpan: number) => {
+    const minimum = Math.min(...values);
+    const maximum = Math.max(...values);
+    const span = Math.max(minimumSpan, maximum - minimum);
+    return [minimum - span * .12, maximum + span * .12] as const;
+  };
+  const magnitudeRange = range(magnitudeValues, 6);
+  const phaseRange = range(phaseValues, 30);
+  const x = (frequency: number) => left + (Math.log10(frequency) - logMin) / Math.max(1e-9, logMax - logMin) * plotWidth;
+  const y = (value: number, extent: readonly [number, number], top: number, bottom: number) => top + (extent[1] - value) / Math.max(1e-9, extent[1] - extent[0]) * (bottom - top);
+  const line = (key: "magnitude_db" | "phase_deg", extent: readonly [number, number], top: number, bottom: number) => points.map((point, index) => `${index ? "L" : "M"} ${x(point.frequency_hz).toFixed(2)} ${y(point[key], extent, top, bottom).toFixed(2)}`).join(" ");
+  const xTicks = Array.from({ length: 5 }, (_, index) => 10 ** (logMin + index * (logMax - logMin) / 4));
+  const magnitudeTicks = [magnitudeRange[0], (magnitudeRange[0] + magnitudeRange[1]) / 2, magnitudeRange[1]];
+  const phaseTicks = [phaseRange[0], (phaseRange[0] + phaseRange[1]) / 2, phaseRange[1]];
+  const bandwidth = domain.frequency_response.bandwidth_hz;
+  return (
+    <svg className="bode-response-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="bode-response-title bode-response-desc">
+      <title id="bode-response-title">Bode magnitude and phase of the identified discrete-time ARX plant</title>
+      <desc id="bode-response-desc">Log-frequency magnitude in decibels and unwrapped phase in degrees for measured servo frequency correction to raw PHC phase offset, evaluated below the sampling Nyquist frequency.</desc>
+      <defs><clipPath id="bode-magnitude-clip"><rect x={left} y={magnitudeTop} width={plotWidth} height={magnitudeBottom - magnitudeTop} /></clipPath><clipPath id="bode-phase-clip"><rect x={left} y={phaseTop} width={plotWidth} height={phaseBottom - phaseTop} /></clipPath></defs>
+      <rect className="frequency-plot-frame" x={left} y={magnitudeTop} width={plotWidth} height={magnitudeBottom - magnitudeTop} />
+      <rect className="frequency-plot-frame" x={left} y={phaseTop} width={plotWidth} height={phaseBottom - phaseTop} />
+      {xTicks.map((tick) => <g key={tick}><line className="frequency-grid" x1={x(tick)} x2={x(tick)} y1={magnitudeTop} y2={magnitudeBottom} /><line className="frequency-grid" x1={x(tick)} x2={x(tick)} y1={phaseTop} y2={phaseBottom} /><text className="frequency-axis-label" x={x(tick)} y={height - 13} textAnchor="middle">{formatFrequencyHz(tick)}</text></g>)}
+      {magnitudeTicks.map((tick) => <g key={`m-${tick}`}><line className="frequency-grid" x1={left} x2={width - right} y1={y(tick, magnitudeRange, magnitudeTop, magnitudeBottom)} y2={y(tick, magnitudeRange, magnitudeTop, magnitudeBottom)} /><text className="frequency-axis-label" x={left - 8} y={y(tick, magnitudeRange, magnitudeTop, magnitudeBottom) + 3} textAnchor="end">{tick.toFixed(1)}</text></g>)}
+      {phaseTicks.map((tick) => <g key={`p-${tick}`}><line className="frequency-grid" x1={left} x2={width - right} y1={y(tick, phaseRange, phaseTop, phaseBottom)} y2={y(tick, phaseRange, phaseTop, phaseBottom)} /><text className="frequency-axis-label" x={left - 8} y={y(tick, phaseRange, phaseTop, phaseBottom) + 3} textAnchor="end">{tick.toFixed(0)}°</text></g>)}
+      {bandwidth != null && <g className="bandwidth-marker"><line x1={x(bandwidth)} x2={x(bandwidth)} y1={magnitudeTop} y2={magnitudeBottom} /><text x={x(bandwidth) + 5} y={magnitudeTop + 10}>−3 dB · {formatFrequencyHz(bandwidth)}</text></g>}
+      <path className="bode-magnitude-line" clipPath="url(#bode-magnitude-clip)" d={line("magnitude_db", magnitudeRange, magnitudeTop, magnitudeBottom)} />
+      <path className="bode-phase-line" clipPath="url(#bode-phase-clip)" d={line("phase_deg", phaseRange, phaseTop, phaseBottom)} />
+      <text className="frequency-axis-title" x="13" y={(magnitudeTop + magnitudeBottom) / 2} transform={`rotate(-90 13 ${(magnitudeTop + magnitudeBottom) / 2})`} textAnchor="middle">MAGNITUDE · dB</text>
+      <text className="frequency-axis-title" x="13" y={(phaseTop + phaseBottom) / 2} transform={`rotate(-90 13 ${(phaseTop + phaseBottom) / 2})`} textAnchor="middle">PHASE · DEG</text>
+      <text className="frequency-axis-title" x={left + plotWidth / 2} y={height - 1} textAnchor="middle">LOG FREQUENCY</text>
+    </svg>
+  );
+}
+
+function NyquistResponsePlot({ domain }: { domain: NonNullable<ResearchPayload["system_identification"]["frequency_domain"]> }) {
+  const points = domain.frequency_response.points ?? [];
+  if (domain.status !== "ready" || points.length < 2) return <div className="frequency-domain-empty"><Orbit size={20} /><span>Nyquist geometry appears when the ARX frequency response is ready.</span></div>;
+  const width = 355;
+  const height = 326;
+  const padding = { left: 45, right: 20, top: 25, bottom: 39 };
+  const plotSize = Math.min(width - padding.left - padding.right, height - padding.top - padding.bottom);
+  const centerX = padding.left + plotSize / 2;
+  const centerY = padding.top + plotSize / 2;
+  const limit = Math.max(1.1, ...points.flatMap((point) => [Math.abs(point.real), Math.abs(point.imag)])) * 1.12;
+  const x = (value: number) => centerX + value / limit * plotSize / 2;
+  const y = (value: number) => centerY - value / limit * plotSize / 2;
+  const path = (mirrored: boolean) => points.map((point, index) => `${index ? "L" : "M"} ${x(point.real).toFixed(2)} ${y(mirrored ? -point.imag : point.imag).toFixed(2)}`).join(" ");
+  const closestFrequency = domain.nyquist.closest_frequency_hz;
+  const closest = points.reduce((candidate, point) => Math.abs(point.frequency_hz - (closestFrequency ?? 0)) < Math.abs(candidate.frequency_hz - (closestFrequency ?? 0)) ? point : candidate);
+  return (
+    <svg className="nyquist-response-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="nyquist-response-title nyquist-response-desc">
+      <title id="nyquist-response-title">Nyquist trajectory of the identified ARX plant</title>
+      <desc id="nyquist-response-desc">Positive and conjugate negative frequency branches of the measured actuation-to-phase response. The minus-one point is shown as a reference, not as a formal encirclement verdict.</desc>
+      <defs><clipPath id="nyquist-response-clip"><rect x={padding.left} y={padding.top} width={plotSize} height={plotSize} /></clipPath></defs>
+      <rect className="frequency-plot-frame" x={padding.left} y={padding.top} width={plotSize} height={plotSize} />
+      <line className="frequency-grid nyquist-axis" x1={padding.left} x2={padding.left + plotSize} y1={y(0)} y2={y(0)} />
+      <line className="frequency-grid nyquist-axis" x1={x(0)} x2={x(0)} y1={padding.top} y2={padding.top + plotSize} />
+      <g clipPath="url(#nyquist-response-clip)"><path className="nyquist-conjugate-line" d={path(true)} /><path className="nyquist-positive-line" d={path(false)} /></g>
+      <g className="nyquist-minus-one"><line x1={x(-1) - 5} x2={x(-1) + 5} y1={y(0) - 5} y2={y(0) + 5} /><line x1={x(-1) - 5} x2={x(-1) + 5} y1={y(0) + 5} y2={y(0) - 5} /><text x={x(-1) + 7} y={y(0) - 7}>−1 reference</text></g>
+      <circle className="nyquist-closest-point" cx={x(closest.real)} cy={y(closest.imag)} r="3.5" />
+      <circle className="nyquist-origin-point" cx={x(points[0].real)} cy={y(points[0].imag)} r="2.7" />
+      <text className="frequency-axis-label" x={padding.left} y={height - 19}>−{limit.toFixed(1)}</text>
+      <text className="frequency-axis-label" x={padding.left + plotSize} y={height - 19} textAnchor="end">+{limit.toFixed(1)}</text>
+      <text className="frequency-axis-title" x={padding.left + plotSize / 2} y={height - 2} textAnchor="middle">REAL G(eʲω)</text>
+      <text className="frequency-axis-title" x="11" y={padding.top + plotSize / 2} transform={`rotate(-90 11 ${padding.top + plotSize / 2})`} textAnchor="middle">IMAGINARY G(eʲω)</text>
+    </svg>
+  );
+}
+
+function FrequencyDomainObservatory({ systemId }: { systemId: ResearchPayload["system_identification"] }) {
+  const domain = systemId.frequency_domain;
+  const response = domain?.frequency_response;
+  const jury = domain?.discrete_stability;
+  const routh = domain?.routh_hurwitz;
+  return (
+    <section className="instrument-panel frequency-domain-panel">
+      <div className="panel-heading"><div><span className="section-kicker">FREQUENCY-DOMAIN CONTROL INTELLIGENCE</span><h2>Bode · Nyquist · sampled-data stability</h2><p>Identified frequency correction → PHC phase response. The display preserves the distinction between an empirical plant model and a formal open-loop transfer.</p></div><span className={`quality-badge ${domain?.status === "ready" ? "" : "pending"}`}>{domain?.status === "ready" ? "ARX UNIT CIRCLE" : "LEARNING"}</span></div>
+      <div className="frequency-domain-metrics">
+        <div><span>−3 dB bandwidth</span><strong>{formatFrequencyHz(response?.bandwidth_hz)}</strong><small>relative to lowest resolved bin</small></div>
+        <div><span>Peak response</span><strong>{response?.peak_gain_db == null ? "—" : `${response.peak_gain_db.toFixed(2)} dB`}</strong><small>{formatFrequencyHz(response?.peak_frequency_hz)}</small></div>
+        <div><span>Sampling Nyquist</span><strong>{formatFrequencyHz(response?.nyquist_frequency_hz)}</strong><small>{domain ? `${(1 / domain.model.sample_period_s).toFixed(2)} samples/s` : "cadence pending"}</small></div>
+        <div><span>Distance to −1</span><strong>{domain?.nyquist.minimum_minus_one_distance == null ? "—" : domain.nyquist.minimum_minus_one_distance.toFixed(3)}</strong><small>geometry only · not a margin</small></div>
+      </div>
+      <div className="frequency-domain-plots">
+        <div className="frequency-plot-cell"><div className="subpanel-heading"><span>BODE RESPONSE</span><strong>DISCRETE G(eʲω)</strong></div>{domain ? <BodeResponsePlot domain={domain} /> : <div className="frequency-domain-empty"><Activity size={20} /><span>ARX identification is learning.</span></div>}</div>
+        <div className="frequency-plot-cell nyquist-cell"><div className="subpanel-heading"><span>NYQUIST GEOMETRY</span><strong>−1 REFERENCE ONLY</strong></div>{domain ? <NyquistResponsePlot domain={domain} /> : <div className="frequency-domain-empty"><Orbit size={20} /><span>ARX identification is learning.</span></div>}</div>
+      </div>
+      <div className="stability-criteria-grid">
+        <div className="stability-criterion">
+          <div className="criterion-heading"><div><span>DIRECT DIGITAL TEST</span><strong>Jury / Schur conditions</strong></div><b className={jury?.stable ? "pass" : ""}>{jury ? (jury.stable ? "STABLE" : "UNSTABLE") : "LEARNING"}</b></div>
+          <div className="criterion-rows">{(jury?.conditions ?? []).map((condition) => <div key={condition.name} className={condition.pass ? "pass" : "fail"}><i>{condition.pass ? "✓" : "×"}</i><span>{condition.name}</span><strong>{condition.value.toExponential(3)}</strong></div>)}</div>
+          <p>Primary verdict for the sampled servo model: all fitted poles must remain inside the unit circle.</p>
+        </div>
+        <div className="stability-criterion">
+          <div className="criterion-heading"><div><span>CONTINUOUS EQUIVALENT</span><strong>Routh–Hurwitz array</strong></div><b className={routh?.stable ? "pass" : ""}>{routh ? `${routh.sign_changes} SIGN CHANGES` : "LEARNING"}</b></div>
+          <div className="routh-array">{(routh?.table ?? []).map((row) => <div key={row.order}><span>{row.order}</span><strong>{row.values[0].toExponential(3)}</strong><strong>{row.values[1].toExponential(3)}</strong></div>)}</div>
+          <p>Bilinear-mapped cross-check only. It is shown because Routh–Hurwitz is intuitive, while Jury is the directly applicable digital criterion.</p>
+        </div>
+      </div>
+      <div className="frequency-domain-note"><Info size={13} /><span>{domain?.interpretation ?? "Frequency-domain diagnostics begin after the measured ARX model has enough aligned samples."} The Nyquist −1 marker remains reference-only until PTPBox identifies the complete open-loop transfer L(z).</span></div>
+    </section>
+  );
+}
+
 function IntelligenceWorkbench({
   research,
   activeNode,
@@ -2785,6 +3036,7 @@ function IntelligenceWorkbench({
         <div className="panel-heading"><div><span className="section-kicker">REPLAY-SAFE OPTIMIZATION</span><h2>Constrained gain recommendation</h2></div><span className={`quality-badge ${research.auto_tune.status === "recommended" ? "" : "pending"}`}>{research.auto_tune.status.toUpperCase()}</span></div>
         {research.auto_tune.recommendation ? <><div className="tune-recommendation"><div><span>RECOMMENDED PI</span><strong>Kp {research.auto_tune.recommendation.kp.toFixed(2)} · Ki {research.auto_tune.recommendation.ki.toFixed(2)}</strong><small>{research.auto_tune.safe_candidates}/{research.auto_tune.evaluated_candidates} replay-safe candidates</small></div><em><strong>{research.auto_tune.predicted_improvement_pct?.toFixed(1)}%</strong><span>predicted RMS improvement</span></em></div><div className="frontier-row">{research.auto_tune.frontier?.slice(0, 5).map((candidate, index) => <div key={`${candidate.kp}-${candidate.ki}`} style={{ height: `${35 + (1 - index / 5) * 45}%` }}><span>{candidate.score.toFixed(1)}</span></div>)}</div><button type="button" className="full-secondary" onClick={() => stageTune(research.auto_tune.recommendation!.kp, research.auto_tune.recommendation!.ki)}><SlidersHorizontal size={14} /> Stage recommendation for review</button></> : <div className="capability-empty"><Gauge size={20} /><div><strong>More samples required</strong><span>Optimization never explores gains on live hardware. It ranks candidates against captured data and enforces peak/error constraints.</span></div></div>}
       </section>
+      <FrequencyDomainObservatory systemId={research.system_identification} />
       <section className="instrument-panel recurrence-panel nonlinear-panel">
         <div className="panel-heading"><div><span className="section-kicker">NONLINEAR RETURN ANALYSIS</span><h2>{nonlinearTitle}</h2></div><span className={`quality-badge ${nonlinearView !== "recurrence" && ((nonlinearView === "bifurcation" ? bifurcation.status : fractal.status) !== "ready") ? "pending" : ""}`}>{nonlinearBadge}</span></div>
         <div className="nonlinear-switch" aria-label="Nonlinear analysis view"><div className="segmented-control"><button type="button" className={nonlinearView === "bifurcation" ? "active" : ""} onClick={() => setNonlinearView("bifurcation")}>Bifurcation map</button><button type="button" className={nonlinearView === "recurrence" ? "active" : ""} onClick={() => setNonlinearView("recurrence")}>Recurrence plot</button><button type="button" className={nonlinearView === "fractal" ? "active" : ""} onClick={() => setNonlinearView("fractal")}>Fractal analysis</button></div><span>{nonlinearView === "bifurcation" ? `${bifurcation.samples ?? 0} endpoint samples · ${bifurcation.summaries?.length ?? 0} replay gains` : nonlinearView === "fractal" ? `${fractal.samples ?? 0} endpoint samples · three scaling estimators` : `${research.recurrence.samples ?? 0} aligned hop states`}</span></div>

@@ -165,7 +165,56 @@ control input derived from measured frequency correction. It reports:
 - spectral radius;
 - residual standard deviation;
 - \(R^2\);
-- an estimated settling time when the fitted poles are stable.
+- an estimated settling time when the fitted poles are stable;
+- Bode magnitude and unwrapped phase below the sampling Nyquist frequency;
+- the positive- and negative-frequency Nyquist trajectory;
+- exact second-order Jury/Schur conditions for the fitted digital denominator;
+- a Routh–Hurwitz table for the bilinear-mapped continuous equivalent.
+
+The identified relationship is
+
+\[
+y[k]=a_1y[k-1]+a_2y[k-2]+b_1u[k-1]+b_2u[k-2]+c
+\]
+
+and the plotted transfer function is
+
+\[
+G(z)=\frac{b_1z^{-1}+b_2z^{-2}}
+{1-a_1z^{-1}-a_2z^{-2}}.
+\]
+
+Here \(u\) is the measured servo frequency correction and \(y\) is the raw PHC
+phase offset. The Bode view is therefore useful for resolved bandwidth,
+resonance, attenuation, and phase-lag comparisons between captured operating
+regimes. The Nyquist view shows the same complex response and its closest
+approach to \(-1\), but labels that point as a geometric reference only.
+Operational closed-loop data does not, by itself, identify the complete
+open-loop transfer \(L(z)\), so PTPBox does not report an encirclement verdict,
+gain margin, or phase margin from this model.
+
+For the fitted denominator \(P(z)=z^2-a_1z-a_2\), the primary sampled-data
+verdict evaluates the exact second-order Jury conditions:
+
+\[
+P(1)>0,\quad P(-1)>0,\quad |a_2|<1.
+\]
+
+The UI also maps the denominator through
+\(z=(1+sT/2)/(1-sT/2)\). The resulting continuous polynomial is
+
+\[
+\frac{T^2}{4}(1+a_1-a_2)s^2 + T(1+a_2)s + (1-a_1-a_2),
+\]
+
+which supplies the displayed Routh array. This is an interpretable cross-check,
+not a replacement for the direct digital pole/Jury result. MIT OpenCourseWare
+provides concise references for [frequency-response and Nyquist
+analysis](https://ocw.mit.edu/courses/16-06-principles-of-automatic-control-fall-2012/pages/lecture-notes/)
+and the [Routh–Hurwitz
+criterion](https://ocw.mit.edu/courses/2-004-dynamics-and-control-ii-spring-2008/resources/lecture_25/);
+Notre Dame's linear-systems text documents the
+[Jury test for discrete systems](https://www3.nd.edu/~lemmon/courses/linear-systems/lecture-book/linsys-book-2024.pdf).
 
 This is a local empirical model of the captured operating regime. It is useful
 for comparing controller settings but does not constitute a formal robust

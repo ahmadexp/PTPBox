@@ -16,7 +16,8 @@ The React application in `app/` is a client-side instrument UI. It renders:
 - ADEV/MDEV/TDEV/HDEV/MTIE/Theo1 metrology, factor-graph fusion, an
   ensemble clock, and covariance-aware error budgets;
 - raw `t1`/`t2`/`t3`/`t4` exchange inspection;
-- adaptive estimation, regime inference, system identification,
+- adaptive estimation, regime inference, ARX system identification with
+  Bode/Nyquist response and Jury/Routh stability evidence,
   temperature-aware holdover, replay-safe tuning, and change detection;
 - durable experiment capture, selectable servo control, and measured holdover;
 - profile configuration guardrails, DPLL/SyncE truth, message authentication,

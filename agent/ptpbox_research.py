@@ -585,6 +585,190 @@ def temperature_holdover_model(
     }
 
 
+def arx_frequency_domain_diagnostics(
+    a1: float,
+    a2: float,
+    b1: float,
+    b2: float,
+    sample_period_s: float,
+    sample_count: int,
+    point_count: int = 72,
+) -> dict[str, Any]:
+    """Evaluate the identified ARX plant on the discrete-time unit circle.
+
+    The fitted model is y[k] = a1*y[k-1] + a2*y[k-2] +
+    b1*u[k-1] + b2*u[k-2].  Its transfer function is therefore
+    (b1*z^-1 + b2*z^-2) / (1 - a1*z^-1 - a2*z^-2).
+
+    This is an empirical actuation-to-phase plant response.  It is deliberately
+    not called an open-loop transfer: operational servo data alone does not
+    identify the complete controller/plant loop needed for formal Nyquist
+    encirclement or classical gain/phase margins.
+    """
+    period = max(EPSILON, float(sample_period_s))
+    nyquist_hz = 0.5 / period
+    upper_hz = max(EPSILON, nyquist_hz * 0.98)
+    record_floor_hz = 1.0 / max(period * max(12, sample_count), period)
+    lower_hz = min(upper_hz / 4.0, max(upper_hz / 1000.0, record_floor_hz))
+    lower_hz = max(EPSILON, lower_hz)
+    count = max(16, int(point_count))
+    ratio = upper_hz / lower_hz
+    frequencies = [
+        lower_hz * ratio ** (index / max(1, count - 1))
+        for index in range(count)
+    ]
+    points: list[dict[str, float]] = []
+    previous_phase: float | None = None
+    for frequency_hz in frequencies:
+        omega = 2.0 * math.pi * frequency_hz * period
+        z_inverse = complex(math.cos(omega), -math.sin(omega))
+        z_inverse_squared = z_inverse * z_inverse
+        numerator = b1 * z_inverse + b2 * z_inverse_squared
+        denominator = 1.0 - a1 * z_inverse - a2 * z_inverse_squared
+        response = numerator / denominator if abs(denominator) > EPSILON else complex(math.inf, math.inf)
+        magnitude = abs(response)
+        magnitude_db = 20.0 * math.log10(max(EPSILON, magnitude))
+        phase = math.degrees(math.atan2(response.imag, response.real))
+        if previous_phase is not None:
+            while phase - previous_phase > 180.0:
+                phase -= 360.0
+            while phase - previous_phase < -180.0:
+                phase += 360.0
+        previous_phase = phase
+        points.append(
+            {
+                "frequency_hz": frequency_hz,
+                "magnitude": magnitude,
+                "magnitude_db": magnitude_db,
+                "phase_deg": phase,
+                "real": response.real,
+                "imag": response.imag,
+            }
+        )
+
+    finite_points = [
+        point
+        for point in points
+        if all(
+            math.isfinite(point[key])
+            for key in ("magnitude", "magnitude_db", "phase_deg", "real", "imag")
+        )
+    ]
+    low_gain_db = finite_points[0]["magnitude_db"] if finite_points else None
+    peak = max(finite_points, key=lambda point: point["magnitude_db"]) if finite_points else None
+    bandwidth = None
+    if low_gain_db is not None:
+        bandwidth_point = next(
+            (
+                point
+                for point in finite_points[1:]
+                if point["magnitude_db"] <= low_gain_db - 3.0
+            ),
+            None,
+        )
+        bandwidth = bandwidth_point["frequency_hz"] if bandwidth_point else None
+    closest = (
+        min(finite_points, key=lambda point: math.hypot(point["real"] + 1.0, point["imag"]))
+        if finite_points
+        else None
+    )
+
+    # Exact second-order Jury/Schur conditions for
+    # P(z) = z² - a1*z - a2.  These directly match this sampled system.
+    jury_conditions = [
+        {"name": "P(+1) > 0", "value": 1.0 - a1 - a2},
+        {"name": "P(-1) > 0", "value": 1.0 + a1 - a2},
+        {"name": "|a₂| < 1", "value": 1.0 - abs(a2)},
+    ]
+    for condition in jury_conditions:
+        condition["pass"] = bool(condition["value"] > EPSILON)
+    jury_stable = all(bool(condition["pass"]) for condition in jury_conditions)
+
+    # Bilinear transform z=(1+sT/2)/(1-sT/2).  For the second-order
+    # denominator the mapped continuous polynomial is c2*s²+c1*s+c0.
+    routh_coefficients = {
+        "s2": (period * period / 4.0) * (1.0 + a1 - a2),
+        "s1": period * (1.0 + a2),
+        "s0": 1.0 - a1 - a2,
+    }
+    first_column = [
+        routh_coefficients["s2"],
+        routh_coefficients["s1"],
+        routh_coefficients["s0"],
+    ]
+    nonzero_signs = [
+        1 if value > 0.0 else -1
+        for value in first_column
+        if abs(value) > EPSILON
+    ]
+    sign_changes = sum(
+        left != right
+        for left, right in zip(nonzero_signs, nonzero_signs[1:])
+    )
+    routh_stable = len(nonzero_signs) == 3 and sign_changes == 0
+    minimum_minus_one_distance = (
+        math.hypot(closest["real"] + 1.0, closest["imag"])
+        if closest
+        else None
+    )
+    return {
+        "status": "ready" if finite_points else "unavailable",
+        "model": {
+            "form": "G(z)=(b1 z^-1 + b2 z^-2)/(1 - a1 z^-1 - a2 z^-2)",
+            "input": "measured servo frequency correction",
+            "output": "measured PHC phase offset",
+            "sample_period_s": period,
+        },
+        "frequency_response": {
+            "points": finite_points,
+            "minimum_frequency_hz": finite_points[0]["frequency_hz"] if finite_points else None,
+            "nyquist_frequency_hz": nyquist_hz,
+            "low_frequency_gain_db": low_gain_db,
+            "peak_gain_db": peak["magnitude_db"] if peak else None,
+            "peak_frequency_hz": peak["frequency_hz"] if peak else None,
+            "bandwidth_hz": bandwidth,
+        },
+        "nyquist": {
+            "minimum_minus_one_distance": minimum_minus_one_distance,
+            "closest_frequency_hz": closest["frequency_hz"] if closest else None,
+            "minus_one_reference_only": True,
+            "encirclement_claim": "not-evaluated",
+            "interpretation": (
+                "The -1 point is a geometric reference only. Formal Nyquist "
+                "encirclement requires the identified open-loop transfer L(z)."
+            ),
+        },
+        "discrete_stability": {
+            "criterion": "second-order Jury / Schur",
+            "stable": jury_stable,
+            "conditions": jury_conditions,
+            "interpretation": "Direct sampled-data stability test; every pole must remain inside the unit circle.",
+        },
+        "routh_hurwitz": {
+            "criterion": "Routh-Hurwitz on the bilinear-mapped equivalent",
+            "stable": routh_stable,
+            "coefficients": routh_coefficients,
+            "first_column": first_column,
+            "sign_changes": sign_changes,
+            "table": [
+                {"order": "s²", "values": [routh_coefficients["s2"], routh_coefficients["s0"]]},
+                {"order": "s¹", "values": [routh_coefficients["s1"], 0.0]},
+                {"order": "s⁰", "values": [routh_coefficients["s0"], 0.0]},
+            ],
+            "interpretation": (
+                "Continuous equivalent produced by a bilinear transform; it "
+                "cross-checks, but does not replace, the direct Jury result."
+            ),
+        },
+        "provenance": "identified from measured frequency correction to raw PHC phase offset",
+        "interpretation": (
+            "Bode bandwidth and resonance are descriptive for this empirical "
+            "plant model. Classical margins require a separately identified "
+            "controller and open-loop transfer."
+        ),
+    }
+
+
 def identify_arx(input_values: Sequence[float], output_values: Sequence[float], sample_period_s: float) -> dict[str, Any]:
     length = min(len(input_values), len(output_values))
     if length < 12:
@@ -606,6 +790,15 @@ def identify_arx(input_values: Sequence[float], output_values: Sequence[float], 
     residuals = [actual - predicted for actual, predicted in zip(target, fitted)]
     total = sum((value - mean(target)) ** 2 for value in target)
     r_squared = 1.0 - sum(value * value for value in residuals) / max(EPSILON, total)
+    frequency_domain = arx_frequency_domain_diagnostics(
+        a1,
+        a2,
+        b1,
+        b2,
+        sample_period_s,
+        length,
+    )
+    dc_denominator = 1.0 - a1 - a2
     return {
         "status": "stable" if spectral_radius < 1.0 else "unstable",
         "samples": length,
@@ -613,9 +806,10 @@ def identify_arx(input_values: Sequence[float], output_values: Sequence[float], 
         "poles": [{"real": pole.real, "imag": pole.imag, "magnitude": abs(pole)} for pole in poles],
         "spectral_radius": spectral_radius,
         "settling_time_s": settling if math.isfinite(settling) else None,
-        "dc_gain": (b1 + b2) / max(EPSILON, 1.0 - a1 - a2),
+        "dc_gain": (b1 + b2) / (dc_denominator if abs(dc_denominator) > EPSILON else math.copysign(EPSILON, dc_denominator or 1.0)),
         "r_squared": r_squared,
         "residual_sigma_ns": math.sqrt(variance(residuals)),
+        "frequency_domain": frequency_domain,
     }
 
 

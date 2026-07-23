@@ -468,7 +468,7 @@ The main objects are:
 | `ensemble` | Covariance-regularized clock weights, virtual offset, and 1σ |
 | `error_budget` | Per-clock components and covariance-aware cascade uncertainty |
 | `temperature_holdover` | Forecast horizon, phase, frequency, and 1σ when sensors are aligned |
-| `system_identification` | ARX coefficients, poles, spectral radius, fit, residual, and settling time |
+| `system_identification` | ARX coefficients, poles, fit, residual, settling time, unit-circle Bode/Nyquist samples, direct Jury/Schur conditions, and bilinear-equivalent Routh–Hurwitz table |
 | `auto_tune` | Replay-only GP/EI PI recommendation, frontier, candidate counts, and `live_changes: 0` |
 | `change_detection` | Bounded BOCPD probability and detected change indices |
 | `recurrence` | Binary recurrence matrix, recurrence rate, determinism, and threshold |

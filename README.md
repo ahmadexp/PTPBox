@@ -400,7 +400,9 @@ state from sysfs and the managed process table.
   count, and applied bounded correction
 - IMM quiet/dynamic/holdover probabilities and the active regime
 - Temperature-aware holdover prediction with uncertainty
-- ARX loop model, poles, spectral radius, fit, residual, and settling estimate
+- ARX actuation-to-phase model with poles, fit, residual, settling estimate,
+  measured Bode magnitude/phase, Nyquist geometry, direct Jury/Schur digital
+  stability, and a bilinear-equivalent Routh–Hurwitz array
 - Replay-only Gaussian-process PI recommendation with the evaluated safe
   frontier and zero live exploratory changes
 - Lock/tracking state and recovery events

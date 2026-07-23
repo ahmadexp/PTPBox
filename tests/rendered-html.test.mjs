@@ -89,6 +89,11 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /INTERACTING MULTIPLE MODEL/);
   assert.match(page, /BAYESIAN ROOT-CAUSE WATCH/);
   assert.match(page, /COMMON-EDGE PHC COMPARISON/);
+  assert.match(page, /Bode · Nyquist · sampled-data stability/);
+  assert.match(page, /Jury \/ Schur conditions/);
+  assert.match(page, /Routh–Hurwitz array/);
+  assert.match(page, /Formal Nyquist encirclement requires the identified open-loop transfer/i);
+  assert.match(page, /geometry only · not a margin/i);
   assert.match(page, /Replay bifurcation map/);
   assert.match(page, /settled extrema from bounded offline PI replay/i);
   assert.match(page, /true physical bifurcation claim requires a controlled hardware sweep/i);
