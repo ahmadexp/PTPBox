@@ -42,7 +42,7 @@
   "type": "module",
   "description": "Precision Time Protocol cascade observability and control room",
   "author": "Ahmad Byagowi",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ahmadexp/PTPBox.git"

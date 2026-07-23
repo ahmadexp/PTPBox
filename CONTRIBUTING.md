@@ -48,6 +48,18 @@ host bundle, Python syntax, and shell syntax.
 - Call out any command that moves interfaces, changes clock state, or requires
   additional privilege.
 
+## Contribution license
+
+PTPBox uses a noncommercial source-available license with all commercial rights
+reserved to Ahmad Byagowi. By intentionally submitting a contribution for
+inclusion in PTPBox, you agree to Section 5 of [LICENSE](LICENSE): you retain
+ownership of your work and grant Ahmad Byagowi the perpetual right to use,
+modify, distribute, relicense, and commercially exploit it as part of, or in
+connection with, PTPBox.
+
+Do not submit a contribution if you do not own it, lack authority to grant
+those rights, or do not agree to those terms.
+
 ## Commit style
 
 Use a short imperative subject, for example:

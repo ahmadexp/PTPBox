@@ -11,7 +11,7 @@
 **Build a real PTP cascade inside one multi-NIC Linux host. Observe every hop. Compare every PHC. Change servos live. Measure holdover. Repeat.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ahmadexp/PTPBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/ahmadexp/PTPBox/actions/workflows/ci.yml)
-[![MIT License](https://img.shields.io/badge/license-MIT-77e2b3?style=flat-square)](LICENSE)
+[![License: Noncommercial](https://img.shields.io/badge/license-noncommercial-f2b84b?style=flat-square)](LICENSE)
 [![LinuxPTP](https://img.shields.io/badge/LinuxPTP-4.x-61dce3?style=flat-square)](https://linuxptp.nwtime.org/)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A522.13-61dce3?style=flat-square)](package.json)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-61dce3?style=flat-square)](agent/ptpbox_agent.py)
@@ -363,8 +363,24 @@ hardware photographs come from that work.
 
 Bug reports, hardware profiles, measurement ideas, and UI improvements are
 welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and keep hardware safety
-front and center.
+front and center. Contributions grant Ahmad Byagowi the right to incorporate
+and commercially license the submitted work as part of PTPBox; see the
+contribution terms before submitting.
 
 ## License
 
-[MIT](LICENSE) © 2026 Ahmad Byagowi.
+PTPBox is source-available under the
+[PTPBox Noncommercial Source License 1.0](LICENSE).
+
+You may use, study, modify, and redistribute PTPBox for noncommercial purposes,
+subject to the license terms. **Any commercial use requires prior, express
+written approval from Ahmad Byagowi.** Ahmad Byagowi reserves all commercial
+rights exclusively; an approved third-party use is only a limited exception
+within the scope of its written agreement.
+
+This is a noncommercial source-available license, not an OSI-approved
+open-source license. The change applies to versions distributed with the new
+license and does not revoke rights already received for an earlier version
+under MIT.
+
+© 2026 Ahmad Byagowi. All rights reserved except as stated in the license.

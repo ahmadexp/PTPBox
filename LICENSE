@@ -1,21 +1,133 @@
-MIT License
+PTPBOX NONCOMMERCIAL SOURCE LICENSE
+Version 1.0 — 23 July 2026
 
 Copyright (c) 2026 Ahmad Byagowi
+All rights reserved except as expressly granted below.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license applies to the PTPBox software, documentation, user interface,
+images, and other materials distributed with this license (the "Software").
+Ahmad Byagowi is the "Licensor."
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. DEFINITIONS
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+"Noncommercial Purpose" means a purpose that is not intended for, directed
+toward, or used in connection with commercial advantage, monetary compensation,
+or revenue-generating activity. Examples include personal experimentation,
+uncompensated academic teaching or research, and charitable or public-interest
+work performed by a nonprofit organization, provided the use is not performed
+for or on behalf of a commercial entity.
+
+"Commercial Use" means any use of the Software that is intended for, directed
+toward, or used in connection with commercial advantage, monetary compensation,
+or revenue-generating activity. Commercial Use includes, without limitation:
+
+  a. selling, licensing, renting, hosting, or providing the Software or its
+     functionality as a product, service, or paid feature;
+  b. including the Software in, or using it to develop, test, operate, monitor,
+     support, or promote, a commercial product or service;
+  c. internal business use by or for a for-profit entity;
+  d. paid consulting, integration, training, support, or managed services; and
+  e. use for which a person or entity receives compensation or commercial
+     benefit, whether direct or indirect.
+
+Nonprofit status, free distribution, or charging only distribution costs does
+not by itself make a use noncommercial. If there is doubt, the use is not
+licensed unless the Licensor confirms in writing that it is noncommercial.
+
+"Written Approval" means a specific written permission signed by the Licensor,
+or an electronic permission sent from an account publicly identified with the
+Licensor, that identifies the recipient and the permitted Commercial Use.
+General statements, public repository access, issue or pull-request discussion,
+and acceptance of a contribution are not Written Approval.
+
+2. NONCOMMERCIAL LICENSE GRANT
+
+Subject to every term of this license, the Licensor grants you a worldwide,
+royalty-free, non-exclusive license to use, reproduce, modify, and distribute
+the Software, in source or object form, solely for Noncommercial Purposes.
+
+This grant includes a license under any patent claims the Licensor can license
+that are necessarily infringed by exercising the rights above, but only for the
+same Noncommercial Purposes. No other patent rights are granted.
+
+3. CONDITIONS
+
+Every copy or substantial portion of the Software that you distribute must:
+
+  a. include this license and all copyright, attribution, and source notices;
+  b. identify material modifications and their date; and
+  c. be distributed only for Noncommercial Purposes and without terms that
+     purport to grant broader rights than this license.
+
+Recipients receive their rights directly from the Licensor under this license.
+You may not sublicense the Software, remove or obscure notices, or state or
+imply that the Licensor endorses you or your use.
+
+4. COMMERCIAL RIGHTS ARE RESERVED EXCLUSIVELY TO THE LICENSOR
+
+No Commercial Use right is granted by this license. The Licensor alone retains
+all rights to use, license, relicense, sell, host, distribute, and otherwise
+exploit the Software commercially.
+
+Anyone other than the Licensor must obtain the Licensor's prior Written
+Approval before any Commercial Use. Any approval is a limited, personal
+exception for the recipient, scope, duration, and conditions stated in that
+approval. It does not transfer ownership, create a general commercial license,
+or reduce the Licensor's continuing and exclusive commercial rights. The
+Licensor may grant, refuse, price, condition, or revoke a commercial permission
+as provided in the applicable written agreement.
+
+5. CONTRIBUTIONS
+
+If you intentionally submit code, documentation, artwork, or another
+contribution for inclusion in PTPBox, you represent that you have the right to
+do so and grant the Licensor a perpetual, worldwide, irrevocable, royalty-free,
+transferable, and sublicensable license to use, reproduce, modify, distribute,
+relicense, and commercially exploit that contribution as part of, or in
+connection with, PTPBox. This contribution license does not transfer ownership
+of your contribution.
+
+6. OWNERSHIP AND TRADEMARKS
+
+The Software is licensed, not sold. The Licensor and applicable contributors
+retain their ownership. Except for the limited rights expressly granted above,
+all rights are reserved. No right to use the Licensor's or PTPBox's names,
+logos, or trademarks is granted except as reasonably necessary for required
+attribution.
+
+7. TERMINATION
+
+Your rights terminate automatically when you breach this license. If the breach
+is not a Commercial Use and is cured within 30 days after you discover it or
+receive notice, your rights are reinstated automatically. Rights terminated by
+an unauthorized Commercial Use may be reinstated only by the Licensor's Written
+Approval. Sections that by their nature should survive termination do survive.
+
+8. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, AND NON-INFRINGEMENT. YOU BEAR ALL RISK ARISING FROM USE OF THE
 SOFTWARE.
+
+9. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR AND CONTRIBUTORS WILL NOT
+BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT,
+OR OTHERWISE, ARISING FROM OR RELATED TO THE SOFTWARE OR ITS USE, INCLUDING
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR
+LOSS OF DATA, PROFITS, GOODWILL, OR BUSINESS, EVEN IF ADVISED OF THE POSSIBILITY.
+
+10. GENERAL
+
+If any provision is unenforceable, it will be modified only as much as
+necessary to make it enforceable, and the remaining provisions will continue
+in effect. A failure to enforce a provision is not a waiver. This license is
+the entire agreement for the rights it grants and may be modified only by a
+written agreement with the Licensor.
+
+11. LICENSE TRANSITION
+
+This license governs each version of the Software distributed with it. It does
+not revoke rights lawfully received for an earlier version under an earlier
+license.
