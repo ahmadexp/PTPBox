@@ -25,8 +25,8 @@ It turns one Linux server into a physical chain of isolated PTP clocks using
 real NICs, one network namespace per card, one `ptp4l` boundary clock per stage,
 and a separate read-only PHC comparison pipeline. The Precision Observatory is
 the control room: live topology, raw timing traces, per-hop error, selectable
-servos, measured holdover, experiments, hardware inventory, notifications, and
-guarded start/stop control.
+servos, measured holdover, hardware-backed PPS/`ts2phc` experiments, hardware
+inventory, notifications, and guarded start/stop control.
 
 The reference system is not a simulation: seven NVIDIA ConnectX-6 Dx adapters
 provide fourteen 100G timing ports, with a separate Intel X550 management link.
@@ -38,6 +38,17 @@ when a live agent is unavailable.
 > the NICs declared in `agent/topology.json` into network namespaces. Review that
 > file carefully and keep every management interface in
 > `management_interfaces` before running `ptpboxctl setup` or `start`.
+
+## Watch the live Observatory
+
+<p align="center">
+  <img src="docs/images/precision-observatory-live.gif" alt="Animated live PTPBox Precision Observatory showing the seven-stage cascade, nanosecond metrics, and unsmoothed BC1-relative PHC traces" width="800">
+</p>
+
+This capture comes from the running seven-card host. It shows the ordered
+BC1→BC7 topology, per-node lock state, direct PHC differences, endpoint
+nanosecond RMS, and the unsmoothed BC1-relative trace updating together. The
+animated values are live measurements, not a prerecorded simulation dataset.
 
 ## See timing error grow, hop by hop
 
@@ -115,6 +126,7 @@ to the original measurements.
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, request a 0.5–10 Hz Sync cadence with the effective IEEE 1588 rate shown explicitly, enter holdover without stopping observation, and measure live drift before resuming. |
+| **PPS & `ts2phc` control** | Select a PHC or external PPS source, assign PPS inputs, configure pins, channel, edge, pulse width, phase, correction, servo, and holdover, then see the actual PPS role and kernel pin state beneath every overview node. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Notifications & event stream** | Follow measurement health, lock state, active servo mix, threshold events, and operator actions. |
