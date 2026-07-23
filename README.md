@@ -53,11 +53,29 @@ frequency adjustment, comparison error bound, servo type, and holdover drift.
 > seven-card reference host. Values are live and will change from sample to
 > sample. The traces are not cosmetically smoothed.
 
+## Watch the cascade as a multi-pendulum
+
+<img src="docs/images/multi-pendulum.jpg" alt="Live PTPBox multi-pendulum showing six measured previous-hop PHC residuals and their equilibrium ledger" width="100%">
+
+Each rod is one physical hop, from BC2 through BC7. Its angle is the current
+previous-hop PHC delta minus a robust learned equilibrium: positive residuals
+swing right and negative residuals swing left. The visual scale follows the
+P95 swing envelope so nanosecond motion remains legible without smoothing the
+measurements. A large coherent phase shift is re-zeroed only after five
+confirming samples beyond the adaptive MAD threshold; **Zero now** establishes
+an operator-selected equilibrium immediately. The ledger below the pendulum
+keeps the raw hop delta, equilibrium, residual, envelope, and regime visible.
+
+This is a measurement mapping, not a gravity simulation. It is designed to make
+stable jitter, a changing equilibrium, and downstream amplification apparent at
+a glance while preserving the exact values for analysis.
+
 ## What you can do
 
 | Surface | Purpose |
 | --- | --- |
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
+| **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
@@ -255,10 +273,11 @@ telemetry charts. The host agent uses only the Python standard library.
 
 The Observatory is running on the reference hardware with selectable live
 servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
-notifications, a standalone host bundle, live inventory, configuration staging,
-and guarded lifecycle control. The next milestones are durable experiment
-storage, PPS comparison datasets, automated MTIE/TDEV/Allan deviation, and
-reusable topology presets. See [CHANGELOG.md](CHANGELOG.md).
+the multi-pendulum phase view, notifications, a standalone host bundle, live
+inventory, configuration staging, and guarded lifecycle control. The next
+milestones are durable experiment storage, PPS comparison datasets, automated
+MTIE/TDEV/Allan deviation, and reusable topology presets. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 

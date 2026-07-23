@@ -4,6 +4,10 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a live multi-pendulum observation page that maps each previous-hop PHC
+  residual to one rod angle, learns a robust per-hop equilibrium, detects
+  coherent regime shifts with MAD-based auto-zeroing, and exposes manual zero,
+  adaptive angular scale, and a per-link equilibrium ledger.
 - Turned the top-bar bell into an accessible live notification center with
   unread state, current clock/servo/measurement health, direct navigation,
   mark-all-read, outside-click dismissal, and Escape-key support.

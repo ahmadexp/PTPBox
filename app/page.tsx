@@ -19,6 +19,7 @@ import {
   ListFilter,
   Menu,
   Network,
+  Orbit,
   Pause,
   Play,
   Radio,
@@ -37,7 +38,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Section = "Overview" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type ServoType = "pi" | "linreg" | "nullf";
@@ -95,7 +96,13 @@ type ClockNode = {
 type HistoryPoint = {
   t: number;
   values: Record<string, number>;
+  hopValues?: Record<string, number>;
   key?: string;
+};
+
+type PendulumZeroState = {
+  at: number | null;
+  baselines: Record<string, number>;
 };
 
 type AgentStatus = {
@@ -257,16 +264,17 @@ function seededNoise(i: number, node: number) {
 }
 
 function buildHistory(length = 120): HistoryPoint[] {
-  return Array.from({ length }, (_, i) => ({
-    t: i - length + 1,
-    values: Object.fromEntries(
+  return Array.from({ length }, (_, i) => {
+    const values = Object.fromEntries(
       INITIAL_NODES.map((node, nodeIndex) => {
         const wander = seededNoise(i, nodeIndex) * (nodeIndex * 3.4 + 1.5);
         const step = i > 54 && i < 82 ? Math.exp(-(i - 54) / 12) * nodeIndex * 5.4 : 0;
         return [node.id, Number((node.offset + wander + step).toFixed(2))];
       }),
-    ),
-  }));
+    ) as Record<string, number>;
+    const hopValues = Object.fromEntries(INITIAL_NODES.slice(1).map((node, index) => [node.id, values[node.id] - values[INITIAL_NODES[index].id]]));
+    return { t: i - length + 1, values, hopValues };
+  });
 }
 
 function formatNanoseconds(value: number, signed = false) {
@@ -346,7 +354,12 @@ function nodesFromTelemetry(payload: TelemetryPayload): ClockNode[] {
 
 function historyFromTelemetry(payload: TelemetryPayload): HistoryPoint[] {
   return payload.clocks
-    .flatMap((clock) => clock.phc_samples.filter((sample) => sample.valid && sample.offset_ns !== null).map((sample) => ({ t: sample.observed_at, values: { [clock.id]: sample.offset_ns as number }, key: `${clock.id}:${sample.sample_id}` })))
+    .flatMap((clock) => clock.phc_samples.filter((sample) => sample.valid && sample.offset_ns !== null).map((sample) => ({
+      t: sample.observed_at,
+      values: { [clock.id]: sample.offset_ns as number },
+      hopValues: sample.previous_hop_offset_ns === null ? undefined : { [clock.id]: sample.previous_hop_offset_ns },
+      key: `${clock.id}:${sample.sample_id}`,
+    })))
     .sort((left, right) => left.t - right.t);
 }
 
@@ -503,6 +516,212 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
   );
 }
 
+type PendulumLinkAnalysis = {
+  node: ClockNode;
+  hop: number;
+  current: number;
+  equilibrium: number;
+  residual: number;
+  envelope: number;
+  samples: number;
+  autoZeros: number;
+  regime: "STABLE" | "LEARNING" | "SHIFT CHECK" | "NO DATA";
+};
+
+function median(values: number[]) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+function percentile(values: number[], fraction: number) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const position = Math.max(0, Math.min(ordered.length - 1, (ordered.length - 1) * fraction));
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const weight = position - lower;
+  return ordered[lower] * (1 - weight) + ordered[upper] * weight;
+}
+
+function robustSigma(values: number[]) {
+  if (values.length < 3) return 0;
+  const center = median(values);
+  return median(values.map((value) => Math.abs(value - center))) * 1.4826;
+}
+
+function analyzePendulumLink(
+  node: ClockNode,
+  hop: number,
+  series: { t: number; value: number }[],
+  manualEquilibrium: number | undefined,
+  autoZero: boolean,
+): PendulumLinkAnalysis {
+  if (!series.length) {
+    const current = node.measured ? node.hopOffset ?? 0 : 0;
+    const equilibrium = manualEquilibrium ?? current;
+    return { node, hop, current, equilibrium, residual: current - equilibrium, envelope: 0, samples: 0, autoZeros: 0, regime: node.measured ? "LEARNING" : "NO DATA" };
+  }
+
+  let equilibrium = manualEquilibrium ?? median(series.slice(0, Math.min(12, series.length)).map((point) => point.value));
+  let equilibriumAt = series[0].t;
+  let stableResiduals: number[] = [];
+  let candidate: { t: number; value: number }[] = [];
+  let autoZeros = 0;
+
+  for (const point of series) {
+    const residual = point.value - equilibrium;
+    const sigma = robustSigma(stableResiduals.slice(-30));
+    const shiftThreshold = Math.max(80, sigma * 8);
+    if (autoZero && Math.abs(residual) > shiftThreshold) {
+      candidate = [...candidate.slice(-5), point];
+      if (candidate.length >= 5) {
+        const values = candidate.map((item) => item.value);
+        const nextEquilibrium = median(values);
+        const distance = Math.abs(nextEquilibrium - equilibrium);
+        const candidateSigma = robustSigma(values);
+        if (distance > shiftThreshold && candidateSigma <= Math.max(18, distance * 0.18)) {
+          equilibrium = nextEquilibrium;
+          equilibriumAt = candidate[0].t;
+          stableResiduals = [];
+          candidate = [];
+          autoZeros += 1;
+        }
+      }
+    } else {
+      candidate = [];
+      stableResiduals = [...stableResiduals.slice(-59), residual];
+    }
+  }
+
+  const residuals = series.filter((point) => point.t >= equilibriumAt).map((point) => point.value - equilibrium);
+  const current = series[series.length - 1].value;
+  const regime = candidate.length ? "SHIFT CHECK" : residuals.length < 8 ? "LEARNING" : "STABLE";
+  return {
+    node,
+    hop,
+    current,
+    equilibrium,
+    residual: current - equilibrium,
+    envelope: percentile(residuals.map(Math.abs), 0.95),
+    samples: residuals.length,
+    autoZeros,
+    regime,
+  };
+}
+
+function MultiPendulum({
+  history,
+  nodes,
+  autoZero,
+  setAutoZero,
+  zeroState,
+  onZero,
+  paused,
+  connection,
+}: {
+  history: HistoryPoint[];
+  nodes: ClockNode[];
+  autoZero: boolean;
+  setAutoZero: (value: boolean) => void;
+  zeroState: PendulumZeroState;
+  onZero: () => void;
+  paused: boolean;
+  connection: ConnectionMode;
+}) {
+  const links = useMemo(() => nodes.slice(1).map((node, index) => {
+    const fullSeries = history.flatMap((point) => {
+      const value = point.hopValues?.[node.id];
+      return Number.isFinite(value) ? [{ t: point.t, value }] : [];
+    });
+    const series = zeroState.at === null ? fullSeries : fullSeries.filter((point) => point.t >= zeroState.at!);
+    return analyzePendulumLink(node, index + 1, series, zeroState.baselines[node.id], autoZero);
+  }), [autoZero, history, nodes, zeroState]);
+
+  const motionScale = useMemo(() => Math.max(5, percentile(links.flatMap((link) => [Math.abs(link.residual), link.envelope]).filter(Number.isFinite), 0.95)), [links]);
+  const maxAngle = 31;
+  const anchor = { x: 500, y: 54 };
+  const rodLength = Math.min(64, 372 / Math.max(1, links.length));
+  const geometry = links.reduce<{ x: number; y: number; angle: number }[]>((points, link) => {
+    const origin = points[points.length - 1] ?? { ...anchor, angle: 0 };
+    const angle = maxAngle * Math.tanh(link.residual / Math.max(1, motionScale * 0.88));
+    const radians = angle * Math.PI / 180;
+    points.push({ x: origin.x + Math.sin(radians) * rodLength, y: origin.y + Math.cos(radians) * rodLength, angle });
+    return points;
+  }, []);
+  const largest = links.reduce<PendulumLinkAnalysis | null>((current, link) => !current || Math.abs(link.residual) > Math.abs(current.residual) ? link : current, null);
+  const stableLinks = links.filter((link) => link.regime === "STABLE").length;
+  const zeroEvents = links.reduce((total, link) => total + link.autoZeros, 0) + (zeroState.at === null ? 0 : 1);
+  const hasSamples = links.some((link) => link.samples > 0 || link.node.measured);
+  const accessibleSummary = links.map((link) => `${link.node.id} residual ${formatNanoseconds(link.residual, true)}, ${link.regime.toLowerCase()}`).join("; ");
+
+  return (
+    <div className="pendulum-layout">
+      <section className="instrument-panel pendulum-panel">
+        <div className="panel-heading pendulum-heading">
+          <div><span className="section-kicker">MEASUREMENT-DRIVEN KINEMATICS</span><h2>Cascade phase pendulum</h2></div>
+          <div className="pendulum-controls">
+            <span className="auto-zero-control"><span>Auto-zero</span><Toggle on={autoZero} onChange={setAutoZero} label="Automatic equilibrium zeroing" /></span>
+            <button className="quiet-button" type="button" disabled={!hasSamples} onClick={onZero}><TimerReset size={14} /> Zero now</button>
+          </div>
+        </div>
+        <div className="pendulum-workbench">
+          <div className="pendulum-stage">
+            <svg className="pendulum-svg" viewBox="0 0 1000 500" role="img" aria-label={`Multi-pendulum of previous-hop PHC residuals. ${accessibleSummary}`}>
+              <title>PTP cascade multi-pendulum</title>
+              <desc>Each rod angle is driven by one boundary-clock previous-hop PHC residual around its current equilibrium. Positive residuals swing right and negative residuals swing left.</desc>
+              <line className="pendulum-centerline" x1={anchor.x} y1="24" x2={anchor.x} y2="462" />
+              <text className="pendulum-polarity" x="72" y="36">− PHASE</text>
+              <text className="pendulum-polarity" x="928" y="36" textAnchor="end">+ PHASE</text>
+              <g className="pendulum-anchor">
+                <line x1={anchor.x - 42} y1="34" x2={anchor.x + 42} y2="34" />
+                <circle cx={anchor.x} cy={anchor.y} r="8" />
+                <text x={anchor.x} y="19" textAnchor="middle">BC1 · GM REFERENCE</text>
+              </g>
+              {links.map((link, index) => {
+                const origin = index === 0 ? anchor : geometry[index - 1];
+                const point = geometry[index];
+                const labelRight = point.x <= 530;
+                const labelX = point.x + (labelRight ? 18 : -18);
+                const regimeClass = link.regime === "STABLE" ? "stable" : link.regime === "SHIFT CHECK" ? "shift" : "learning";
+                return (
+                  <g className={`pendulum-link ${regimeClass}`} key={link.node.id}>
+                    <line className="pendulum-equilibrium" x1={origin.x} y1={origin.y} x2={origin.x} y2={origin.y + rodLength} />
+                    <path className="pendulum-envelope" d={`M ${origin.x - Math.sin(maxAngle * Math.PI / 180) * rodLength} ${origin.y + Math.cos(maxAngle * Math.PI / 180) * rodLength} Q ${origin.x} ${origin.y + rodLength * 1.16} ${origin.x + Math.sin(maxAngle * Math.PI / 180) * rodLength} ${origin.y + Math.cos(maxAngle * Math.PI / 180) * rodLength}`} />
+                    <line className="pendulum-rod" x1={origin.x} y1={origin.y} x2={point.x} y2={point.y} stroke={link.node.color} />
+                    <circle className="pendulum-joint" cx={origin.x} cy={origin.y} r="3.5" />
+                    <circle className="pendulum-bob-halo" cx={point.x} cy={point.y} r="13" stroke={link.node.color} />
+                    <circle className="pendulum-bob" cx={point.x} cy={point.y} r="7" fill={link.node.color} />
+                    <text className="pendulum-link-name" x={labelX} y={point.y - 5} textAnchor={labelRight ? "start" : "end"}>{`H${link.hop} · ${link.node.id}`}</text>
+                    <text className="pendulum-link-value" x={labelX} y={point.y + 10} textAnchor={labelRight ? "start" : "end"}>{link.regime === "NO DATA" ? "—" : formatNanoseconds(link.residual, true)}</text>
+                  </g>
+                );
+              })}
+              <text className="pendulum-axis-note" x={anchor.x} y="486" textAnchor="middle">ANGLE = SOFT-CLAMPED PREVIOUS-HOP RESIDUAL · ZERO = LEARNED EQUILIBRIUM</text>
+            </svg>
+          </div>
+          <aside className="pendulum-summary" aria-label="Pendulum summary">
+            <div><span>Motion</span><strong>{paused ? "FROZEN" : connection === "live" ? "LIVE" : connection === "simulation" ? "MODELED" : connection.toUpperCase()}</strong><small>{paused ? "Raw capture paused" : "One update per PHC sample"}</small></div>
+            <div><span>Angular scale</span><strong>±{formatNanoseconds(motionScale)}</strong><small>Adaptive P95 swing envelope</small></div>
+            <div><span>Largest residual</span><strong>{largest ? formatNanoseconds(Math.abs(largest.residual)) : "—"}</strong><small>{largest ? `${largest.node.id} · H${largest.hop}` : "Waiting for hop data"}</small></div>
+            <div><span>Equilibria</span><strong>{stableLinks}/{links.length}</strong><small>{zeroEvents} zero event{zeroEvents === 1 ? "" : "s"} in view</small></div>
+          </aside>
+        </div>
+        <div className="pendulum-provenance"><Info size={14} /><span><strong>Interpretation:</strong> this is not a simulated gravity model. Each rod is a measured previous-hop PHC delta after subtracting a robust equilibrium. Auto-zero accepts a regime change only after five coherent samples beyond max(80 ns, 8 × MAD).</span></div>
+      </section>
+
+      <section className="instrument-panel pendulum-ledger">
+        <div className="panel-heading"><div><span className="section-kicker">EQUILIBRIUM LEDGER</span><h2>Per-hop swing decomposition</h2></div><span className="panel-meta">positive swings right · negative swings left</span></div>
+        <div className="data-table pendulum-table">
+          <div className="table-header"><span>Hop / stage</span><span>Current hop Δ</span><span>Equilibrium</span><span>Swing residual</span><span>P95 envelope</span><span>Regime</span></div>
+          {links.map((link) => <div className="table-row" key={link.node.id}><span><i style={{ background: link.node.color }} />H{link.hop} · {link.node.label}<small>{link.node.phc}</small></span><strong>{link.regime === "NO DATA" ? "—" : formatNanoseconds(link.current, true)}</strong><span>{link.regime === "NO DATA" ? "—" : formatNanoseconds(link.equilibrium, true)}</span><span>{link.regime === "NO DATA" ? "—" : formatNanoseconds(link.residual, true)}</span><span>{link.samples ? formatNanoseconds(link.envelope) : "—"}</span><em className={link.regime === "STABLE" ? "state-good" : link.regime === "NO DATA" ? "state-off" : "state-warn"}>{link.regime}</em></div>)}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button className={`toggle ${on ? "on" : ""}`} type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}>
@@ -543,6 +762,8 @@ export default function PTPBoxDashboard() {
   const [servoBusy, setServoBusy] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
+  const [pendulumAutoZero, setPendulumAutoZero] = useState(true);
+  const [pendulumZeroState, setPendulumZeroState] = useState<PendulumZeroState>({ at: null, baselines: {} });
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
   const servoSelectionHydratedRef = useRef(false);
@@ -728,13 +949,11 @@ export default function PTPBoxDashboard() {
       tickRef.current += 1;
       const tick = tickRef.current;
       setNodes((current) => current.map((node, index) => ({ ...node, offset: Number((INITIAL_NODES[index].offset + seededNoise(tick, index) * (index * 3.4 + 1.5)).toFixed(2)) })));
-      setHistory((current) => [
-        ...current.slice(-119),
-        {
-          t: tick,
-          values: Object.fromEntries(INITIAL_NODES.map((node, index) => [node.id, Number((node.offset + seededNoise(tick, index) * (index * 3.4 + 1.5)).toFixed(2))])),
-        },
-      ]);
+      setHistory((current) => {
+        const values = Object.fromEntries(INITIAL_NODES.map((node, index) => [node.id, Number((node.offset + seededNoise(tick, index) * (index * 3.4 + 1.5)).toFixed(2))])) as Record<string, number>;
+        const hopValues = Object.fromEntries(INITIAL_NODES.slice(1).map((node, index) => [node.id, values[node.id] - values[INITIAL_NODES[index].id]]));
+        return [...current.slice(-119), { t: tick, values, hopValues }];
+      });
       if (experimentRunning) setExperimentProgress((value) => (value >= 100 ? 100 : value + 1));
     }, 900);
     return () => window.clearInterval(timer);
@@ -835,6 +1054,27 @@ export default function PTPBoxDashboard() {
   const selectNode = (id: string) => {
     setSelectedNode(id);
     setVisibleTraces((current) => (current.includes(id) ? current : [...current.slice(-3), id]));
+  };
+
+  const zeroPendulum = () => {
+    const baselines: Record<string, number> = {};
+    const sampleTimes: number[] = [];
+    for (const node of nodes.slice(1)) {
+      const point = [...history].reverse().find((item) => Number.isFinite(item.hopValues?.[node.id]));
+      const value = point?.hopValues?.[node.id];
+      if (Number.isFinite(value)) {
+        baselines[node.id] = value as number;
+        sampleTimes.push(point!.t);
+      } else if (node.measured && Number.isFinite(node.hopOffset)) {
+        baselines[node.id] = node.hopOffset as number;
+      }
+    }
+    if (!Object.keys(baselines).length) {
+      setToast("No measured hop deltas are available to zero");
+      return;
+    }
+    setPendulumZeroState({ at: sampleTimes.length ? Math.min(...sampleTimes) : null, baselines });
+    setToast(`${Object.keys(baselines).length} pendulum links zeroed to the current PHC equilibrium`);
   };
 
   const selectServoTarget = (target: string) => {
@@ -969,6 +1209,7 @@ export default function PTPBoxDashboard() {
 
   const navItems: { label: Section; icon: typeof LayoutDashboard; badge?: string }[] = [
     { label: "Overview", icon: LayoutDashboard },
+    { label: "Multi-pendulum", icon: Orbit },
     { label: "Analytics", icon: BarChart3 },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -1056,7 +1297,7 @@ export default function PTPBoxDashboard() {
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
               <h1>{section === "Overview" ? "Cascade overview" : section}</h1>
-              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -1167,6 +1408,19 @@ export default function PTPBoxDashboard() {
                 </section>
               </div>
             </div>
+          )}
+
+          {section === "Multi-pendulum" && (
+            <MultiPendulum
+              history={history}
+              nodes={nodes}
+              autoZero={pendulumAutoZero}
+              setAutoZero={setPendulumAutoZero}
+              zeroState={pendulumZeroState}
+              onZero={zeroPendulum}
+              paused={paused}
+              connection={connection}
+            />
           )}
 
           {section === "Analytics" && (

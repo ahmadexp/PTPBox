@@ -42,6 +42,10 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /read-only kernel cross timestamps/);
   assert.match(page, /Kernel cross timestamps place every PHC at a common epoch/i);
   assert.match(page, /Analytics/);
+  assert.match(page, /Multi-pendulum/);
+  assert.match(page, /Cascade phase pendulum/);
+  assert.match(page, /Automatic equilibrium zeroing/);
+  assert.match(page, /not a simulated gravity model/i);
   assert.match(page, /Experiments/);
   assert.match(page, /Interfaces/);
   assert.match(page, /Configuration/);
