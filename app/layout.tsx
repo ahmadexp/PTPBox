@@ -24,6 +24,10 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase: base,
     title: "PTPBox — Precision Time Lab",
     description,
+    icons: {
+      icon: "/ptpbox-hardware-logo.png",
+      apple: "/ptpbox-hardware-logo.png",
+    },
     openGraph: {
       type: "website",
       title: "PTPBox — Precision Time Lab",

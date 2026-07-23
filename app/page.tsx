@@ -2220,7 +2220,7 @@ export default function PTPBoxDashboard() {
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
         <div className="brand-block">
-          <div className="brand-mark"><span /><span /><span /></div>
+          <span className="brand-mark" role="img" aria-label="PTPBox hardware logo" />
           <div><strong>PTPBOX</strong><small>PRECISION TIME LAB</small></div>
           <button className="icon-button close-nav" type="button" onClick={() => setMobileNav(false)} aria-label="Close navigation"><X size={18} /></button>
         </div>

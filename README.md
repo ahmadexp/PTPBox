@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="public/ptpbox-hardware-logo.png" alt="PTPBox hardware logo — two timing adapters linked as a physical cascade" width="180">
+
 <img src="public/og.png" alt="PTPBox Precision Time Lab — a cascade of timing instruments with nanosecond traces" width="100%">
 
 # PTPBox

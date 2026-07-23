@@ -42,10 +42,7 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .brand-block { height: 68px; display: flex; align-items: center; gap: 11px; padding: 0 18px; border-bottom: 1px solid var(--line-soft); }
 .brand-block strong { display: block; font-size: 15px; letter-spacing: .16em; line-height: 1; }
 .brand-block small { display: block; margin-top: 5px; color: #667c83; font-size: 8px; letter-spacing: .17em; }
-.brand-mark { position: relative; width: 29px; height: 29px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; border: 1px solid #2b414a; background: #0b1318; }
-.brand-mark::after { content: ""; position: absolute; inset: 4px; border: 1px solid rgba(97, 220, 227, .18); }
-.brand-mark span { z-index: 1; width: 3px; background: var(--cyan); box-shadow: 0 0 9px rgba(97, 220, 227, .4); }
-.brand-mark span:nth-child(1) { height: 7px; opacity: .55; }.brand-mark span:nth-child(2) { height: 16px; }.brand-mark span:nth-child(3) { height: 11px; opacity: .75; }
+.brand-mark { width: 34px; height: 34px; flex: 0 0 34px; overflow: hidden; border: 1px solid #3a4245; border-radius: 6px; background: #f6f1eb url("/ptpbox-hardware-logo.png") center / cover no-repeat; box-shadow: 0 0 0 1px rgba(255,255,255,.025), 0 7px 18px rgba(0,0,0,.28); }
 .close-nav { display: none !important; margin-left: auto; }
 
 .lab-switcher { margin: 16px 12px 8px; height: 58px; display: flex; align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--line); background: #0b1217; border-radius: 7px; }
