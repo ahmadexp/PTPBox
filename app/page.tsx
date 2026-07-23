@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type ServoType = "pi" | "linreg" | "nullf";
@@ -1026,6 +1026,253 @@ function CovarianceLab({
   );
 }
 
+type StateScale = "sigma" | "physical";
+type CrossingDirection = "rising" | "falling" | "both";
+
+type ModalPoint = {
+  t: number;
+  scores: number[];
+  display: number[];
+};
+
+type PoincareCrossing = {
+  t: number;
+  direction: "rising" | "falling";
+  display: number[];
+};
+
+function orientedEigenvectors(vectors: number[][]) {
+  return vectors.map((vector) => {
+    const pivot = vector.reduce((best, value, index) => Math.abs(value) > Math.abs(vector[best] ?? 0) ? index : best, 0);
+    const sign = (vector[pivot] ?? 0) < 0 ? -1 : 1;
+    return vector.map((value) => value * sign);
+  });
+}
+
+function projectPhaseChanges(rows: PhaseChangeRow[], vectors: number[][], eigenvalues: number[], scale: StateScale) {
+  if (!rows.length || !vectors.length) return [] as ModalPoint[];
+  const width = rows[0].values.length;
+  const means = Array.from({ length: width }, (_, column) => rows.reduce((sum, row) => sum + row.values[column], 0) / rows.length);
+  return rows.map((row) => {
+    const centered = row.values.map((value, index) => value - means[index]);
+    const scores = vectors.map((vector) => vector.reduce((sum, loading, index) => sum + loading * centered[index], 0));
+    const display = scores.map((value, index) => scale === "sigma" ? value / Math.sqrt(Math.max(eigenvalues[index] ?? 0, 1e-9)) : value);
+    return { t: row.t, scores, display };
+  });
+}
+
+function poincareCrossings(points: ModalPoint[], sectionAxis: number, direction: CrossingDirection) {
+  const crossings: PoincareCrossing[] = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const before = previous.scores[sectionAxis] ?? 0;
+    const after = current.scores[sectionAxis] ?? 0;
+    const rising = before <= 0 && after > 0;
+    const falling = before >= 0 && after < 0;
+    if ((!rising && !falling) || (direction !== "both" && direction !== (rising ? "rising" : "falling"))) continue;
+    const fraction = Math.max(0, Math.min(1, -before / (after - before)));
+    crossings.push({
+      t: previous.t + (current.t - previous.t) * fraction,
+      direction: rising ? "rising" : "falling",
+      display: previous.display.map((value, column) => value + ((current.display[column] ?? value) - value) * fraction),
+    });
+  }
+  return crossings;
+}
+
+function symmetricExtent(values: number[], fallback = 1) {
+  return Math.max(fallback, ...values.filter(Number.isFinite).map(Math.abs)) * 1.08;
+}
+
+function modalValue(value: number, scale: StateScale) {
+  if (scale === "sigma") return `${value >= 0 ? "+" : ""}${value.toFixed(2)} σ`;
+  return `${formatNanoseconds(value, true)}/s`;
+}
+
+function StatePlaneChart({ points, eigenvalues, scale }: { points: ModalPoint[]; eigenvalues: number[]; scale: StateScale }) {
+  const width = 820;
+  const height = 430;
+  const padding = { left: 58, right: 24, top: 24, bottom: 44 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xValues = points.map((point) => point.display[0] ?? 0);
+  const yValues = points.map((point) => point.display[1] ?? 0);
+  const sigmaX = scale === "sigma" ? 1 : Math.sqrt(Math.max(eigenvalues[0] ?? 0, 1e-9));
+  const sigmaY = scale === "sigma" ? 1 : Math.sqrt(Math.max(eigenvalues[1] ?? 0, 1e-9));
+  const xLimit = symmetricExtent([...xValues, sigmaX * 2], scale === "sigma" ? 2.5 : 1);
+  const yLimit = symmetricExtent([...yValues, sigmaY * 2], scale === "sigma" ? 2.5 : 1);
+  const x = (value: number) => padding.left + ((value + xLimit) / (xLimit * 2)) * plotWidth;
+  const y = (value: number) => padding.top + (1 - (value + yLimit) / (yLimit * 2)) * plotHeight;
+  const path = points.map((point, index) => `${index ? "L" : "M"} ${x(point.display[0] ?? 0).toFixed(2)} ${y(point.display[1] ?? 0).toFixed(2)}`).join(" ");
+  const latest = points.at(-1);
+  const unit = scale === "sigma" ? "σ" : "ns/s";
+
+  return (
+    <div className="state-plane-wrap">
+      <svg className="state-plane-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Principal state plane of PC1 versus PC2 with ${points.length} synchronized phase-change states`}>
+        <title>Principal state-space trajectory</title>
+        <desc>The six hop-change rates are centered and projected onto the first two covariance eigenvectors. Older states are faint and the newest state is ringed.</desc>
+        {[-1, 0, 1].map((fraction) => <g key={`x-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={x(fraction * xLimit)} y1={padding.top} x2={x(fraction * xLimit)} y2={height - padding.bottom} /><text className="state-axis-label" x={x(fraction * xLimit)} y={height - 18} textAnchor="middle">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${xLimit.toFixed(scale === "sigma" ? 1 : 0)}`}</text></g>)}
+        {[-1, 0, 1].map((fraction) => <g key={`y-${fraction}`}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={padding.left} y1={y(fraction * yLimit)} x2={width - padding.right} y2={y(fraction * yLimit)} /><text className="state-axis-label" x={padding.left - 10} y={y(fraction * yLimit) + 3} textAnchor="end">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${yLimit.toFixed(scale === "sigma" ? 1 : 0)}`}</text></g>)}
+        {[2, 1].map((sigma) => <ellipse key={sigma} className={`state-sigma-ellipse sigma-${sigma}`} cx={x(0)} cy={y(0)} rx={Math.abs(x(sigmaX * sigma) - x(0))} ry={Math.abs(y(sigmaY * sigma) - y(0))} />)}
+        <path className="state-trajectory" d={path} />
+        {points.map((point, index) => <circle key={`${point.t}-${index}`} className="state-point" cx={x(point.display[0] ?? 0)} cy={y(point.display[1] ?? 0)} r={index === points.length - 1 ? 4.5 : 2.3} style={{ opacity: 0.16 + index / Math.max(1, points.length - 1) * 0.68 }} />)}
+        {latest && <circle className="state-current-ring" cx={x(latest.display[0] ?? 0)} cy={y(latest.display[1] ?? 0)} r="10" />}
+        <text className="state-axis-title" x={padding.left + plotWidth / 2} y={height - 2} textAnchor="middle">PC1 · {unit}</text>
+        <text className="state-axis-title" transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">PC2 · {unit}</text>
+      </svg>
+      <div className="state-plane-note"><span><i className="ellipse-two" />2σ covariance ellipse</span><span><i className="ellipse-one" />1σ covariance ellipse</span><strong>latest {latest ? `${modalValue(latest.display[0] ?? 0, scale)} · ${modalValue(latest.display[1] ?? 0, scale)}` : "—"}</strong></div>
+    </div>
+  );
+}
+
+function PoincareChart({ crossings, axes, scale }: { crossings: PoincareCrossing[]; axes: [number, number]; scale: StateScale }) {
+  const width = 600;
+  const height = 430;
+  const padding = { left: 56, right: 22, top: 24, bottom: 44 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xLimit = symmetricExtent(crossings.map((point) => point.display[axes[0]] ?? 0), scale === "sigma" ? 2 : 1);
+  const yLimit = symmetricExtent(crossings.map((point) => point.display[axes[1]] ?? 0), scale === "sigma" ? 2 : 1);
+  const x = (value: number) => padding.left + ((value + xLimit) / (xLimit * 2)) * plotWidth;
+  const y = (value: number) => padding.top + (1 - (value + yLimit) / (yLimit * 2)) * plotHeight;
+  const unit = scale === "sigma" ? "σ" : "ns/s";
+
+  return (
+    <svg className="poincare-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Empirical Poincaré map with ${crossings.length} zero-plane crossings`}>
+      <title>Empirical Poincaré section</title>
+      <desc>Points are linearly interpolated crossings of the selected principal-component zero plane. Cyan circles rise through the plane and coral diamonds fall through it.</desc>
+      <line className="state-zero-axis" x1={x(0)} y1={padding.top} x2={x(0)} y2={height - padding.bottom} />
+      <line className="state-zero-axis" x1={padding.left} y1={y(0)} x2={width - padding.right} y2={y(0)} />
+      <rect className="poincare-frame" x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} />
+      {crossings.map((point, index) => {
+        const pointX = x(point.display[axes[0]] ?? 0);
+        const pointY = y(point.display[axes[1]] ?? 0);
+        const opacity = 0.32 + index / Math.max(1, crossings.length - 1) * 0.68;
+        return point.direction === "rising" ? <circle key={`${point.t}-${index}`} className="poincare-point rising" cx={pointX} cy={pointY} r="4.5" style={{ opacity }} /> : <path key={`${point.t}-${index}`} className="poincare-point falling" d={`M ${pointX} ${pointY - 5} L ${pointX + 5} ${pointY} L ${pointX} ${pointY + 5} L ${pointX - 5} ${pointY} Z`} style={{ opacity }} />;
+      })}
+      {!crossings.length && <text className="poincare-empty" x={padding.left + plotWidth / 2} y={padding.top + plotHeight / 2} textAnchor="middle">No qualifying crossings in this window</text>}
+      <text className="state-axis-title" x={padding.left + plotWidth / 2} y={height - 3} textAnchor="middle">PC{axes[0] + 1} · {unit}</text>
+      <text className="state-axis-title" transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">PC{axes[1] + 1} · {unit}</text>
+    </svg>
+  );
+}
+
+function ModalTrendChart({ points, scale }: { points: ModalPoint[]; scale: StateScale }) {
+  const width = 900;
+  const height = 300;
+  const padding = { left: 54, right: 18, top: 20, bottom: 35 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const limit = symmetricExtent(points.flatMap((point) => point.display.slice(0, 3)), scale === "sigma" ? 2 : 1);
+  const x = (index: number) => padding.left + (points.length < 2 ? plotWidth : index / (points.length - 1) * plotWidth);
+  const y = (value: number) => padding.top + (1 - (value + limit) / (limit * 2)) * plotHeight;
+  const colors = ["#61dce3", "#c4a0ef", "#f3c36f"];
+  const pathFor = (mode: number) => points.map((point, index) => `${index ? "L" : "M"} ${x(index).toFixed(2)} ${y(point.display[mode] ?? 0).toFixed(2)}`).join(" ");
+  const latest = points.at(-1);
+
+  return (
+    <div className="modal-trend-wrap">
+      <div className="modal-trend-legend">{colors.map((color, index) => <span key={color}><i style={{ background: color }} />PC{index + 1}<strong>{latest ? modalValue(latest.display[index] ?? 0, scale) : "—"}</strong></span>)}</div>
+      <svg className="modal-trend-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Time trend of the first three principal state coordinates">
+        <title>Principal state coordinates through time</title>
+        <desc>The centered six-hop phase-change state projected onto the current first three covariance eigenvectors.</desc>
+        {[-1, 0, 1].map((fraction) => <g key={fraction}><line className={fraction === 0 ? "state-zero-axis" : "state-gridline"} x1={padding.left} y1={y(fraction * limit)} x2={width - padding.right} y2={y(fraction * limit)} /><text className="state-axis-label" x={padding.left - 9} y={y(fraction * limit) + 3} textAnchor="end">{fraction === 0 ? "0" : `${fraction > 0 ? "+" : "−"}${limit.toFixed(scale === "sigma" ? 1 : 0)}`}</text></g>)}
+        {colors.map((color, index) => <path className="modal-trend-line" key={color} d={pathFor(index)} stroke={color} />)}
+        <text className="state-axis-label" x={padding.left} y={height - 8}>basis window start</text>
+        <text className="state-axis-label" x={width - padding.right} y={height - 8} textAnchor="end">now</text>
+      </svg>
+    </div>
+  );
+}
+
+function StateSpaceAtlas({
+  history,
+  nodes,
+  range,
+  setRange,
+  paused,
+  connection,
+}: {
+  history: HistoryPoint[];
+  nodes: ClockNode[];
+  range: string;
+  setRange: (value: string) => void;
+  paused: boolean;
+  connection: ConnectionMode;
+}) {
+  const hopNodes = nodes.slice(1);
+  const nodeIds = useMemo(() => hopNodes.map((node) => node.id), [hopNodes]);
+  const changes = useMemo(() => phaseChangeRows(history, nodeIds), [history, nodeIds]);
+  const [basisSamples, setBasisSamples] = useState(48);
+  const [stateScale, setStateScale] = useState<StateScale>("sigma");
+  const [sectionAxis, setSectionAxis] = useState(2);
+  const [crossingDirection, setCrossingDirection] = useState<CrossingDirection>("rising");
+  const basisRows = changes.slice(-basisSamples);
+  const covariance = useMemo(() => covarianceMatrix(basisRows, hopNodes.length), [basisRows, hopNodes.length]);
+  const eigen = useMemo(() => eigenDecomposeSymmetric(covariance), [covariance]);
+  const vectors = useMemo(() => orientedEigenvectors(eigen.vectors), [eigen.vectors]);
+  const modalPoints = useMemo(() => projectPhaseChanges(basisRows, vectors, eigen.values, stateScale), [basisRows, eigen.values, stateScale, vectors]);
+  const crossings = useMemo(() => poincareCrossings(modalPoints, sectionAxis, crossingDirection), [crossingDirection, modalPoints, sectionAxis]);
+  const sectionAxes = [0, 1, 2].filter((axis) => axis !== sectionAxis).slice(0, 2) as [number, number];
+  const eigenTrace = eigen.values.reduce((sum, value) => sum + value, 0);
+  const eigenShares = eigen.values.map((value) => eigenTrace ? value / eigenTrace : 0);
+  const effectiveRank = Math.exp(-eigenShares.filter((share) => share > 0).reduce((sum, share) => sum + share * Math.log(share), 0));
+  const latest = modalPoints.at(-1);
+  const stateRadius = latest ? Math.sqrt(latest.scores.reduce((sum, value, index) => sum + value * value / Math.max(eigen.values[index] ?? 0, 1e-9), 0)) : 0;
+  const eigenTrendWindow = Math.max(8, Math.min(24, Math.floor(basisSamples / 3)));
+  const snapshots = useMemo(() => rollingMatrixSnapshots(changes, hopNodes.length, eigenTrendWindow, "covariance"), [changes, eigenTrendWindow, hopNodes.length]);
+  const dataState = paused ? "FROZEN" : connection === "live" ? "LIVE" : connection === "simulation" ? "MODELED" : connection.toUpperCase();
+
+  return (
+    <div className="state-space-layout">
+      <section className="instrument-panel state-space-toolbar">
+        <div className="panel-heading">
+          <div><span className="section-kicker">SIX-DIMENSIONAL PHASE-CHANGE STATE</span><h2>Modal coordinate system</h2></div>
+          <span className={`quality-badge ${connection === "live" ? "" : "holdover"}`}>{dataState}</span>
+        </div>
+        <div className="state-space-controls" aria-label="State-space analysis controls">
+          <div><span>History</span><div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+          <div><span>PCA basis</span><div className="segmented-control">{[24, 48, 96].map((item) => <button className={basisSamples === item ? "active" : ""} type="button" key={item} onClick={() => setBasisSamples(item)}>{item}</button>)}</div></div>
+          <div><span>Coordinate scale</span><div className="segmented-control"><button className={stateScale === "sigma" ? "active" : ""} type="button" onClick={() => setStateScale("sigma")}>σ-normalized</button><button className={stateScale === "physical" ? "active" : ""} type="button" onClick={() => setStateScale("physical")}>Physical</button></div></div>
+          <div className="state-space-live-readout"><span>Current state</span><strong>{stateRadius.toFixed(2)} σ</strong><small>{basisRows.length} synchronized changes</small></div>
+        </div>
+        <div className="state-method-strip"><Info size={14} /><span>State vector = centered H1…H6 phase-change rates. The PCA basis comes from the current covariance window; pendulum zeroing is excluded. Eigenvector signs are oriented deterministically to keep the live trajectory visually stable.</span></div>
+      </section>
+
+      <section className="instrument-panel state-plane-panel">
+        <div className="panel-heading"><div><span className="section-kicker">PRINCIPAL STATE PLANE</span><h2>PC1 × PC2 trajectory</h2></div><span className="panel-meta">older → newer · latest ringed</span></div>
+        <StatePlaneChart points={modalPoints} eigenvalues={eigen.values} scale={stateScale} />
+      </section>
+
+      <section className="instrument-panel poincare-panel">
+        <div className="panel-heading"><div><span className="section-kicker">EMPIRICAL RETURN SECTION</span><h2>Poincaré map</h2></div><span className="panel-meta">{crossings.length} crossings</span></div>
+        <div className="poincare-controls" aria-label="Poincaré section controls">
+          <div><span>Zero plane</span><div className="segmented-control">{[0, 1, 2].map((axis) => <button type="button" className={sectionAxis === axis ? "active" : ""} key={axis} onClick={() => setSectionAxis(axis)}>PC{axis + 1}</button>)}</div></div>
+          <div><span>Crossing</span><div className="segmented-control"><button type="button" className={crossingDirection === "rising" ? "active" : ""} onClick={() => setCrossingDirection("rising")}>Rising</button><button type="button" className={crossingDirection === "falling" ? "active" : ""} onClick={() => setCrossingDirection("falling")}>Falling</button><button type="button" className={crossingDirection === "both" ? "active" : ""} onClick={() => setCrossingDirection("both")}>Both</button></div></div>
+        </div>
+        <PoincareChart crossings={crossings} axes={sectionAxes} scale={stateScale} />
+        <div className="poincare-legend"><span><i className="rising" />rising crossing</span><span><i className="falling" />falling crossing</span><strong>PC{sectionAxis + 1} = 0 · linear crossing interpolation</strong></div>
+        <div className="poincare-note"><Info size={13} /><span>This empirical section reveals recurrence and clustering in measured timing dynamics; it is not, by itself, evidence of a periodic orbit or deterministic attractor.</span></div>
+      </section>
+
+      <section className="instrument-panel modal-trend-panel">
+        <div className="panel-heading"><div><span className="section-kicker">MODAL TIME TREND</span><h2>Principal coordinates through time</h2></div><span className="panel-meta">current PCA basis</span></div>
+        <ModalTrendChart points={modalPoints} scale={stateScale} />
+      </section>
+
+      <section className="instrument-panel state-eigen-panel">
+        <div className="panel-heading"><div><span className="section-kicker">EVOLVING STATE GEOMETRY</span><h2>Eigenvalues through time</h2></div><span className="panel-meta">rank {Number.isFinite(effectiveRank) ? effectiveRank.toFixed(2) : "—"} · {eigenTrendWindow}-change rolling</span></div>
+        <div className="state-eigen-spectrum" aria-label="Current covariance eigenvalue spectrum">
+          {eigen.values.map((value, index) => <div className="eigenvalue-row" key={index}><span>λ{index + 1}</span><div><i style={{ width: `${Math.max(1.5, (eigenShares[index] ?? 0) * 100)}%` }} /></div><strong>{compactMatrixValue(value, "covariance")}</strong><small>{((eigenShares[index] ?? 0) * 100).toFixed(1)}%</small></div>)}
+        </div>
+        {snapshots.length ? <EigenTrendChart snapshots={snapshots} /> : <div className="covariance-empty">Waiting for four synchronized phase changes…</div>}
+      </section>
+    </div>
+  );
+}
+
 function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button className={`toggle ${on ? "on" : ""}`} type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}>
@@ -1163,7 +1410,7 @@ export default function PTPBoxDashboard() {
     let initialProbe = true;
     const pollStatus = async () => {
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 1800);
+      const timeout = window.setTimeout(() => controller.abort(), 3200);
       try {
         const response = await fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
         if (!response.ok) throw new Error("agent unavailable");
@@ -1516,6 +1763,7 @@ export default function PTPBoxDashboard() {
     { label: "Overview", icon: LayoutDashboard },
     { label: "Multi-pendulum", icon: Orbit },
     { label: "Covariance", icon: Network },
+    { label: "State space", icon: Activity },
     { label: "Analytics", icon: BarChart3 },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -1602,8 +1850,8 @@ export default function PTPBoxDashboard() {
           <div className="page-heading">
             <div>
               <div className="eyebrow"><span className={`status-orb ${connection}`} /> {dataModeLabel}</div>
-              <h1>{section === "Overview" ? "Cascade overview" : section === "Covariance" ? "Covariance lab" : section}</h1>
-              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
+              <h1>{section === "Overview" ? "Cascade overview" : section === "Covariance" ? "Covariance lab" : section === "State space" ? "State-space atlas" : section}</h1>
+              <p>{section === "Overview" ? "Compare every NIC PHC against BC1 while LinuxPTP synchronizes the isolated daisy chain." : section === "Multi-pendulum" ? "Watch every previous-hop phase residual swing around its learned equilibrium." : section === "Covariance" ? "Reveal coupled phase changes, evolving relationships, and the cascade's dominant eigenmodes." : section === "State space" ? "Trace the cascade's modal trajectory, empirical Poincaré crossings, and evolving eigenstructure." : section === "Analytics" ? "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." : section === "Experiments" ? "Design, run, and compare repeatable servo response tests." : section === "Interfaces" ? "Map physical ports, PHCs, namespaces, and timestamping capability." : section === "Configuration" ? "Shape protocol and servo behavior with guarded, reviewable changes." : "A precise account of state changes, measurements, and operator actions."}</p>
             </div>
             <div className="heading-actions">
               <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
@@ -1731,6 +1979,17 @@ export default function PTPBoxDashboard() {
 
           {section === "Covariance" && (
             <CovarianceLab
+              history={history}
+              nodes={nodes}
+              range={range}
+              setRange={setRange}
+              paused={paused}
+              connection={connection}
+            />
+          )}
+
+          {section === "State space" && (
+            <StateSpaceAtlas
               history={history}
               nodes={nodes}
               range={range}

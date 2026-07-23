@@ -4,6 +4,10 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a live state-space atlas that projects the six synchronized hop-change
+  rates onto covariance eigenvectors, renders the PC1×PC2 trajectory and 1σ/2σ
+  geometry, extracts configurable empirical Poincaré sections, plots modal time
+  trends, and follows the covariance eigenvalue spectrum through time.
 - Added a covariance lab for synchronized previous-hop phase-change rates with
   switchable covariance/correlation matrices, operator-selected rolling
   windows, a full pair-relationship timeline, sorted eigenvalues, explained

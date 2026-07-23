@@ -86,6 +86,24 @@ The computation uses raw previous-hop differences before visualization
 zeroing. Constant equilibrium subtraction therefore cancels naturally and
 cannot manufacture correlation.
 
+## Explore the timing system in state space
+
+<img src="docs/images/state-space-atlas.jpg" alt="Live PTPBox state-space atlas with a principal-component trajectory, empirical Poincaré section, modal time traces, and rolling eigenvalues" width="100%">
+
+The state-space atlas treats the six synchronized hop-change rates as one
+six-dimensional state vector. It centers that vector, builds a covariance PCA
+basis, and traces the live PC1×PC2 trajectory against its 1σ and 2σ geometry.
+Switch between σ-normalized and physical coordinates, select a 24, 48, or
+96-change basis, and inspect rising, falling, or bidirectional crossings through
+the PC1, PC2, or PC3 zero plane.
+
+The empirical Poincaré section uses linear interpolation between consecutive
+measured states. It is useful for revealing recurrence and clustered return
+regions, but the Observatory deliberately does not label those patterns as a
+periodic orbit or deterministic attractor without supporting evidence. Modal
+time traces and rolling covariance eigenvalues keep the evolving geometry tied
+to the original measurements.
+
 ## What you can do
 
 | Surface | Purpose |
@@ -93,6 +111,7 @@ cannot manufacture correlation.
 | **Cascade overview** | See the physically verified topology, direct PHC differences, per-hop deltas, path delay, frequency correction, and servo state. |
 | **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
 | **Covariance lab** | Compare synchronized phase-change rates as covariance or correlation, follow every pair through time, and inspect eigenvalues plus dominant-mode loadings. |
+| **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
 | **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
@@ -217,6 +236,8 @@ fixed operations and no arbitrary command line. See
 - Offset distribution, P95, skew, and contribution share
 - Rolling phase-change covariance/correlation, full pair timelines, eigenvalues,
   explained trace, effective rank, and dominant eigenvector loadings
+- Six-dimensional state-space projections, covariance ellipses, empirical
+  Poincaré crossings, modal coordinates, and rolling eigenvalue shares
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
 - Experiment metadata, servo constants, and capture lifecycle
 
@@ -293,10 +314,11 @@ telemetry charts. The host agent uses only the Python standard library.
 The Observatory is running on the reference hardware with selectable live
 servos, measured holdover, common-epoch PHC comparison, raw LinuxPTP telemetry,
 the multi-pendulum phase view, covariance and eigenmode analysis, notifications,
-a standalone host bundle, live inventory, configuration staging, and guarded
-lifecycle control. The next milestones are durable experiment storage, PPS
-comparison datasets, automated MTIE/TDEV/Allan deviation, and reusable topology
-presets. See [CHANGELOG.md](CHANGELOG.md).
+the state-space and Poincaré atlas, a standalone host bundle, live inventory,
+configuration staging, and guarded lifecycle control. The next milestones are
+durable experiment storage, PPS comparison datasets, automated
+MTIE/TDEV/Allan deviation, and reusable topology presets. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Heritage
 
