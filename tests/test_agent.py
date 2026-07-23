@@ -85,6 +85,17 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(all(sample["valid"] for sample in samples))
         self.assertAlmostEqual(0.063, samples[1]["observed_at"] - samples[0]["observed_at"], places=3)
 
+    def test_config_accepts_only_protocol_representable_sync_rates(self) -> None:
+        value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
+        value["log_sync_interval"] = -3
+        self.assertEqual([], AGENT.validate_config(value))
+
+        value["log_sync_interval"] = -3.5
+        self.assertIn("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)", AGENT.validate_config(value))
+
+        value["log_sync_interval"] = -4
+        self.assertIn("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)", AGENT.validate_config(value))
+
     def test_telemetry_uses_physical_topology_order_and_incremental_cutoff(self) -> None:
         self.write_log("BC7")
         self.write_log("BC4")

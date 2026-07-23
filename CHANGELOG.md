@@ -4,6 +4,16 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Completed the top-bar command palette with instant page, clock, measurement,
+  and control search; mouse and keyboard selection; direct BC focus; and exact
+  jumps to servo, Sync-frequency, notification, and apply surfaces.
+- Added a guarded 0.5–10 Hz synchronization-frequency slider with 0.5 Hz input
+  steps, explicit IEEE 1588 power-of-two quantization, live
+  `logSyncInterval` preview, staged-config hydration, range validation, and a
+  managed cascade restart that applies the selected on-wire rate.
+- Bounded LinuxPTP log-tail parsing to the requested sample window and hardened
+  the host probe against overlapping slow inventory scans, keeping live raw
+  telemetry responsive after append-only lab logs grow into tens of megabytes.
 - Added a live state-space atlas that projects the six synchronized hop-change
   rates onto covariance eigenvectors, renders the PC1×PC2 trajectory and 1σ/2σ
   geometry, extracts configurable empirical Poincaré sections, plots modal time

@@ -217,6 +217,17 @@ Validates and atomically stages a complete configuration document.
 Success is `200` with `staged: true`. Validation failures return `422` with a
 `details` array.
 
+`log_sync_interval` is the signed base-2 exponent defined by IEEE 1588 and used
+directly by LinuxPTP: the effective Sync frequency is `2^-log_sync_interval`
+hertz. PTPBox accepts `1` through `-3`, corresponding to 0.5, 1, 2, 4, and
+8 Hz. The Observatory's operator slider moves in 0.5 Hz steps from 0.5 through
+10 Hz, but always displays and applies the nearest protocol-representable rate;
+it never labels an unrepresentable request as an on-wire frequency.
+
+Staging does not alter a running process. The Observatory's guarded “Apply to
+cascade” flow follows a successful stage with `POST /api/control` using the
+`restart` action so every managed `ptp4l` instance reads the same new interval.
+
 ## Servo and holdover control
 
 ### `GET /api/servo`

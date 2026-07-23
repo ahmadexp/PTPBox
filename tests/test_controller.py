@@ -52,6 +52,18 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertIn("step_threshold 0.000000000", text)
         self.assertIn("free_running 0", text)
 
+    def test_configured_sync_frequency_reaches_linuxptp(self) -> None:
+        value = json.loads(json.dumps(CONTROLLER.DEFAULT_CONFIG))
+        value["log_sync_interval"] = -3
+        CONTROLLER.CONFIG_FILE.write_text(json.dumps(value), encoding="utf-8")
+        path = Path(self.temporary.name) / "ptpbox-fast-sync.conf"
+
+        CONTROLLER.render_ptp_config("client", path)
+        text = path.read_text(encoding="utf-8")
+
+        self.assertIn("logSyncInterval -3", text)
+        self.assertIn("summary_interval -3", text)
+
     def test_holdover_config_keeps_measurement_running_without_adjustment(self) -> None:
         path = Path(self.temporary.name) / "ptpbox-holdover.conf"
         CONTROLLER.render_ptp_config("client", path, servo_override={"type": "linreg"}, free_running=True)

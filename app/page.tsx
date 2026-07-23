@@ -65,6 +65,18 @@ type ObservatoryNotification = {
   icon: typeof Bell;
 };
 
+type CommandItem = {
+  id: string;
+  group: "Navigate" | "Clocks" | "Controls";
+  label: string;
+  description: string;
+  keywords: string;
+  section?: Section;
+  nodeId?: string;
+  action?: "notifications" | "apply" | "servo-control" | "sync-frequency";
+  icon: typeof Search;
+};
+
 type ClockNode = {
   id: string;
   label: string;
@@ -304,6 +316,19 @@ function formatLineRate(speedMbps: number | null) {
 
 function rangeSeconds(range: string) {
   return range === "30 s" ? 30 : range === "15 min" ? 900 : 120;
+}
+
+const PROTOCOL_SYNC_RATES = [0.5, 1, 2, 4, 8] as const;
+
+function synchronizationRate(requestedHz: number) {
+  const effectiveHz = PROTOCOL_SYNC_RATES.reduce((nearest, candidate) =>
+    Math.abs(candidate - requestedHz) < Math.abs(nearest - requestedHz) ? candidate : nearest,
+  );
+  return { effectiveHz, logInterval: Math.round(-Math.log2(effectiveHz)) };
+}
+
+function frequencyFromLogInterval(logInterval: number) {
+  return 2 ** -logInterval;
 }
 
 function stateFromMeasurement(sample: TelemetrySample | null, stale: boolean, role: TelemetryClock["role"]): ClockState {
@@ -1302,6 +1327,7 @@ export default function PTPBoxDashboard() {
   const [ki, setKi] = useState(0.3);
   const [stepThreshold, setStepThreshold] = useState(0);
   const [applyOpen, setApplyOpen] = useState(false);
+  const [applyBusy, setApplyBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [profile, setProfile] = useState("G.8275.1 Telecom");
   const [twoStep, setTwoStep] = useState(true);
@@ -1311,14 +1337,21 @@ export default function PTPBoxDashboard() {
   const [servoType, setServoType] = useState<ServoType>("pi");
   const [servoTarget, setServoTarget] = useState("BC7");
   const [servoBusy, setServoBusy] = useState(false);
+  const [syncFrequencyHz, setSyncFrequencyHz] = useState(1);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandIndex, setCommandIndex] = useState(0);
   const [pendulumAutoZero, setPendulumAutoZero] = useState(true);
   const [pendulumZeroState, setPendulumZeroState] = useState<PendulumZeroState>({ at: null, baselines: {} });
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
   const servoSelectionHydratedRef = useRef(false);
+  const configHydratedRef = useRef(false);
+  const configuredServoTypeRef = useRef<ServoType>("pi");
   const notificationCenterRef = useRef<HTMLDivElement>(null);
+  const commandInputRef = useRef<HTMLInputElement>(null);
 
   const refreshInterfaces = useCallback(async () => {
     const controller = new AbortController();
@@ -1357,6 +1390,9 @@ export default function PTPBoxDashboard() {
   const interfaceDrivers = [...new Set(interfaceInventory.map((item) => item.driver).filter((item): item is string => Boolean(item)))];
   const hundredGigTimingPorts = timingInterfaces.filter((item) => item.speed_mbps === 100000).length;
   const bufferedPhcComparisons = history.reduce((total, point) => total + Object.keys(point.values).length, 0);
+  const { effectiveHz: effectiveSyncFrequencyHz, logInterval: syncLogInterval } = synchronizationRate(syncFrequencyHz);
+  const syncFrequencyExact = Math.abs(syncFrequencyHz - effectiveSyncFrequencyHz) < 0.001;
+  const syncSliderProgress = ((syncFrequencyHz - 0.5) / 9.5) * 100;
 
   const endpointDistribution = useMemo(() => {
     const endpoint = nodes[nodes.length - 1];
@@ -1406,11 +1442,49 @@ export default function PTPBoxDashboard() {
   }, [refreshInterfaces]);
 
   useEffect(() => {
+    if (!agentStatus || configHydratedRef.current) return;
+    configHydratedRef.current = true;
+    const controller = new AbortController();
+    const hydrateConfiguration = async () => {
+      try {
+        const response = await fetch(`${agentBaseUrl()}/api/config`, { signal: controller.signal });
+        if (!response.ok) throw new Error("configuration unavailable");
+        const value = await response.json() as {
+          profile?: string;
+          log_sync_interval?: number;
+          two_step?: boolean;
+          hardware_timestamping?: boolean;
+          servo?: { type?: ServoType; kp?: number; ki?: number; step_threshold_ns?: number; sanity_freq_limit_ppb?: number };
+        };
+        if (value.profile) setProfile(value.profile);
+        if (Number.isInteger(value.log_sync_interval)) setSyncFrequencyHz(frequencyFromLogInterval(value.log_sync_interval as number));
+        if (typeof value.two_step === "boolean") setTwoStep(value.two_step);
+        if (typeof value.hardware_timestamping === "boolean") setHardwareTs(value.hardware_timestamping);
+        if (value.servo?.type && ["pi", "linreg", "nullf"].includes(value.servo.type)) {
+          configuredServoTypeRef.current = value.servo.type;
+          setServoType(value.servo.type);
+        }
+        if (typeof value.servo?.kp === "number") setKp(value.servo.kp);
+        if (typeof value.servo?.ki === "number") setKi(value.servo.ki);
+        if (typeof value.servo?.step_threshold_ns === "number") setStepThreshold(value.servo.step_threshold_ns);
+        if (typeof value.servo?.sanity_freq_limit_ppb === "number") setSanity(value.servo.sanity_freq_limit_ppb > 0);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) configHydratedRef.current = false;
+      }
+    };
+    void hydrateConfiguration();
+    return () => controller.abort();
+  }, [agentStatus]);
+
+  useEffect(() => {
     let disposed = false;
     let initialProbe = true;
+    let polling = false;
     const pollStatus = async () => {
+      if (polling) return;
+      polling = true;
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 3200);
+      const timeout = window.setTimeout(() => controller.abort(), 6500);
       try {
         const response = await fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
         if (!response.ok) throw new Error("agent unavailable");
@@ -1430,11 +1504,12 @@ export default function PTPBoxDashboard() {
         }
       } finally {
         initialProbe = false;
+        polling = false;
         window.clearTimeout(timeout);
       }
     };
     void pollStatus();
-    const timer = window.setInterval(() => void pollStatus(), 2000);
+    const timer = window.setInterval(() => void pollStatus(), 5000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
@@ -1453,7 +1528,7 @@ export default function PTPBoxDashboard() {
       if (polling) return;
       polling = true;
       try {
-        const query = new URLSearchParams({ history: String(seconds), limit: "4096" });
+        const query = new URLSearchParams({ history: String(seconds), limit: String(Math.min(4096, Math.ceil(seconds * 10))) });
         if (latestTelemetryAtRef.current) query.set("since", String(latestTelemetryAtRef.current));
         const response = await fetch(`${agentBaseUrl()}/api/telemetry?${query}`, { signal: controller.signal });
         if (!response.ok) throw new Error("telemetry unavailable");
@@ -1516,6 +1591,33 @@ export default function PTPBoxDashboard() {
     const timer = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    const handleCommandShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setNotificationsOpen(false);
+        setApplyOpen(false);
+        if (commandOpen) {
+          setCommandOpen(false);
+        } else {
+          setCommandQuery("");
+          setCommandIndex(0);
+          setCommandOpen(true);
+        }
+      } else if (event.key === "Escape" && commandOpen) {
+        event.preventDefault();
+        setCommandOpen(false);
+      }
+    };
+    document.addEventListener("keydown", handleCommandShortcut);
+    return () => document.removeEventListener("keydown", handleCommandShortcut);
+  }, [commandOpen]);
+
+  useEffect(() => {
+    if (!commandOpen) return;
+    window.requestAnimationFrame(() => commandInputRef.current?.focus());
+  }, [commandOpen]);
 
   useEffect(() => {
     if (!notificationsOpen) return;
@@ -1606,6 +1708,61 @@ export default function PTPBoxDashboard() {
   const selectNode = (id: string) => {
     setSelectedNode(id);
     setVisibleTraces((current) => (current.includes(id) ? current : [...current.slice(-3), id]));
+  };
+
+  const commandItems = useMemo<CommandItem[]>(() => [
+    { id: "nav-overview", group: "Navigate", label: "Cascade overview", description: "Topology, offsets, lock state, and live PHC traces", keywords: "home cascade topology clocks", section: "Overview", icon: LayoutDashboard },
+    { id: "nav-pendulum", group: "Navigate", label: "Multi-pendulum", description: "Coupled previous-hop phase residuals", keywords: "swing equilibrium phase", section: "Multi-pendulum", icon: Orbit },
+    { id: "nav-covariance", group: "Navigate", label: "Covariance lab", description: "Pair relationships and dominant eigenmodes", keywords: "matrix correlation eigenvalues", section: "Covariance", icon: Network },
+    { id: "nav-state", group: "Navigate", label: "State-space atlas", description: "Modal trajectory and empirical Poincaré map", keywords: "pca poincare phase portrait", section: "State space", icon: Activity },
+    { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
+    { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },
+    { id: "nav-interfaces", group: "Navigate", label: "Interfaces & PHCs", description: "NIC, namespace, link, and timestamp inventory", keywords: "hardware ports network nic", section: "Interfaces", icon: Cable },
+    { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, and safety controls", keywords: "settings tune apply", section: "Configuration", icon: SlidersHorizontal },
+    { id: "nav-events", group: "Navigate", label: "Event log", description: "Clock, measurement, and operator events", keywords: "logs terminal activity", section: "Event log", icon: Terminal },
+    ...nodes.map((node) => ({ id: `clock-${node.id}`, group: "Clocks" as const, label: node.label, description: `${node.role} · ${node.phc} · ${node.state}`, keywords: `${node.id} ${node.role} ${node.phc} ${node.ingress} ${node.egress} offset`, section: "Overview" as Section, nodeId: node.id, icon: Clock3 })),
+    { id: "control-servo", group: "Controls", label: "Servo & holdover", description: "Select discipline or freeze adjustment while observing", keywords: "pi linreg nullf stop start holdover", section: "Configuration", action: "servo-control", icon: Gauge },
+    { id: "control-frequency", group: "Controls", label: "Synchronization frequency", description: `${syncFrequencyHz.toFixed(1)} Hz requested · ${effectiveSyncFrequencyHz} Hz effective`, keywords: "sync rate interval hertz frequency logSyncInterval", section: "Configuration", action: "sync-frequency", icon: Radio },
+    { id: "control-notifications", group: "Controls", label: "Notification center", description: `${unreadNotificationCount} unread timing alert${unreadNotificationCount === 1 ? "" : "s"}`, keywords: "bell alerts warnings health", action: "notifications", icon: Bell },
+    { id: "control-apply", group: "Controls", label: "Review & apply settings", description: "Validate, stage, restart, and verify the cascade", keywords: "save configuration restart", action: "apply", icon: ShieldCheck },
+  ], [effectiveSyncFrequencyHz, nodes, syncFrequencyHz, unreadNotificationCount]);
+
+  const filteredCommandItems = useMemo(() => {
+    const query = commandQuery.trim().toLowerCase();
+    if (!query) return commandItems;
+    const terms = query.split(/\s+/);
+    return commandItems.filter((item) => {
+      const searchable = `${item.label} ${item.description} ${item.keywords}`.toLowerCase();
+      return terms.every((term) => searchable.includes(term));
+    });
+  }, [commandItems, commandQuery]);
+
+  const activeCommandId = filteredCommandItems[commandIndex]?.id;
+
+  useEffect(() => {
+    if (!commandOpen || !activeCommandId) return;
+    window.requestAnimationFrame(() => document.getElementById(`command-option-${activeCommandId}`)?.scrollIntoView({ block: "nearest" }));
+  }, [activeCommandId, commandOpen]);
+
+  const openCommandPalette = () => {
+    setNotificationsOpen(false);
+    setApplyOpen(false);
+    setCommandQuery("");
+    setCommandIndex(0);
+    setCommandOpen(true);
+  };
+
+  const runCommand = (item: CommandItem) => {
+    if (item.section) setSection(item.section);
+    if (item.nodeId) selectNode(item.nodeId);
+    if (item.action === "notifications") setNotificationsOpen(true);
+    if (item.action === "apply") setApplyOpen(true);
+    if (item.action === "servo-control" || item.action === "sync-frequency") {
+      const target = item.action === "sync-frequency" ? "sync-frequency-control" : "servo-control";
+      window.setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    }
+    setCommandOpen(false);
+    setCommandQuery("");
   };
 
   const zeroPendulum = () => {
@@ -1712,11 +1869,14 @@ export default function PTPBoxDashboard() {
       domain: 24,
       transport: "L2",
       delay_mechanism: "E2E",
-      log_sync_interval: 0,
+      log_sync_interval: syncLogInterval,
       two_step: twoStep,
       hardware_timestamping: hardwareTs,
       servo: {
-        type: servoType,
+        // Per-clock servo selection is persisted separately by /api/servo/control.
+        // A cadence-only apply must not replace that state with the UI's currently
+        // selected target servo.
+        type: configuredServoTypeRef.current,
         kp,
         ki,
         step_threshold_ns: stepThreshold,
@@ -1724,6 +1884,7 @@ export default function PTPBoxDashboard() {
         sanity_freq_limit_ppb: sanity ? 200_000 : 0,
       },
     };
+    setApplyBusy(true);
     if (agentStatus) {
       try {
         const response = await fetch(`${agentBaseUrl()}/api/config/apply`, {
@@ -1731,15 +1892,29 @@ export default function PTPBoxDashboard() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (!response.ok) throw new Error("agent rejected configuration");
-        setToast("Configuration staged on PTPBox · validation passed");
-      } catch {
-        setToast("Saved in the console · host staging is unavailable");
+        const result = await response.json() as { error?: string; details?: string[] };
+        if (!response.ok) throw new Error(result.details?.join(" · ") || result.error || "agent rejected configuration");
+        if (agentStatus.running) {
+          const restartResponse = await fetch(`${agentBaseUrl()}/api/control`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "restart" }),
+          });
+          const restart = await restartResponse.json() as { error?: string };
+          if (!restartResponse.ok) throw new Error(`Configuration staged, but restart failed: ${restart.error || "control helper rejected restart"}`);
+          setConnection("waiting");
+          setToast(`Cascade restarted · Sync ${effectiveSyncFrequencyHz} Hz · log interval ${syncLogInterval}`);
+        } else {
+          setToast(`Configuration staged · Sync ${effectiveSyncFrequencyHz} Hz will apply on next start`);
+        }
+      } catch (error) {
+        setToast(error instanceof Error ? error.message : "Host configuration is unavailable");
       }
     } else {
       setToast("Configuration validated in hardware-model mode");
     }
     setApplyOpen(false);
+    setApplyBusy(false);
   };
 
   const toggleExperiment = async () => {
@@ -1813,7 +1988,7 @@ export default function PTPBoxDashboard() {
             <span className="breadcrumb">PTPBOX <b>/</b> CASCADE A <b>/</b> <strong>{section.toUpperCase()}</strong></span>
           </div>
           <div className="topbar-actions">
-            <button className="search-box" type="button"><Search size={15} /><span>Search or jump to…</span><kbd>⌘ K</kbd></button>
+            <button className="search-box" type="button" aria-haspopup="dialog" aria-expanded={commandOpen} aria-controls="command-palette" onClick={openCommandPalette}><Search size={15} /><span>Search or jump to…</span><kbd>⌘ K</kbd></button>
             <span className="utc-clock"><Clock3 size={14} /> {time || "--:--:--"}</span>
             <div className="notification-center" ref={notificationCenterRef}>
               <button className={`icon-button notification ${notificationsOpen ? "open" : ""}`} type="button" aria-label={`Notifications, ${unreadNotificationCount} unread`} aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => setNotificationsOpen((value) => !value)}>
@@ -2094,7 +2269,7 @@ export default function PTPBoxDashboard() {
                     <label className="wide"><span>PTP profile</span><button className="select-control" type="button" onClick={() => setProfile((value) => value === "G.8275.1 Telecom" ? "IEEE 1588 Default" : "G.8275.1 Telecom")}>{profile}<ChevronDown size={14} /></button><small>Defines message rates, transport, and BMCA defaults.</small></label>
                     <label><span>Domain number</span><div className="input-unit"><input value="24" readOnly /><em>0–127</em></div></label>
                     <label><span>Transport</span><button className="select-control" type="button">Layer 2 <ChevronDown size={14} /></button></label>
-                    <label><span>Sync interval</span><button className="select-control" type="button">0 · 1/s <ChevronDown size={14} /></button></label>
+                    <label><span>Sync interval</span><button className="select-control" type="button" onClick={() => document.getElementById("sync-frequency-control")?.scrollIntoView({ behavior: "smooth", block: "center" })}>{syncLogInterval} · {effectiveSyncFrequencyHz.toFixed(1)} Hz <ArrowRight size={14} /></button></label>
                     <label><span>Delay mechanism</span><button className="select-control" type="button">End-to-end <ChevronDown size={14} /></button></label>
                   </div>
                   <div className="toggle-list">
@@ -2102,7 +2277,7 @@ export default function PTPBoxDashboard() {
                     <div><div><strong>Hardware timestamping</strong><small>Use the NIC PHC for transmit and receive timestamps.</small></div><Toggle on={hardwareTs} onChange={setHardwareTs} label="Hardware timestamping" /></div>
                   </div>
                 </section>
-                <section className="instrument-panel config-section">
+                <section className="instrument-panel config-section" id="servo-control">
                   <div className="panel-heading"><div><span className="section-kicker">SERVO & HOLDOVER</span><h2>Clock discipline</h2></div><span className={`quality-badge ${targetHasHoldover ? "holdover" : ""}`}>{servoStatusLabel}</span></div>
                   <div className="form-grid">
                     <label><span>Servo type</span><select className="select-control" value={servoType} onChange={(event) => setServoType(event.target.value as ServoType)}><option value="pi">PI controller</option><option value="linreg">Linear regression</option><option value="nullf">Null frequency · SyncE diagnostic</option></select><small>LinuxPTP native servo implementation.</small></label>
@@ -2111,6 +2286,34 @@ export default function PTPBoxDashboard() {
                     <label><span>Integral constant</span><div className="input-unit"><input value={ki.toFixed(2)} onChange={(event) => setKi(Number(event.target.value))} /><em>Ki</em></div></label>
                     <label><span>First-step threshold</span><div className="input-unit"><input value="20,000" readOnly /><em>ns</em></div></label>
                     <label><span>Step threshold</span><div className="input-unit"><input value={stepThreshold} onChange={(event) => setStepThreshold(Number(event.target.value))} /><em>ns</em></div></label>
+                  </div>
+                  <div className="sync-rate-control" id="sync-frequency-control">
+                    <div className="sync-rate-heading">
+                      <div><span className="section-kicker">MESSAGE CADENCE</span><strong>Synchronization frequency</strong><small>Requested in 0.5 Hz steps; applied through LinuxPTP <code>logSyncInterval</code>.</small></div>
+                      <button className="quiet-button" type="button" onClick={() => setApplyOpen(true)}>Review apply <ArrowRight size={13} /></button>
+                    </div>
+                    <div className="sync-rate-readout">
+                      <div><span>REQUESTED</span><strong>{syncFrequencyHz.toFixed(1)} <small>Hz</small></strong></div>
+                      <ArrowRight size={17} />
+                      <div><span>EFFECTIVE ON WIRE</span><strong>{effectiveSyncFrequencyHz.toFixed(1)} <small>Hz</small></strong></div>
+                      <div className="sync-log-value"><span>LINUXPTP</span><code>logSyncInterval {syncLogInterval}</code></div>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="10"
+                      step="0.5"
+                      value={syncFrequencyHz}
+                      aria-label="Requested synchronization frequency"
+                      aria-valuetext={`${syncFrequencyHz.toFixed(1)} hertz requested, ${effectiveSyncFrequencyHz.toFixed(1)} hertz effective`}
+                      style={{ background: `linear-gradient(90deg, var(--cyan) 0%, var(--cyan) ${syncSliderProgress}%, #22343c ${syncSliderProgress}%, #22343c 100%)` }}
+                      onChange={(event) => setSyncFrequencyHz(Number(event.target.value))}
+                    />
+                    <div className="sync-rate-ticks"><span>0.5</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10 Hz</span></div>
+                    <div className={`sync-rate-note ${syncFrequencyExact ? "exact" : "quantized"}`}>
+                      {syncFrequencyExact ? <Check size={14} /> : <Info size={14} />}
+                      <span>{syncFrequencyExact ? `${syncFrequencyHz.toFixed(1)} Hz is represented exactly by IEEE 1588.` : `IEEE 1588 encodes Sync intervals as powers of two; ${syncFrequencyHz.toFixed(1)} Hz will apply as the nearest valid rate, ${effectiveSyncFrequencyHz.toFixed(1)} Hz.`}</span>
+                    </div>
                   </div>
                   <div className="servo-live-control">
                     <div><strong>{targetInHoldover ? "Holdover observation active" : targetHasHoldover ? "Mixed discipline state" : "Clock discipline active"}</strong><span>{targetInHoldover ? "PTP messages, raw offsets, and PHC comparisons continue while clock adjustments are frozen." : targetHasHoldover ? "Some selected clocks are in holdover; apply a servo to resume all, or enter holdover for a coordinated comparison." : `${servoType.toUpperCase()} will discipline ${servoTarget === "all" ? "all downstream clocks" : servoTarget}.`}</span></div>
@@ -2128,7 +2331,7 @@ export default function PTPBoxDashboard() {
                 </section>
               </div>
               <aside className="config-aside">
-                <div className="change-card"><span className="section-kicker">PENDING CHANGES</span><strong>3 values modified</strong><p>Changes are validated first, then rolled through the cascade from OC to GM.</p><div><span>BC–01…06</span><em>Servo gains</em></div><div><span>All clocks</span><em>Step threshold</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button"><RotateCcw size={14} /> Discard changes</button></div>
+                <div className="change-card"><span className="section-kicker">REVIEW CONFIGURATION</span><strong>4 controlled values</strong><p>PTPBox validates the complete document, stages it atomically, then restarts the managed LinuxPTP cascade.</p><div><span>BC2…BC7</span><em>Servo gains</em></div><div><span>All clocks</span><em>Sync {effectiveSyncFrequencyHz.toFixed(1)} Hz</em></div><div><span>All clocks</span><em>Step threshold</em></div><button className="primary-action" type="button" onClick={() => setApplyOpen(true)}>Review & apply <ArrowRight size={14} /></button><button className="full-secondary" type="button" onClick={() => { setKp(0.7); setKi(0.3); setStepThreshold(0); setSyncFrequencyHz(1); }}> <RotateCcw size={14} /> Reset safe defaults</button></div>
                 <div className="config-note"><ShieldCheck size={18} /><div><strong>Safe apply</strong><p>PTPBox validates interface ownership, clock state, and config syntax before touching the running chain.</p></div></div>
               </aside>
             </div>
@@ -2150,6 +2353,62 @@ export default function PTPBoxDashboard() {
         </div>
       </main>
 
+      {commandOpen && (
+        <div className="command-layer" role="dialog" aria-modal="true" aria-labelledby="command-title">
+          <button className="command-backdrop" type="button" onClick={() => setCommandOpen(false)} aria-label="Close command palette" />
+          <section className="command-palette" id="command-palette">
+            <div className="command-input-row">
+              <Search size={18} />
+              <input
+                ref={commandInputRef}
+                value={commandQuery}
+                placeholder="Search pages, clocks, measurements, or controls…"
+                aria-label="Search or jump to"
+                aria-controls="command-results"
+                aria-activedescendant={filteredCommandItems[commandIndex] ? `command-option-${filteredCommandItems[commandIndex].id}` : undefined}
+                onChange={(event) => { setCommandQuery(event.target.value); setCommandIndex(0); }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" && filteredCommandItems.length) {
+                    event.preventDefault();
+                    setCommandIndex((value) => (value + 1) % filteredCommandItems.length);
+                  } else if (event.key === "ArrowUp" && filteredCommandItems.length) {
+                    event.preventDefault();
+                    setCommandIndex((value) => (value - 1 + filteredCommandItems.length) % filteredCommandItems.length);
+                  } else if (event.key === "Enter" && filteredCommandItems[commandIndex]) {
+                    event.preventDefault();
+                    runCommand(filteredCommandItems[commandIndex]);
+                  }
+                }}
+              />
+              <kbd>ESC</kbd>
+            </div>
+            <div className="command-results" id="command-results" role="listbox" aria-label="Command results">
+              {filteredCommandItems.length ? (["Navigate", "Clocks", "Controls"] as const).map((group) => {
+                const groupItems = filteredCommandItems.filter((item) => item.group === group);
+                if (!groupItems.length) return null;
+                return (
+                  <div className="command-group" key={group}>
+                    <span>{group}</span>
+                    {groupItems.map((item) => {
+                      const index = filteredCommandItems.indexOf(item);
+                      const active = index === commandIndex;
+                      return (
+                        <button id={`command-option-${item.id}`} role="option" aria-selected={active} type="button" className={active ? "active" : ""} key={item.id} onMouseEnter={() => setCommandIndex(index)} onClick={() => runCommand(item)}>
+                          <i><item.icon size={16} /></i>
+                          <span><strong>{item.label}</strong><small>{item.description}</small></span>
+                          <ArrowRight size={14} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              }) : <div className="command-empty"><Search size={24} /><strong>No observatory command found</strong><span>Try a page name, BC number, measurement, or control.</span></div>}
+            </div>
+            <footer className="command-footer"><span id="command-title">PRECISION OBSERVATORY COMMAND</span><div><kbd>↑</kbd><kbd>↓</kbd> Navigate <kbd>↵</kbd> Open</div></footer>
+          </section>
+        </div>
+      )}
+
       {applyOpen && (
         <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="apply-title">
           <button className="modal-backdrop" onClick={() => setApplyOpen(false)} aria-label="Close review" />
@@ -2157,13 +2416,14 @@ export default function PTPBoxDashboard() {
             <div className="drawer-heading"><div><span className="section-kicker">SAFE APPLY</span><h2 id="apply-title">Review configuration</h2></div><button className="icon-button" onClick={() => setApplyOpen(false)} aria-label="Close"><X size={18} /></button></div>
             <div className="validation-banner"><ShieldCheck size={20} /><div><strong>Preflight checks passed</strong><span>{interfaceInventory.length} interfaces available · {hardwareClocks} clocks responsive · rollback ready</span></div></div>
             <div className="change-list">
-              <div><span>Target</span><strong>BC–01 through BC–06</strong></div>
-              <div><span>Proportional constant</span><p><del>0.50</del><ArrowRight size={13} /><ins>{kp.toFixed(2)}</ins></p></div>
-              <div><span>Integral constant</span><p><del>0.20</del><ArrowRight size={13} /><ins>{ki.toFixed(2)}</ins></p></div>
-              <div><span>Step threshold</span><p><del>0 ns</del><ArrowRight size={13} /><ins>{stepThreshold} ns</ins></p></div>
+              <div><span>Target</span><strong>BC2 through BC7</strong></div>
+              <div><span>Proportional constant</span><strong>{kp.toFixed(2)}</strong></div>
+              <div><span>Integral constant</span><strong>{ki.toFixed(2)}</strong></div>
+              <div><span>Sync frequency</span><p><ins>{syncFrequencyHz.toFixed(1)} Hz requested</ins><ArrowRight size={13} /><ins>{effectiveSyncFrequencyHz.toFixed(1)} Hz effective</ins></p></div>
+              <div><span>Step threshold</span><strong>{stepThreshold} ns</strong></div>
             </div>
-            <div className="rollout-plan"><span>ROLLOUT PLAN</span><ol><li><i>1</i><div><strong>Snapshot</strong><small>Save configuration and active clock state</small></div></li><li><i>2</i><div><strong>Apply downstream first</strong><small>OC → BC–06 → … → BC–01</small></div></li><li><i>3</i><div><strong>Verify lock</strong><small>Pause and roll back if any node fails</small></div></li></ol></div>
-            <div className="drawer-actions"><button className="full-secondary" onClick={() => setApplyOpen(false)}>Cancel</button><button className="primary-action" onClick={handleApply}><Zap size={15} /> Apply to cascade</button></div>
+            <div className="rollout-plan"><span>ROLLOUT PLAN</span><ol><li><i>1</i><div><strong>Validate & stage</strong><small>Atomically save a complete LinuxPTP configuration</small></div></li><li><i>2</i><div><strong>Restart managed cascade</strong><small>Recreate every namespace clock with the new Sync interval</small></div></li><li><i>3</i><div><strong>Observe reacquisition</strong><small>Raw PHC monitoring follows the clocks back to lock</small></div></li></ol></div>
+            <div className="drawer-actions"><button className="full-secondary" disabled={applyBusy} onClick={() => setApplyOpen(false)}>Cancel</button><button className="primary-action" disabled={applyBusy} onClick={handleApply}><Zap size={15} /> {applyBusy ? "Applying…" : "Apply to cascade"}</button></div>
           </section>
         </div>
       )}

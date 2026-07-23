@@ -620,6 +620,9 @@ def validate_config(value: dict[str, Any]) -> list[str]:
         errors.append("transport must be L2, UDPv4, or UDPv6")
     if value.get("delay_mechanism") not in {"P2P", "E2E"}:
         errors.append("delay_mechanism must be P2P or E2E")
+    log_sync_interval = value.get("log_sync_interval")
+    if isinstance(log_sync_interval, bool) or not isinstance(log_sync_interval, int) or not -3 <= log_sync_interval <= 1:
+        errors.append("log_sync_interval must be an integer from -3 through 1 (8 Hz through 0.5 Hz)")
     servo = value.get("servo")
     if not isinstance(servo, dict):
         errors.append("servo settings are required")
@@ -660,7 +663,13 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            start = max(0, size - TELEMETRY_MAX_BYTES)
+            # Reading the full 2 MiB safety cap for every clock on every poll
+            # wastes CPU once append-only lab logs become large. Budget enough
+            # tail data for the requested samples, plus generous non-sample
+            # LinuxPTP lines, while keeping the absolute cap for API callers.
+            requested = max(1, min(limit, TELEMETRY_MAX_SAMPLES))
+            tail_bytes = min(TELEMETRY_MAX_BYTES, max(64_000, requested * 256))
+            start = max(0, size - tail_bytes)
             handle.seek(start)
             text = handle.read().decode("utf-8", errors="replace")
         stat = path.stat()

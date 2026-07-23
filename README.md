@@ -114,10 +114,11 @@ to the original measurements.
 | **State-space atlas** | Trace the PCA state orbit, extract configurable empirical Poincaré sections, compare physical and σ-normalized coordinates, and follow modal/eigenvalue time trends. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Experiments** | Run step, wander, holdover, and gain-sweep recipes with reproducible capture settings. |
-| **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, enter holdover without stopping observation, and measure live drift before resuming. |
+| **Servo & holdover control** | Select PI, linear-regression, or null-frequency discipline per clock, request a 0.5–10 Hz Sync cadence with the effective IEEE 1588 rate shown explicitly, enter holdover without stopping observation, and measure live drift before resuming. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Notifications & event stream** | Follow measurement health, lock state, active servo mix, threshold events, and operator actions. |
+| **Command palette** | Press <kbd>⌘ K</kbd> or <kbd>Ctrl K</kbd> to search every observatory page, clock, measurement surface, and live control, then open it without leaving the keyboard. |
 | **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
 
 ## Product tour
