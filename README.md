@@ -374,13 +374,8 @@ PTPBox is source-available under the
 
 You may use, study, modify, and redistribute PTPBox for noncommercial purposes,
 subject to the license terms. **Any commercial use requires prior, express
-written approval from Ahmad Byagowi.** Ahmad Byagowi reserves all commercial
+written approval from Ahmad Byagowi.** The author reserves all commercial
 rights exclusively; an approved third-party use is only a limited exception
 within the scope of its written agreement.
-
-This is a noncommercial source-available license, not an OSI-approved
-open-source license. The change applies to versions distributed with the new
-license and does not revoke rights already received for an earlier version
-under MIT.
 
 © 2026 Ahmad Byagowi. All rights reserved except as stated in the license.
