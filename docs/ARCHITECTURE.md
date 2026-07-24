@@ -68,6 +68,12 @@ The browser requests an initial raw window and then polls incrementally with a
 native timestamps. Missing samples are rendered as gaps; no moving average,
 time-series interpolation, or synthetic fill is applied in live mode.
 
+Full research snapshots are coalesced for ten seconds. The first request
+computes the analysis; concurrent pollers share it, and an expired entry is
+returned immediately while one background refresh runs. Raw PHC streaming
+remains independent on `/api/phc`, so several open Observatory clients cannot
+multiply nonlinear/spectral work or slow clock collection.
+
 ### Lifecycle helper
 
 `scripts/ptpboxctl.py` owns the privileged operations:

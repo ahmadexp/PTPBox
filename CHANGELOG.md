@@ -16,6 +16,10 @@ All notable changes will be documented in this file.
   plant-scatter/IQC-style screens. Direct PHC FTU/ADEVS is explicitly labeled
   clock-plus-transfer composite; algebraically telescoping hop differences are
   never presented as a transfer-noise floor.
+- Coalesced identical research polls behind a shared ten-second analysis cache
+  and moved stale recomputation off the response path, so multiple open
+  Observatory clients cannot multiply spectral/nonlinear CPU work or starve
+  the independent PHC collector.
 - Expanded the clock-stability workbench to nine estimators on two shared
   logarithmic scales: overlapping ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 as
   dimensionless fractional-frequency deviations, plus TDEV, MTIE, and TIE RMS

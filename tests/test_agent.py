@@ -642,5 +642,30 @@ class HoldoverSessionTests(unittest.TestCase):
         self.assertNotIn("session", refreshed)
 
 
+class ResearchSnapshotCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with AGENT._RESEARCH_SNAPSHOT_CONDITION:
+            AGENT._RESEARCH_SNAPSHOT_CACHE.clear()
+            AGENT._RESEARCH_SNAPSHOT_REFRESHING.clear()
+
+    def tearDown(self) -> None:
+        with AGENT._RESEARCH_SNAPSHOT_CONDITION:
+            AGENT._RESEARCH_SNAPSHOT_CACHE.clear()
+            AGENT._RESEARCH_SNAPSHOT_REFRESHING.clear()
+
+    def test_identical_pollers_share_one_heavy_analysis_snapshot(self) -> None:
+        payload = {"sample_count": 72, "mode": "live", "dynamics": {}}
+        with mock.patch.object(AGENT, "_build_research_snapshot", return_value=payload) as build:
+            first = AGENT.research_snapshot(900.0)
+            second = AGENT.research_snapshot(900.0)
+
+        build.assert_called_once_with(900.0)
+        self.assertEqual(72, first["sample_count"])
+        self.assertEqual(72, second["sample_count"])
+        self.assertTrue(second["analysis_cache"]["request_coalescing"])
+        self.assertFalse(second["analysis_cache"]["refreshing"])
+        self.assertLess(second["analysis_cache"]["age_s"], AGENT.RESEARCH_CACHE_SECONDS)
+
+
 if __name__ == "__main__":
     unittest.main()

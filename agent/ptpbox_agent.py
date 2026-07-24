@@ -63,6 +63,7 @@ TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
 PHC_HISTORY_MAX_SAMPLES = 7200
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
+RESEARCH_CACHE_SECONDS = max(1.0, float(os.environ.get("PTPBOX_RESEARCH_CACHE_SECONDS", "10")))
 SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"}
 LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 LOG_PATTERN = re.compile(
@@ -197,6 +198,9 @@ _EXPERIMENT_STORES_LOCK = threading.Lock()
 HOLDOVER_LOCK = threading.RLock()
 _TEMPERATURE_CACHE: tuple[float, dict[str, float]] = (0.0, {})
 _CAPABILITY_CACHE: tuple[float, dict[str, Any]] = (0.0, {})
+_RESEARCH_SNAPSHOT_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+_RESEARCH_SNAPSHOT_REFRESHING: set[int] = set()
+_RESEARCH_SNAPSHOT_CONDITION = threading.Condition()
 
 
 @dataclass
@@ -1789,7 +1793,7 @@ def holdover_session_loop(stop: threading.Event) -> None:
                     save_holdover_session(current)
 
 
-def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
+def _build_research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
     telemetry_payload = telemetry(history_seconds=history_seconds, limit=TELEMETRY_MAX_SAMPLES)
     config_value = load_config()
     servo = config_value.get("servo", {})
@@ -1850,6 +1854,85 @@ def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
         }
     )
     return snapshot
+
+
+def _cached_research_payload(
+    payload: dict[str, Any],
+    stored_at: float,
+    refreshing: bool,
+) -> dict[str, Any]:
+    result = dict(payload)
+    result["analysis_cache"] = {
+        "age_s": max(0.0, time.monotonic() - stored_at),
+        "max_age_s": RESEARCH_CACHE_SECONDS,
+        "refreshing": refreshing,
+        "request_coalescing": True,
+    }
+    return result
+
+
+def _refresh_research_snapshot(cache_key: int, history_seconds: float) -> None:
+    try:
+        payload = _build_research_snapshot(history_seconds)
+    except Exception as exc:  # pragma: no cover - surfaced through the next cold request
+        print(f"PTPBox research refresh failed: {exc}", file=sys.stderr)
+        with _RESEARCH_SNAPSHOT_CONDITION:
+            _RESEARCH_SNAPSHOT_REFRESHING.discard(cache_key)
+            _RESEARCH_SNAPSHOT_CONDITION.notify_all()
+        return
+    with _RESEARCH_SNAPSHOT_CONDITION:
+        _RESEARCH_SNAPSHOT_CACHE[cache_key] = (time.monotonic(), payload)
+        if len(_RESEARCH_SNAPSHOT_CACHE) > 8:
+            oldest = min(
+                _RESEARCH_SNAPSHOT_CACHE,
+                key=lambda key: _RESEARCH_SNAPSHOT_CACHE[key][0],
+            )
+            if oldest != cache_key:
+                _RESEARCH_SNAPSHOT_CACHE.pop(oldest, None)
+        _RESEARCH_SNAPSHOT_REFRESHING.discard(cache_key)
+        _RESEARCH_SNAPSHOT_CONDITION.notify_all()
+
+
+def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
+    """Share heavy analysis work across synchronized Observatory pollers."""
+    cache_key = int(round(history_seconds))
+    while True:
+        with _RESEARCH_SNAPSHOT_CONDITION:
+            cached = _RESEARCH_SNAPSHOT_CACHE.get(cache_key)
+            if cached:
+                stored_at, payload = cached
+                expired = time.monotonic() - stored_at >= RESEARCH_CACHE_SECONDS
+                if expired and cache_key not in _RESEARCH_SNAPSHOT_REFRESHING:
+                    _RESEARCH_SNAPSHOT_REFRESHING.add(cache_key)
+                    threading.Thread(
+                        target=_refresh_research_snapshot,
+                        args=(cache_key, history_seconds),
+                        name=f"ptpbox-research-{cache_key}",
+                        daemon=True,
+                    ).start()
+                return _cached_research_payload(
+                    payload,
+                    stored_at,
+                    cache_key in _RESEARCH_SNAPSHOT_REFRESHING,
+                )
+            if cache_key not in _RESEARCH_SNAPSHOT_REFRESHING:
+                _RESEARCH_SNAPSHOT_REFRESHING.add(cache_key)
+                break
+            _RESEARCH_SNAPSHOT_CONDITION.wait()
+
+    try:
+        payload = _build_research_snapshot(history_seconds)
+    except Exception:
+        with _RESEARCH_SNAPSHOT_CONDITION:
+            _RESEARCH_SNAPSHOT_REFRESHING.discard(cache_key)
+            _RESEARCH_SNAPSHOT_CONDITION.notify_all()
+        raise
+    stored_at = time.monotonic()
+    with _RESEARCH_SNAPSHOT_CONDITION:
+        _RESEARCH_SNAPSHOT_CACHE[cache_key] = (stored_at, payload)
+        _RESEARCH_SNAPSHOT_REFRESHING.discard(cache_key)
+        _RESEARCH_SNAPSHOT_CONDITION.notify_all()
+    return _cached_research_payload(payload, stored_at, False)
 
 
 def read_integer(path: Path) -> int:
@@ -2036,7 +2119,7 @@ def status() -> dict[str, Any]:
         "identification": load_json(IDENTIFICATION_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.5.0",
+        "agent_version": "2.5.1",
         "timestamp": time.time(),
     }
 

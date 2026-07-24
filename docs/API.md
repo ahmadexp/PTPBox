@@ -493,9 +493,12 @@ The main objects are:
 | `capabilities` | Hardware-derived DPLL, SyncE, devlink, temperature, path-monitor, and PPS status |
 | `profiles` | Applied configuration checks; explicitly not standards certification |
 | `experiments` | Recent durable runs and the active run |
+| `analysis_cache` | Cache age, ten-second refresh target, refresh state, and request-coalescing flag |
 
 Calculations report `waiting` or `learning` until enough real samples exist.
-No research endpoint adjusts a clock.
+No research endpoint adjusts a clock. Identical pollers share one heavy
+analysis result; after ten seconds, the current result returns immediately
+while exactly one background refresh recomputes it.
 
 Adaptive-Kalman and IMM controller state is returned per clock in
 `GET /api/telemetry` under `clocks[].kalman`, because it is the state of the
