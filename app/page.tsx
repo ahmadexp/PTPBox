@@ -294,6 +294,30 @@ type StabilityPoint = {
   confidence: number | null;
 };
 
+type StabilityMetric = "adev" | "mdev" | "hdev" | "pdev" | "totdev" | "theo1" | "tdev" | "mtie" | "tierms";
+
+type StabilitySummary = {
+  status: string;
+  samples: number;
+  record_span_s?: number;
+  metrics_ready: StabilityMetric[];
+  mean_phase_ns?: number;
+  detrended_rms_ns?: number;
+  peak_to_peak_ns?: number;
+  frequency_bias_ppb?: number;
+  frequency_drift_ppb_s?: number;
+  minimum_adev?: StabilityPoint | null;
+  dominant_noise_candidate?: string | null;
+  noise_regions?: Array<{
+    tau_start_s: number;
+    tau_end_s: number;
+    slope: number;
+    candidate: string;
+    expected_slope: number;
+  }>;
+  interpretation?: string;
+};
+
 type ResearchExperiment = {
   id: string;
   name: string;
@@ -327,7 +351,8 @@ type ResearchPayload = {
   aligned_sample_count: number;
   sample_rate_hz: number;
   endpoint: string | null;
-  stability: Record<"adev" | "mdev" | "tdev" | "hdev" | "mtie" | "theo1", StabilityPoint[]>;
+  stability: Record<StabilityMetric, StabilityPoint[]>;
+  stability_summary: StabilitySummary;
   fusion: {
     status?: string;
     reference?: string;
@@ -1018,22 +1043,90 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
   const endpoint = nodes[nodes.length - 1]?.id ?? null;
   const endpointValues = endpoint ? history.map((point) => point.values[endpoint]).filter(Number.isFinite) : [];
   const tauFactors = [1, 2, 4, 8, 16, 32].filter((factor) => endpointValues.length > factor * 3);
-  const stability: ResearchPayload["stability"] = { adev: [], mdev: [], tdev: [], hdev: [], mtie: [], theo1: [] };
+  const stability: ResearchPayload["stability"] = { adev: [], mdev: [], hdev: [], pdev: [], totdev: [], theo1: [], tdev: [], mtie: [], tierms: [] };
+  const reflectedLeft = endpointValues.slice(1, -1).map((value) => 2 * endpointValues[0] - value).reverse();
+  const reflectedRight = endpointValues.slice(1, -1).reverse().map((value) => 2 * endpointValues.at(-1)! - value);
+  const reflected = [...reflectedLeft, ...endpointValues, ...reflectedRight];
+  const reflectedMid = reflectedLeft.length;
   tauFactors.forEach((factor) => {
     const second = endpointValues.slice(0, -2 * factor).map((value, index) => endpointValues[index + 2 * factor] - 2 * endpointValues[index + factor] + value);
     const adev = Math.sqrt(second.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * second.length)) * 1e-9 / factor;
+    const modifiedTerms = endpointValues.slice(0, -3 * factor + 1).map((_value, index) => Array.from({ length: factor }, (_, inner) => (
+      endpointValues[index + 2 * factor + inner] - 2 * endpointValues[index + factor + inner] + endpointValues[index + inner]
+    )).reduce((sum, value) => sum + value, 0));
+    const mdev = Math.sqrt(modifiedTerms.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * modifiedTerms.length)) * 1e-9 / factor ** 2;
+    const third = endpointValues.slice(0, -3 * factor).map((value, index) => (
+      endpointValues[index + 3 * factor] - 3 * endpointValues[index + 2 * factor] + 3 * endpointValues[index + factor] - value
+    ));
+    const hdev = Math.sqrt(third.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 6 * third.length)) * 1e-9 / factor;
+    const parabolic = endpointValues.slice(0, -2 * factor).map((_value, index) => {
+      const midpoint = (factor - 1) / 2;
+      return Array.from({ length: factor }, (_, inner) => (
+        (midpoint - inner) * (endpointValues[index + inner] - endpointValues[index + factor + inner])
+      )).reduce((sum, value) => sum + value, 0);
+    });
+    const pdev = factor === 1 ? adev : Math.sqrt(72 * parabolic.reduce((sum, value) => sum + value * value, 0) / Math.max(1, parabolic.length * factor ** 6)) * 1e-9;
+    const totalTerms = endpointValues.slice(1, -1).map((_value, index) => (
+      reflected[reflectedMid + 1 + index - factor] - 2 * reflected[reflectedMid + 1 + index] + reflected[reflectedMid + 1 + index + factor]
+    ));
+    const totdev = Math.sqrt(totalTerms.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * totalTerms.length)) * 1e-9 / factor;
     const windows = endpointValues.slice(0, -factor).map((_value, index) => {
       const values = endpointValues.slice(index, index + factor + 1);
       return Math.max(...values) - Math.min(...values);
     });
-    const confidence = Math.min(.99, 1 - 1 / Math.sqrt(second.length + 1));
-    stability.adev.push({ tau_s: factor, value: adev, pairs: second.length, confidence });
-    stability.mdev.push({ tau_s: factor, value: adev * (.86 + factor * .003), pairs: second.length, confidence });
-    stability.tdev.push({ tau_s: factor, value: factor * adev * 1e9 / Math.sqrt(3), pairs: second.length, confidence });
-    stability.hdev.push({ tau_s: factor, value: adev * .78, pairs: second.length, confidence });
+    const tieDifferences = endpointValues.slice(0, -factor).map((value, index) => endpointValues[index + factor] - value);
+    stability.adev.push({ tau_s: factor, value: adev, pairs: second.length, confidence: null });
+    stability.mdev.push({ tau_s: factor, value: mdev, pairs: modifiedTerms.length, confidence: null });
+    stability.hdev.push({ tau_s: factor, value: hdev, pairs: third.length, confidence: null });
+    stability.pdev.push({ tau_s: factor, value: pdev, pairs: parabolic.length, confidence: null });
+    stability.totdev.push({ tau_s: factor, value: totdev, pairs: totalTerms.length, confidence: null });
+    stability.tdev.push({ tau_s: factor, value: factor * mdev * 1e9 / Math.sqrt(3), pairs: modifiedTerms.length, confidence: null });
     stability.mtie.push({ tau_s: factor, value: Math.max(...windows, 0), pairs: windows.length, confidence: null });
-    stability.theo1.push({ tau_s: factor, value: Math.sqrt(second.reduce((sum, value) => sum + value * value, 0) / Math.max(1, second.length)), pairs: second.length, confidence });
+    stability.tierms.push({ tau_s: factor, value: Math.sqrt(tieDifferences.reduce((sum, value) => sum + value * value, 0) / Math.max(1, tieDifferences.length)), pairs: tieDifferences.length, confidence: null });
+    if (factor >= 10 && factor % 2 === 0) {
+      let theoSum = 0;
+      let theoTerms = 0;
+      const half = factor / 2;
+      endpointValues.slice(0, -factor).forEach((_value, start) => {
+        for (let delta = 0; delta < half; delta += 1) {
+          const value = endpointValues[start] - endpointValues[start - delta + half] + endpointValues[start + factor] - endpointValues[start + delta + half];
+          theoSum += value * value / (half - delta);
+          theoTerms += 1;
+        }
+      });
+      stability.theo1.push({ tau_s: .75 * factor, value: Math.sqrt(theoSum / (.75 * (endpointValues.length - factor) * factor ** 2)) * 1e-9, pairs: theoTerms, confidence: null });
+    }
   });
+  const phaseMean = endpointValues.length ? endpointValues.reduce((sum, value) => sum + value, 0) / endpointValues.length : 0;
+  const phaseTimeCenter = Math.max(0, endpointValues.length - 1) / 2;
+  const phaseTimeEnergy = endpointValues.reduce((sum, _value, index) => sum + (index - phaseTimeCenter) ** 2, 0);
+  const frequencyBiasPpb = endpointValues.reduce((sum, value, index) => sum + (index - phaseTimeCenter) * (value - phaseMean), 0) / Math.max(1e-12, phaseTimeEnergy);
+  const detrendedPhase = endpointValues.map((value, index) => value - (phaseMean + frequencyBiasPpb * (index - phaseTimeCenter)));
+  const minimumAdev = stability.adev.length ? stability.adev.reduce((minimum, point) => point.value < minimum.value ? point : minimum) : null;
+  const noiseRegions: NonNullable<StabilitySummary["noise_regions"]> = stability.mdev.slice(0, -1).map((point, index) => {
+    const next = stability.mdev[index + 1];
+    const slope = Math.log(Math.max(1e-30, next.value) / Math.max(1e-30, point.value)) / Math.log(next.tau_s / point.tau_s);
+    const candidates: Array<[number, string]> = [[-1.5, "white PM"], [-1, "flicker PM"], [-.5, "white FM"], [0, "flicker FM"], [.5, "random-walk FM"], [1, "frequency drift"]];
+    const [expected, candidate] = candidates.reduce((nearest, entry) => Math.abs(slope - entry[0]) < Math.abs(slope - nearest[0]) ? entry : nearest);
+    return { tau_start_s: point.tau_s, tau_end_s: next.tau_s, slope, candidate, expected_slope: expected };
+  });
+  const noiseCounts = noiseRegions.reduce<Record<string, number>>((counts, region) => ({ ...counts, [region.candidate]: (counts[region.candidate] ?? 0) + 1 }), {});
+  const dominantNoiseCandidate = Object.entries(noiseCounts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
+  const stabilitySummary: StabilitySummary = endpointValues.length >= 4 ? {
+    status: "ready",
+    samples: endpointValues.length,
+    record_span_s: Math.max(0, endpointValues.length - 1),
+    metrics_ready: (Object.keys(stability) as StabilityMetric[]).filter((name) => stability[name].length),
+    mean_phase_ns: phaseMean,
+    detrended_rms_ns: Math.sqrt(detrendedPhase.reduce((sum, value) => sum + value * value, 0) / Math.max(1, detrendedPhase.length)),
+    peak_to_peak_ns: endpointValues.length ? Math.max(...endpointValues) - Math.min(...endpointValues) : 0,
+    frequency_bias_ppb: frequencyBiasPpb,
+    frequency_drift_ppb_s: 0,
+    minimum_adev: minimumAdev,
+    dominant_noise_candidate: dominantNoiseCandidate,
+    noise_regions: noiseRegions,
+    interpretation: "Noise labels are local MDEV log-slope candidates, not spectral identification. Confidence intervals require noise-dependent equivalent degrees of freedom.",
+  } : { status: "learning", samples: endpointValues.length, metrics_ready: [] };
   const hopIds = nodes.slice(1).map((node) => node.id);
   const hopSeries = hopIds.map((id) => history.map((point) => point.hopValues?.[id]).filter((value): value is number => Number.isFinite(value)));
   const recurrenceLength = Math.min(64, ...hopSeries.map((series) => series.length));
@@ -1257,6 +1350,7 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
     sample_rate_hz: 1,
     endpoint,
     stability,
+    stability_summary: stabilitySummary,
     fusion: {
       status: "solved",
       reference: "BC1",
@@ -2466,98 +2560,58 @@ function StateSpaceAtlas({
   );
 }
 
-function ResearchLineChart({ points, metric }: { points: StabilityPoint[]; metric: string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    const wrap = wrapRef.current;
-    if (!canvas || !wrap) return;
-    const bounds = wrap.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = bounds.width * dpr;
-    canvas.height = bounds.height * dpr;
-    canvas.style.width = `${bounds.width}px`;
-    canvas.style.height = `${bounds.height}px`;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.scale(dpr, dpr);
-    const width = bounds.width;
-    const height = bounds.height;
-    const padding = { left: 62, right: 22, top: 22, bottom: 38 };
-    context.clearRect(0, 0, width, height);
-    if (points.length < 2) {
-      context.fillStyle = "#69818a";
-      context.font = "11px ui-monospace, monospace";
-      context.textAlign = "center";
-      context.fillText("Collecting enough phase samples for stability statistics", width / 2, height / 2);
-      return;
-    }
-    const logX = points.map((point) => Math.log10(Math.max(1e-9, point.tau_s)));
-    const logY = points.map((point) => Math.log10(Math.max(1e-18, Math.abs(point.value))));
-    const xMin = Math.min(...logX);
-    const xMax = Math.max(...logX);
-    const yMin = Math.min(...logY) - .18;
-    const yMax = Math.max(...logY) + .18;
-    const x = (value: number) => padding.left + (value - xMin) / Math.max(.1, xMax - xMin) * (width - padding.left - padding.right);
-    const y = (value: number) => padding.top + (yMax - value) / Math.max(.1, yMax - yMin) * (height - padding.top - padding.bottom);
-    context.font = "9px ui-monospace, monospace";
-    context.textBaseline = "middle";
-    for (let index = 0; index <= 4; index += 1) {
-      const value = yMax - index / 4 * (yMax - yMin);
-      const py = y(value);
-      context.strokeStyle = "rgba(125,157,166,.12)";
-      context.beginPath();
-      context.moveTo(padding.left, py);
-      context.lineTo(width - padding.right, py);
-      context.stroke();
-      context.fillStyle = "#62777e";
-      context.textAlign = "right";
-      const displayed = 10 ** value;
-      context.fillText(metric === "ADEV" || metric === "MDEV" || metric === "HDEV" ? displayed.toExponential(1) : formatNanoseconds(displayed), padding.left - 9, py);
-    }
-    points.forEach((point, index) => {
-      const px = x(logX[index]);
-      context.strokeStyle = "rgba(125,157,166,.08)";
-      context.beginPath();
-      context.moveTo(px, padding.top);
-      context.lineTo(px, height - padding.bottom);
-      context.stroke();
-      context.fillStyle = "#62777e";
-      context.textAlign = "center";
-      context.fillText(`${point.tau_s < 1 ? point.tau_s.toFixed(2) : point.tau_s.toFixed(0)}s`, px, height - 16);
-    });
-    const gradient = context.createLinearGradient(padding.left, 0, width - padding.right, 0);
-    gradient.addColorStop(0, "#61dce3");
-    gradient.addColorStop(.55, "#77e2b3");
-    gradient.addColorStop(1, "#c4a0ef");
-    context.strokeStyle = gradient;
-    context.lineWidth = 2;
-    context.beginPath();
-    points.forEach((_point, index) => {
-      const px = x(logX[index]);
-      const py = y(logY[index]);
-      if (index === 0) context.moveTo(px, py);
-      else context.lineTo(px, py);
-    });
-    context.stroke();
-    points.forEach((_point, index) => {
-      context.fillStyle = "#0c171c";
-      context.strokeStyle = index === points.length - 1 ? "#c4a0ef" : "#77e2b3";
-      context.lineWidth = 1.4;
-      context.beginPath();
-      context.arc(x(logX[index]), y(logY[index]), index === points.length - 1 ? 4 : 3, 0, Math.PI * 2);
-      context.fill();
-      context.stroke();
-    });
-  }, [metric, points]);
-  useEffect(() => {
-    draw();
-    const observer = new ResizeObserver(draw);
-    if (wrapRef.current) observer.observe(wrapRef.current);
-    return () => observer.disconnect();
-  }, [draw]);
-  return <div className="research-chart" ref={wrapRef}><canvas ref={canvasRef} aria-label={`${metric} stability chart`} /></div>;
+function StabilityFamilyChart({
+  title,
+  unit,
+  series,
+}: {
+  title: string;
+  unit: "fractional" | "nanoseconds";
+  series: Array<{ metric: StabilityMetric; label: string; points: StabilityPoint[] }>;
+}) {
+  const width = 640;
+  const height = 246;
+  const plot = { left: 68, right: 18, top: 22, bottom: 40 };
+  const populated = series.filter((entry) => entry.points.some((point) => point.value > 0));
+  const points = populated.flatMap((entry) => entry.points.filter((point) => point.value > 0));
+  if (points.length < 2) {
+    return <div className="stability-family"><div className="stability-family-heading"><strong>{title}</strong><span>{unit === "fractional" ? "σᵧ(τ)" : "ns"}</span></div><div className="stability-empty">Collecting enough phase samples…</div></div>;
+  }
+  const logTaus = points.map((point) => Math.log10(Math.max(1e-12, point.tau_s)));
+  const logValues = points.map((point) => Math.log10(Math.max(1e-30, Math.abs(point.value))));
+  const xMin = Math.min(...logTaus);
+  const xMax = Math.max(...logTaus);
+  const yMin = Math.min(...logValues) - .16;
+  const yMax = Math.max(...logValues) + .16;
+  const mapX = (tau: number) => plot.left + (Math.log10(Math.max(1e-12, tau)) - xMin) / Math.max(.1, xMax - xMin) * (width - plot.left - plot.right);
+  const mapY = (value: number) => plot.top + (yMax - Math.log10(Math.max(1e-30, Math.abs(value)))) / Math.max(.1, yMax - yMin) * (height - plot.top - plot.bottom);
+  const tauValues = [...new Set(points.map((point) => point.tau_s))].sort((left, right) => left - right);
+  const tauStep = Math.max(1, Math.ceil(tauValues.length / 6));
+  const tauTicks = tauValues.filter((_value, index) => index % tauStep === 0 || index === tauValues.length - 1);
+  const yTicks = Array.from({ length: 5 }, (_, index) => yMax - index * (yMax - yMin) / 4);
+  const formatTau = (value: number) => value < 1 ? `${value.toFixed(2)}s` : value < 10 ? `${value.toFixed(1)}s` : `${value.toFixed(0)}s`;
+  const formatValue = (value: number) => unit === "fractional" ? value.toExponential(1) : formatNanoseconds(value);
+  return (
+    <div className="stability-family">
+      <div className="stability-family-heading"><strong>{title}</strong><span>{unit === "fractional" ? "fractional frequency · σᵧ(τ)" : "time error · nanoseconds"}</span></div>
+      <div className="stability-family-legend">
+        {populated.map((entry, index) => <span key={entry.metric}><i className={`stability-series-${index}`} />{entry.label}</span>)}
+      </div>
+      <svg className="stability-family-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby={`stability-${unit}-title stability-${unit}-desc`}>
+        <title id={`stability-${unit}-title`}>{title}</title>
+        <desc id={`stability-${unit}-desc`}>{populated.map((entry) => entry.label).join(", ")} plotted against logarithmic averaging time on one shared logarithmic scale.</desc>
+        {yTicks.map((tick) => <g key={tick}><line className="stability-grid" x1={plot.left} x2={width - plot.right} y1={plot.top + (yMax - tick) / Math.max(.1, yMax - yMin) * (height - plot.top - plot.bottom)} y2={plot.top + (yMax - tick) / Math.max(.1, yMax - yMin) * (height - plot.top - plot.bottom)} /><text className="stability-axis-label" x={plot.left - 9} y={plot.top + (yMax - tick) / Math.max(.1, yMax - yMin) * (height - plot.top - plot.bottom) + 3} textAnchor="end">{formatValue(10 ** tick)}</text></g>)}
+        {tauTicks.map((tau) => <g key={tau}><line className="stability-grid vertical" x1={mapX(tau)} x2={mapX(tau)} y1={plot.top} y2={height - plot.bottom} /><text className="stability-axis-label" x={mapX(tau)} y={height - 17} textAnchor="middle">{formatTau(tau)}</text></g>)}
+        {populated.map((entry, index) => {
+          const usable = entry.points.filter((point) => point.value > 0);
+          const path = usable.map((point, pointIndex) => `${pointIndex ? "L" : "M"}${mapX(point.tau_s).toFixed(2)},${mapY(point.value).toFixed(2)}`).join(" ");
+          const last = usable.at(-1)!;
+          return <g key={entry.metric} className={`stability-series stability-series-${index}`}><path className="stability-trace" d={path} /><circle className="stability-endpoint" cx={mapX(last.tau_s)} cy={mapY(last.value)} r="3" /></g>;
+        })}
+        <text className="stability-axis-title" x={(plot.left + width - plot.right) / 2} y={height - 3} textAnchor="middle">averaging time τ · logarithmic</text>
+      </svg>
+    </div>
+  );
 }
 
 function RecurrenceCanvas({ matrix }: { matrix: string[] }) {
@@ -2707,25 +2761,33 @@ function FractalDiagnostics({ analysis }: { analysis: ResearchPayload["fractal"]
 function MetrologyWorkbench({
   research,
   nodes,
-  metric,
-  setMetric,
   experimentBusy,
   toggleCapture,
   exportRun,
 }: {
   research: ResearchPayload;
   nodes: ClockNode[];
-  metric: keyof ResearchPayload["stability"];
-  setMetric: (metric: keyof ResearchPayload["stability"]) => void;
   experimentBusy: boolean;
   toggleCapture: () => void;
   exportRun: (id: string) => void;
 }) {
   const endpoint = research.endpoint ?? nodes[nodes.length - 1]?.id;
   const endpointBudget = research.error_budget.nodes[endpoint] ?? null;
-  const metricLabels: Array<[keyof ResearchPayload["stability"], string]> = [["adev", "ADEV"], ["mdev", "MDEV"], ["tdev", "TDEV"], ["hdev", "HDEV"], ["mtie", "MTIE"], ["theo1", "Theo1"]];
-  const metricLabel = metricLabels.find(([id]) => id === metric)?.[1] ?? metric.toUpperCase();
-  const latestMetric = research.stability[metric].at(-1);
+  const summary = research.stability_summary ?? { status: "learning", samples: 0, metrics_ready: [] };
+  const frequencySeries: Array<{ metric: StabilityMetric; label: string; points: StabilityPoint[] }> = [
+    { metric: "adev", label: "ADEV", points: research.stability.adev },
+    { metric: "mdev", label: "MDEV", points: research.stability.mdev },
+    { metric: "hdev", label: "HDEV", points: research.stability.hdev },
+    { metric: "pdev", label: "PDEV", points: research.stability.pdev ?? [] },
+    { metric: "totdev", label: "TOTDEV", points: research.stability.totdev ?? [] },
+    { metric: "theo1", label: "Theo1", points: research.stability.theo1 },
+  ];
+  const timeSeries: Array<{ metric: StabilityMetric; label: string; points: StabilityPoint[] }> = [
+    { metric: "tdev", label: "TDEV", points: research.stability.tdev },
+    { metric: "mtie", label: "MTIE", points: research.stability.mtie },
+    { metric: "tierms", label: "TIE RMS", points: research.stability.tierms ?? [] },
+  ];
+  const metricSeries = [...frequencySeries, ...timeSeries];
   const fusionNodes = research.fusion.nodes ?? {};
   const ensembleWeights = research.ensemble.weights ?? {};
   return (
@@ -2750,17 +2812,33 @@ function MetrologyWorkbench({
 
       <section className="instrument-panel stability-panel">
         <div className="panel-heading">
-          <div><span className="section-kicker">IEEE 1139 / ITU-T G.810 METRICS</span><h2>Phase & frequency stability</h2></div>
-          <div className="segmented-control metrology-tabs">{metricLabels.map(([id, label]) => <button type="button" key={id} className={metric === id ? "active" : ""} onClick={() => setMetric(id)}>{label}</button>)}</div>
+          <div><span className="section-kicker">NIST SP 1065 / IEEE 1139 CLOCK METROLOGY</span><h2>Clock stability atlas</h2><p>Every estimator shares the same raw endpoint phase record; frequency and time statistics remain on separate, defensible scales.</p></div>
+          <span className={`quality-badge ${summary.status === "ready" ? "" : "pending"}`}>{summary.status === "ready" ? `${summary.metrics_ready.length}/9 READY` : "LEARNING"}</span>
         </div>
         <div className="stability-summary">
           <div><span>Endpoint</span><strong>{endpoint ?? "—"}</strong><small>relative to BC1</small></div>
-          <div><span>{metricLabel} at longest τ</span><strong>{latestMetric ? metric === "adev" || metric === "mdev" || metric === "hdev" ? latestMetric.value.toExponential(2) : formatNanoseconds(latestMetric.value) : "—"}</strong><small>τ {latestMetric?.tau_s.toFixed(1) ?? "—"} s</small></div>
-          <div><span>Effective pairs</span><strong>{latestMetric?.pairs.toLocaleString() ?? "—"}</strong><small>{latestMetric?.confidence ? `${(latestMetric.confidence * 100).toFixed(0)}% coverage proxy` : "max interval statistic"}</small></div>
-          <div><span>Cadence</span><strong>{research.sample_rate_hz.toFixed(1)} Hz</strong><small>{research.aligned_sample_count.toLocaleString()} aligned cycles</small></div>
+          <div><span>Record span</span><strong>{summary.record_span_s == null ? "—" : `${summary.record_span_s.toFixed(1)} s`}</strong><small>{summary.samples.toLocaleString()} raw phase samples</small></div>
+          <div><span>Detrended phase RMS</span><strong>{summary.detrended_rms_ns == null ? "—" : formatNanoseconds(summary.detrended_rms_ns)}</strong><small>linear phase ramp removed</small></div>
+          <div><span>Frequency bias</span><strong>{summary.frequency_bias_ppb == null ? "—" : `${summary.frequency_bias_ppb >= 0 ? "+" : ""}${summary.frequency_bias_ppb.toFixed(3)} ppb`}</strong><small>{research.sample_rate_hz.toFixed(1)} Hz cadence · no smoothing</small></div>
         </div>
-        <ResearchLineChart points={research.stability[metric]} metric={metricLabel} />
-        <div className="instrument-note"><Info size={13} /><span>ADEV, MDEV, and HDEV are fractional-frequency deviations. TDEV, MTIE, and Theo1 retain nanosecond units. No display smoothing is applied; each point states its effective pair count.</span></div>
+        <div className="stability-atlas">
+          <StabilityFamilyChart title="Fractional-frequency deviations" unit="fractional" series={frequencySeries} />
+          <StabilityFamilyChart title="Time-error statistics" unit="nanoseconds" series={timeSeries} />
+        </div>
+        <div className="stability-ledger" aria-label="Clock stability estimator ledger">
+          {metricSeries.map((entry) => {
+            const latest = entry.points.at(-1);
+            const fractional = frequencySeries.some((candidate) => candidate.metric === entry.metric);
+            return <div key={entry.metric}><span>{entry.label}</span><strong>{latest ? fractional ? latest.value.toExponential(2) : formatNanoseconds(latest.value) : "—"}</strong><small>{latest ? `τ ${latest.tau_s.toFixed(latest.tau_s < 10 ? 2 : 1)} s · ${latest.pairs.toLocaleString()} terms` : "awaiting record length"}</small></div>;
+          })}
+        </div>
+        <div className="stability-diagnostics">
+          <span><small>Minimum ADEV</small><strong>{summary.minimum_adev ? `${summary.minimum_adev.value.toExponential(2)} @ ${summary.minimum_adev.tau_s.toFixed(1)} s` : "learning"}</strong></span>
+          <span><small>Local MDEV slope</small><strong>{summary.dominant_noise_candidate ?? "learning"}</strong></span>
+          <span><small>Peak-to-peak phase</small><strong>{summary.peak_to_peak_ns == null ? "—" : formatNanoseconds(summary.peak_to_peak_ns)}</strong></span>
+          <span><small>Frequency drift</small><strong>{summary.frequency_drift_ppb_s == null ? "—" : `${summary.frequency_drift_ppb_s.toExponential(2)} ppb/s`}</strong></span>
+        </div>
+        <div className="instrument-note"><Info size={13} /><span>ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 are dimensionless fractional-frequency deviations. TDEV, MTIE, and TIE RMS are nanoseconds. Theo1 uses its effective τ = 0.75mτ₀. Confidence is intentionally omitted until noise-dependent equivalent degrees of freedom can support it.</span></div>
       </section>
 
       <section className="instrument-panel fusion-panel">
@@ -3405,7 +3483,6 @@ export default function PTPBoxDashboard() {
   const [experimentRunning, setExperimentRunning] = useState(false);
   const [experimentProgress, setExperimentProgress] = useState(38);
   const [research, setResearch] = useState<ResearchPayload | null>(null);
-  const [researchMetric, setResearchMetric] = useState<keyof ResearchPayload["stability"]>("tdev");
   const [experimentBusy, setExperimentBusy] = useState(false);
   const [kp, setKp] = useState(0.7);
   const [ki, setKi] = useState(0.3);
@@ -4078,7 +4155,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-pendulum", group: "Navigate", label: "Multi-pendulum", description: "Coupled previous-hop phase residuals", keywords: "swing equilibrium phase", section: "Multi-pendulum", icon: Orbit },
     { id: "nav-covariance", group: "Navigate", label: "Covariance lab", description: "Pair relationships and dominant eigenmodes", keywords: "matrix correlation eigenvalues", section: "Covariance", icon: Network },
     { id: "nav-state", group: "Navigate", label: "Attractor Observatory", description: "Delay reconstruction, recurrent cores, return and Poincaré maps", keywords: "state space attractor takens delay embedding ami fnn lyapunov recurrence pca poincare phase portrait", section: "State space", icon: Activity },
-    { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Stability statistics, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev mtie theo1 uncertainty experiment", section: "Metrology", icon: TimerReset },
+    { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Clock stability atlas, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev pdev totdev mtie tie rms theo1 allan hadamard parabolic stability uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
     { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
@@ -4685,8 +4762,6 @@ export default function PTPBoxDashboard() {
             <MetrologyWorkbench
               research={activeResearch}
               nodes={nodes}
-              metric={researchMetric}
-              setMetric={setResearchMetric}
               experimentBusy={experimentBusy}
               toggleCapture={() => void toggleExperiment()}
               exportRun={exportExperiment}

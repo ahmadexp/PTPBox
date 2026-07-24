@@ -158,9 +158,12 @@ uniformly decimated without changing the stored dataset.
 
 <img src="docs/screenshots/metrology-live.png" alt="Live PTPBox metrology workbench with TDEV, factor-graph fusion, ensemble time, covariance-aware error budget, and durable run ledger" width="100%">
 
-The metrology workbench calculates overlapping ADEV, MDEV, TDEV, HDEV, MTIE,
-and Theo1 at power-of-two averaging intervals. It reports the number of usable
-pairs with every point and never fills missing live samples. A weighted
+The metrology workbench renders two shared-scale clock-stability atlases from
+the same raw endpoint phase record. ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1
+remain dimensionless fractional-frequency deviations; TDEV, MTIE, and TIE RMS
+remain in nanoseconds. It reports the number of usable terms with every point,
+uses Theo1's effective averaging time \(0.75m\tau_0\), and never fills missing
+live samples or invents a pair-count confidence percentage. A weighted
 least-squares factor graph fuses direct BC1 comparisons, adjacent-hop
 constraints, and a common PPS edge when the hardware exposes one. The ensemble
 clock uses covariance-regularized inverse weighting, while the error budget
@@ -248,7 +251,7 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Multi-pendulum** | Turn every previous-hop PHC residual into a connected rod angle, with robust equilibrium learning, regime-shift auto-zeroing, and a per-hop swing ledger. |
 | **Covariance lab** | Compare synchronized phase-change rates as covariance or correlation, follow every pair through time, and inspect eigenvalues plus dominant-mode loadings. |
 | **Attractor Observatory** | Reconstruct endpoint dynamics with Takens coordinates, choose lag with AMI, check embedding with false nearest neighbors, locate recurrent-core candidates, inspect return/Poincaré maps, estimate local divergence, gate on regime stationarity, and require corroborating evidence before showing a candidate-attractor label. |
-| **Metrology** | Compute ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
+| **Metrology** | Compare ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 on a shared fractional-frequency scale; compare TDEV, MTIE, and TIE RMS on a shared time-error scale; inspect drift and local noise-slope candidates; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
 | **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
 | **Holdover chamber** | Qualify continuous lock, capture a per-node release baseline, stop adjustment without stopping observation, plot raw wander, report rate error, and restore the exact saved servos. |
@@ -389,8 +392,11 @@ state from sysfs and the managed process table.
   the applied 0.5–8 Hz protocol-valid Sync cadence
 - Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC comparison
   dispersion and its reported error bound
-- Overlapping ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1 across supported
-  averaging intervals, including usable-pair counts
+- Overlapping ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 fractional-frequency
+  stability plus TDEV, MTIE, and TIE RMS time-error stability across supported
+  averaging intervals, including usable-term counts, detrended phase RMS,
+  frequency bias/drift, and explicitly qualified local MDEV noise-slope
+  candidates
 - Read-only previous-hop delta and cumulative cascade error
 - LinuxPTP master offset, mean path delay, and frequency adjustment
 - Preserved `t1`/`t2`/`t3`/`t4` timestamp-exchange records and qualified
@@ -520,6 +526,10 @@ primary references:
 
 - [NIST SP 1065, *Handbook of Frequency Stability Analysis*](https://www.nist.gov/publications/handbook-frequency-stability-analysis)
   for Allan-family, time-deviation, MTIE, and Theo statistics;
+- [IEEE 1139-2022](https://standards.ieee.org/ieee/1139/7585/)
+  for frequency-and-time metrology terminology, and the primary
+  [PVAR paper](https://members.femto-st.fr/sites/femto-st.fr.michel-lenczner/files/content/papers/VerLen2015-2.pdf)
+  for parabolic deviation;
 - [Linux kernel PTP hardware clock infrastructure](https://docs.kernel.org/driver-api/ptp.html)
   for PHC clocks, cross timestamps, EXTS, and periodic outputs;
 - [Linux kernel DPLL subsystem](https://docs.kernel.org/driver-api/dpll.html)

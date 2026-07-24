@@ -78,6 +78,14 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /PHC sampling/);
   assert.match(page, /sampling follows the applied Sync cadence/);
   assert.match(page, /Metrology workbench/);
+  assert.match(page, /Clock stability atlas/);
+  assert.match(page, /Fractional-frequency deviations/);
+  assert.match(page, /Time-error statistics/);
+  assert.match(page, /PDEV/);
+  assert.match(page, /TOTDEV/);
+  assert.match(page, /TIE RMS/);
+  assert.match(page, /effective τ = 0\.75mτ₀/);
+  assert.match(page, /Confidence is intentionally omitted/);
   assert.match(page, /Path microscope/);
   assert.match(page, /Intelligence/);
   assert.match(page, /Holdover chamber/);

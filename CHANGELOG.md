@@ -4,6 +4,14 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Expanded the clock-stability workbench to nine estimators on two shared
+  logarithmic scales: overlapping ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 as
+  dimensionless fractional-frequency deviations, plus TDEV, MTIE, and TIE RMS
+  in nanoseconds. Corrected Theo1 to use NIST's effective
+  \(\tau=0.75m\tau_0\), added reference-vector tests, detrended phase and
+  frequency diagnostics, local MDEV slope candidates, and removed the former
+  pair-count confidence proxy because formal coverage requires
+  noise-dependent equivalent degrees of freedom.
 - Added a fractal-analysis view beside recurrence and bifurcation diagnostics:
   Higuchi endpoint-trace dimension, Grassberger–Procaccia correlation dimension
   across four delay embeddings with an explicit scaling window and convergence

@@ -65,7 +65,7 @@ and whether privileged lifecycle control is installed.
     "certification": false
   },
   "observer_only": false,
-  "agent_version": "2.1.0"
+  "agent_version": "2.4.0"
 }
 ```
 
@@ -463,7 +463,8 @@ The main objects are:
 
 | Object | Contents |
 | --- | --- |
-| `stability` | Per-clock ADEV, MDEV, TDEV, HDEV, MTIE, and Theo1 curves with τ and pair counts |
+| `stability` | Endpoint ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 fractional-frequency curves plus TDEV, MTIE, and TIE RMS nanosecond curves, with τ and usable-term counts |
+| `stability_summary` | Record span, detrended RMS, peak-to-peak phase, frequency bias/drift, minimum ADEV, and explicitly qualified local MDEV noise-slope candidates |
 | `fusion` | Fused offsets, 1σ uncertainty, residuals, χ², and degrees of freedom |
 | `ensemble` | Covariance-regularized clock weights, virtual offset, and 1σ |
 | `error_budget` | Per-clock components and covariance-aware cascade uncertainty |

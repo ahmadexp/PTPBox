@@ -181,7 +181,7 @@ def symmetric_eigenvalues(matrix: Sequence[Sequence[float]], iterations: int = 8
 def _tau_factors(length: int) -> list[int]:
     factors: list[int] = []
     factor = 1
-    while factor <= max(1, length // 4):
+    while factor <= max(1, length // 2):
         factors.append(factor)
         factor *= 2
     return factors
@@ -210,18 +210,47 @@ def rolling_ranges(values: Sequence[float], window: int) -> list[float]:
     return ranges
 
 
+STABILITY_METRIC_NAMES = (
+    "adev",
+    "mdev",
+    "tdev",
+    "hdev",
+    "pdev",
+    "totdev",
+    "mtie",
+    "tierms",
+    "theo1",
+)
+
+
+def _stability_point(tau_s: float, value: float, pairs: int) -> dict[str, float | int | None]:
+    return {
+        "tau_s": tau_s,
+        "value": value,
+        "pairs": pairs,
+        # A defensible confidence interval requires equivalent degrees of
+        # freedom and a noise-type assumption.  Keep it explicitly unavailable
+        # instead of publishing a pair-count proxy as confidence.
+        "confidence": None,
+    }
+
+
 def stability_metrics(phase_ns: Sequence[float], sample_period_s: float) -> dict[str, list[dict[str, float | int | None]]]:
     """Compute overlapping stability statistics from equally spaced phase data.
 
-    ADEV, MDEV, and HDEV are returned as dimensionless fractional-frequency
-    deviations. TDEV, MTIE, and Theo1 retain nanosecond units.
+    ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 are dimensionless
+    fractional-frequency deviations. TDEV, MTIE, and TIE RMS are nanoseconds.
+    Theo1 uses its NIST effective tau of 0.75*m*tau0.
     """
     samples = [float(value) for value in phase_ns if math.isfinite(value)]
     if len(samples) < 4 or not math.isfinite(sample_period_s) or sample_period_s <= 0:
-        return {name: [] for name in ("adev", "mdev", "tdev", "hdev", "mtie", "theo1")}
-    result: dict[str, list[dict[str, float | int | None]]] = {
-        name: [] for name in ("adev", "mdev", "tdev", "hdev", "mtie", "theo1")
-    }
+        return {name: [] for name in STABILITY_METRIC_NAMES}
+    result: dict[str, list[dict[str, float | int | None]]] = {name: [] for name in STABILITY_METRIC_NAMES}
+    length = len(samples)
+    reflected_left = [2.0 * samples[0] - value for value in samples[1:-1]][::-1]
+    reflected_right = [2.0 * samples[-1] - value for value in samples[1:-1][::-1]]
+    reflected = reflected_left + samples + reflected_right
+    reflected_mid = len(reflected_left)
     for factor in _tau_factors(len(samples)):
         tau = factor * sample_period_s
         second = [
@@ -230,9 +259,28 @@ def stability_metrics(phase_ns: Sequence[float], sample_period_s: float) -> dict
         ]
         if second:
             adev = math.sqrt(sum(value * value for value in second) / (2.0 * len(second))) * 1e-9 / tau
-            result["adev"].append(
-                {"tau_s": tau, "value": adev, "pairs": len(second), "confidence": min(0.99, 1.0 - 1.0 / math.sqrt(len(second) + 1))}
+            result["adev"].append(_stability_point(tau, adev, len(second)))
+            if factor == 1:
+                result["pdev"].append(_stability_point(tau, adev, len(second)))
+        if factor > 1 and length - 2 * factor > 0:
+            parabolic_terms = []
+            midpoint = (factor - 1.0) / 2.0
+            for index in range(length - 2 * factor):
+                weighted = sum(
+                    (midpoint - inner)
+                    * (samples[index + inner] - samples[index + factor + inner])
+                    for inner in range(factor)
+                )
+                parabolic_terms.append(weighted)
+            pdev = (
+                math.sqrt(
+                    72.0
+                    * sum(value * value for value in parabolic_terms)
+                    / (len(parabolic_terms) * factor**4 * tau**2)
+                )
+                * 1e-9
             )
+            result["pdev"].append(_stability_point(tau, pdev, len(parabolic_terms)))
         if len(samples) >= 3 * factor:
             modified_terms = [
                 sum(
@@ -249,12 +297,8 @@ def stability_metrics(phase_ns: Sequence[float], sample_period_s: float) -> dict
                     * 1e-9
                     / (factor * tau)
                 )
-                result["mdev"].append(
-                    {"tau_s": tau, "value": mdev, "pairs": len(modified_terms), "confidence": min(0.99, 1.0 - 1.0 / math.sqrt(len(modified_terms) + 1))}
-                )
-                result["tdev"].append(
-                    {"tau_s": tau, "value": tau * mdev * 1e9 / math.sqrt(3.0), "pairs": len(modified_terms), "confidence": min(0.99, 1.0 - 1.0 / math.sqrt(len(modified_terms) + 1))}
-                )
+                result["mdev"].append(_stability_point(tau, mdev, len(modified_terms)))
+                result["tdev"].append(_stability_point(tau, tau * mdev * 1e9 / math.sqrt(3.0), len(modified_terms)))
             third = [
                 samples[index + 3 * factor]
                 - 3.0 * samples[index + 2 * factor]
@@ -264,36 +308,144 @@ def stability_metrics(phase_ns: Sequence[float], sample_period_s: float) -> dict
             ]
             if third:
                 hdev = math.sqrt(sum(value * value for value in third) / (6.0 * len(third))) * 1e-9 / tau
-                result["hdev"].append(
-                    {"tau_s": tau, "value": hdev, "pairs": len(third), "confidence": min(0.99, 1.0 - 1.0 / math.sqrt(len(third) + 1))}
+                result["hdev"].append(_stability_point(tau, hdev, len(third)))
+        if length >= 3:
+            total_terms = [
+                reflected[reflected_mid + 1 + index - factor]
+                - 2.0 * reflected[reflected_mid + 1 + index]
+                + reflected[reflected_mid + 1 + index + factor]
+                for index in range(length - 2)
+            ]
+            if total_terms:
+                totdev = (
+                    math.sqrt(sum(value * value for value in total_terms) / (2.0 * (length - 2)))
+                    * 1e-9
+                    / tau
                 )
+                result["totdev"].append(_stability_point(tau, totdev, len(total_terms)))
         windows = rolling_ranges(samples, factor + 1)
         if windows:
-            result["mtie"].append(
-                {"tau_s": tau, "value": max(windows), "pairs": len(windows), "confidence": None}
-            )
-        # Theo1 is useful at long tau because it uses phase pairs distributed
-        # across each 2m window instead of discarding most of the record.
-        if factor >= 2 and len(samples) > 2 * factor:
-            terms: list[float] = []
-            inner_step = max(1, math.ceil(factor / 64))
-            inner_indices = list(range(0, factor, inner_step))
-            for start in range(len(samples) - 2 * factor):
-                for inner in inner_indices:
-                    weight = 1.0 / max(0.5, factor - inner - 0.5)
-                    delta = (
+            result["mtie"].append(_stability_point(tau, max(windows), len(windows)))
+        tie_differences = [
+            samples[index + factor] - samples[index]
+            for index in range(length - factor)
+        ]
+        if tie_differences:
+            tie_rms = math.sqrt(mean([value * value for value in tie_differences]))
+            result["tierms"].append(_stability_point(tau, tie_rms, len(tie_differences)))
+        # Theo1 is defined for even m >= 10 and has effective tau=0.75*m*tau0.
+        if factor >= 10 and factor % 2 == 0 and length > factor:
+            theo_sum = 0.0
+            term_count = 0
+            half = factor // 2
+            for start in range(length - factor):
+                for delta in range(half):
+                    weight = 1.0 / (half - delta)
+                    value = (
                         samples[start]
-                        - samples[start + inner + 1]
-                        + samples[start + 2 * factor]
-                        - samples[start + 2 * factor - inner - 1]
+                        - samples[start - delta + half]
+                        + samples[start + factor]
+                        - samples[start + delta + half]
                     )
-                    terms.append(weight * delta * delta)
-            if terms:
-                theo1 = math.sqrt(sum(terms) / (0.75 * (len(samples) - 2 * factor) * len(inner_indices)))
-                result["theo1"].append(
-                    {"tau_s": tau, "value": theo1, "pairs": len(terms), "confidence": min(0.99, 1.0 - 1.0 / math.sqrt(len(terms) + 1))}
-                )
+                    theo_sum += weight * value * value
+                    term_count += 1
+            theo1 = (
+                math.sqrt(theo_sum / (0.75 * (length - factor) * tau**2))
+                * 1e-9
+            )
+            result["theo1"].append(_stability_point(0.75 * tau, theo1, term_count))
     return result
+
+
+def clock_stability_summary(
+    phase_ns: Sequence[float],
+    sample_period_s: float,
+    metrics: dict[str, list[dict[str, float | int | None]]],
+) -> dict[str, Any]:
+    samples = [float(value) for value in phase_ns if math.isfinite(value)]
+    if len(samples) < 4 or not math.isfinite(sample_period_s) or sample_period_s <= 0:
+        return {"status": "learning", "samples": len(samples), "metrics_ready": []}
+    times = [index * sample_period_s for index in range(len(samples))]
+    time_center = mean(times)
+    phase_center = mean(samples)
+    time_energy = sum((value - time_center) ** 2 for value in times)
+    frequency_bias_ppb = (
+        sum((time - time_center) * (phase - phase_center) for time, phase in zip(times, samples))
+        / max(EPSILON, time_energy)
+    )
+    frequencies_ppb = [
+        (samples[index] - samples[index - 1]) / sample_period_s
+        for index in range(1, len(samples))
+    ]
+    frequency_times = times[1:]
+    frequency_time_center = mean(frequency_times)
+    frequency_center = mean(frequencies_ppb)
+    frequency_time_energy = sum((value - frequency_time_center) ** 2 for value in frequency_times)
+    frequency_drift_ppb_s = (
+        sum(
+            (time - frequency_time_center) * (frequency - frequency_center)
+            for time, frequency in zip(frequency_times, frequencies_ppb)
+        )
+        / max(EPSILON, frequency_time_energy)
+    )
+    detrended = [
+        phase - (phase_center + frequency_bias_ppb * (time - time_center))
+        for time, phase in zip(times, samples)
+    ]
+    adev_points = metrics.get("adev", [])
+    minimum_adev = min(adev_points, key=lambda point: float(point["value"])) if adev_points else None
+    mdev_points = metrics.get("mdev", [])
+    noise_regions = []
+    noise_candidates = [
+        (-1.5, "white PM"),
+        (-1.0, "flicker PM"),
+        (-0.5, "white FM"),
+        (0.0, "flicker FM"),
+        (0.5, "random-walk FM"),
+        (1.0, "frequency drift"),
+    ]
+    for left, right in zip(mdev_points, mdev_points[1:]):
+        left_tau = float(left["tau_s"])
+        right_tau = float(right["tau_s"])
+        left_value = max(EPSILON, float(left["value"]))
+        right_value = max(EPSILON, float(right["value"]))
+        slope = math.log(right_value / left_value) / math.log(right_tau / left_tau)
+        expected_slope, label = min(noise_candidates, key=lambda item: abs(slope - item[0]))
+        noise_regions.append(
+            {
+                "tau_start_s": left_tau,
+                "tau_end_s": right_tau,
+                "slope": slope,
+                "candidate": label,
+                "expected_slope": expected_slope,
+            }
+        )
+    dominant_noise = None
+    if noise_regions:
+        counts: dict[str, int] = {}
+        for region in noise_regions:
+            candidate = str(region["candidate"])
+            counts[candidate] = counts.get(candidate, 0) + 1
+        dominant_noise = max(counts, key=counts.get)
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "record_span_s": (len(samples) - 1) * sample_period_s,
+        "metrics_ready": [name for name in STABILITY_METRIC_NAMES if metrics.get(name)],
+        "mean_phase_ns": phase_center,
+        "detrended_rms_ns": math.sqrt(mean([value * value for value in detrended])),
+        "peak_to_peak_ns": max(samples) - min(samples),
+        "frequency_bias_ppb": frequency_bias_ppb,
+        "frequency_drift_ppb_s": frequency_drift_ppb_s,
+        "minimum_adev": minimum_adev,
+        "dominant_noise_candidate": dominant_noise,
+        "noise_regions": noise_regions,
+        "interpretation": (
+            "Noise labels are local MDEV log-slope candidates, not spectral "
+            "identification. Confidence intervals require noise-dependent "
+            "equivalent degrees of freedom and are not synthesized here."
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -2524,6 +2676,7 @@ class RollingResearchEngine:
         aligned_hop_length = min((len(channel) for channel in hop_channels), default=0)
         hop_channels = [channel[-aligned_hop_length:] for channel in hop_channels] if aligned_hop_length else []
         stability = stability_metrics(endpoint_series, period)
+        stability_summary = clock_stability_summary(endpoint_series, period, stability)
         changes = bayesian_change_points(endpoint_series)
         recurrence = recurrence_analysis(hop_channels)
         bifurcation = replay_bifurcation_analysis(
@@ -2629,6 +2782,7 @@ class RollingResearchEngine:
             "sample_rate_hz": sample_rate_hz,
             "endpoint": endpoint,
             "stability": stability,
+            "stability_summary": stability_summary,
             "fusion": factor_graph_fusion(node_ids, observations, node_ids[0]) if node_ids else {"status": "waiting"},
             "ensemble": ensemble,
             "change_detection": changes,

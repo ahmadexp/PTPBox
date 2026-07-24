@@ -33,6 +33,55 @@ class StabilityTests(unittest.TestCase):
         self.assertTrue(all(point["value"] >= 0 for point in metrics["tdev"]))
         self.assertTrue(all(point["pairs"] > 0 for point in metrics["tdev"]))
 
+    def test_reference_vector_matches_clock_stability_definitions(self) -> None:
+        phase = [
+            13.0 * math.sin(index * 0.19)
+            + 0.08 * index * index
+            - 1.7 * index
+            + 3.0 * math.cos(index * 0.071)
+            for index in range(128)
+        ]
+        metrics = RESEARCH.stability_metrics(phase, 0.5)
+        expected_at_eight_seconds = {
+            "adev": 4.91981234499e-09,
+            "mdev": 4.35037157904e-09,
+            "hdev": 3.73741242760e-09,
+            "pdev": 5.36651060117e-09,
+            "totdev": 4.42554501991e-09,
+        }
+        for metric, expected in expected_at_eight_seconds.items():
+            point = next(item for item in metrics[metric] if item["tau_s"] == 8.0)
+            self.assertAlmostEqual(expected, point["value"], delta=expected * 1e-10, msg=metric)
+            self.assertIsNone(point["confidence"])
+
+        # Theo1's first permitted octave factor is m=16. NIST SP 1065
+        # assigns it the effective averaging time 0.75*m*tau0 = 6 s.
+        self.assertAlmostEqual(6.0, metrics["theo1"][0]["tau_s"])
+        self.assertAlmostEqual(2.692152281409684e-09, metrics["theo1"][0]["value"], delta=3e-19)
+        self.assertEqual(896, metrics["theo1"][0]["pairs"])
+
+    def test_time_error_rms_is_the_rms_of_tau_spaced_phase_differences(self) -> None:
+        phase = [3.0, -1.0, 8.0, 2.0, 7.0, 12.0]
+        metrics = RESEARCH.stability_metrics(phase, 1.0)
+        point = next(item for item in metrics["tierms"] if item["tau_s"] == 2.0)
+        expected = math.sqrt(sum((phase[index + 2] - phase[index]) ** 2 for index in range(4)) / 4)
+
+        self.assertAlmostEqual(expected, point["value"])
+        self.assertEqual(4, point["pairs"])
+
+    def test_stability_summary_reports_detrended_phase_and_never_fakes_confidence(self) -> None:
+        phase = [0.04 * index * index + 3.0 * index + 7.0 * math.sin(index * 0.17) for index in range(256)]
+        metrics = RESEARCH.stability_metrics(phase, 0.5)
+        summary = RESEARCH.clock_stability_summary(phase, 0.5, metrics)
+
+        self.assertEqual("ready", summary["status"])
+        self.assertEqual(9, len(summary["metrics_ready"]))
+        self.assertAlmostEqual(127.5, summary["record_span_s"])
+        self.assertGreater(summary["detrended_rms_ns"], 0)
+        self.assertTrue(summary["noise_regions"])
+        self.assertIn("candidates", summary["interpretation"])
+        self.assertTrue(all(point["confidence"] is None for values in metrics.values() for point in values))
+
 
 class EstimationTests(unittest.TestCase):
     def test_factor_graph_fuses_direct_and_adjacent_observations(self) -> None:

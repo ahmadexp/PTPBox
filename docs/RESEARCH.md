@@ -31,20 +31,41 @@ nanosecond.
 The engine accepts equally spaced phase-error samples \(x_k\) in nanoseconds
 and evaluates power-of-two averaging factors. It returns:
 
-- overlapping Allan deviation (ADEV);
-- modified Allan deviation (MDEV);
-- time deviation (TDEV);
-- Hadamard deviation (HDEV);
+- overlapping Allan deviation (ADEV), the general two-sample stability view;
+- modified Allan deviation (MDEV), which can distinguish white from flicker
+  phase modulation through its averaging response;
+- overlapping Hadamard deviation (HDEV), which rejects linear frequency drift;
+- parabolic deviation (PDEV), a least-squares/parabolic-counter statistic with
+  improved short-\(\tau\) use of phase samples;
+- total deviation (TOTDEV), using endpoint reflection to improve long-\(\tau\)
+  use of a finite record;
+- Theo1, for improved confidence and reach at long averaging times;
+- time deviation (TDEV), derived from MDEV;
 - maximum time interval error (MTIE);
-- Theo1 for improved use of a finite record at long averaging time.
+- RMS time interval error (TIE RMS).
 
-ADEV, MDEV, and HDEV are dimensionless fractional-frequency deviations.
-TDEV, MTIE, and Theo1 are returned in nanoseconds. Every result includes its
-averaging interval and usable-pair count. The UI does not draw unsupported
-long-τ points.
+ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 are dimensionless
+fractional-frequency deviations. TDEV, MTIE, and TIE RMS are returned in
+nanoseconds. Theo1 is evaluated only for even \(m \ge 10\) and is plotted at
+the NIST effective averaging time \(\tau=0.75m\tau_0\). Every result includes
+its averaging interval and usable-term count. The UI does not draw unsupported
+long-\(\tau\) points.
+
+The workbench also reports record span, linear-detrended phase RMS,
+peak-to-peak phase, least-squares fractional-frequency bias, frequency drift,
+minimum ADEV, and local MDEV log-slope noise candidates. A slope label is a
+diagnostic candidate, not proof of one power-law noise process. Confidence
+intervals are deliberately absent: a defensible interval requires the
+noise-dependent equivalent degrees of freedom, so PTPBox does not substitute a
+pair-count heuristic.
 
 The implementation follows the definitions and reporting discipline in
-[NIST SP 1065](https://www.nist.gov/publications/handbook-frequency-stability-analysis).
+[NIST SP 1065](https://www.nist.gov/publications/handbook-frequency-stability-analysis)
+and the terminology standardized by
+[IEEE 1139-2022](https://standards.ieee.org/ieee/1139/7585/). PDEV follows the
+parabolic-variance definition introduced by Vernotte, Lenczner, Bourgeois, and
+Rubiola in [*The Parabolic Variance (PVAR), a Wavelet Variance Based on the
+Least-Square Fit*](https://members.femto-st.fr/sites/femto-st.fr.michel-lenczner/files/content/papers/VerLen2015-2.pdf).
 It is an online diagnostic implementation, not a replacement for a calibrated
 metrology package when formal uncertainty accreditation is required.
 
