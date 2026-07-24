@@ -4,6 +4,11 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added one-click PNG capture to every graph panel and a dedicated Graph Album
+  with full-size previews, downloads, deletion, storage totals, and explicit
+  host-versus-browser provenance. The agent persists shared captures with
+  validated image limits and falls back to IndexedDB when the appliance is
+  unreachable.
 - Added the Cascade Dynamics Observatory: sliding clock/composite stability
   maps; Welch cascade gain, coherence, and spatial modes; multiresolution
   coherent bands; hybrid servo and Kalman consistency diagnostics;

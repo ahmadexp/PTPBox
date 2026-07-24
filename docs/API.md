@@ -645,6 +645,33 @@ invoked. The agent invokes the installed helper through `sudo -n`. Unsupported
 actions return `400`; missing integration returns `503`; lifecycle conflicts
 return `409`.
 
+## Graph album
+
+### `GET /api/album`
+
+Returns the newest-first shared capture manifest, capture count, total stored
+bytes, and storage provenance. Image bytes are not embedded in this response.
+
+### `POST /api/album`
+
+Stores one graph capture. The request contains a PNG data URL plus its title,
+Observatory section, graph identifier, capture timestamp, pixel dimensions,
+and optional scalar metadata. The agent verifies the PNG signature, rejects
+malformed base64, limits decoded images to 8 MiB and 20,000 pixels per
+dimension, and retains at most 500 captures.
+
+### `GET /api/album/<capture-id>.png`
+
+Returns the validated PNG. Add `?download=1` for an attachment response. Capture
+identifiers are strict server-generated tokens; filesystem paths are never
+accepted.
+
+### `DELETE /api/album/<capture-id>`
+
+Deletes the selected image and updates the manifest atomically. Album data is
+stored under `PTPBOX_ALBUM_DIR`, which defaults to
+`PTPBOX_STATE_DIR/album`.
+
 ## Static application
 
 All other GET paths are resolved beneath `PTPBOX_WEB_ROOT`. Unknown client-side

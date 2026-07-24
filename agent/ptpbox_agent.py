@@ -10,10 +10,13 @@ integration has been installed.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import ctypes
 import errno
 import fcntl
 import json
+import math
 import mimetypes
 import os
 import re
@@ -25,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
@@ -55,6 +59,7 @@ FAULT_REQUEST_FILE = STATE_DIR / "fault-request.json"
 FAULT_STATE_FILE = Path(os.environ.get("PTPBOX_FAULT_STATE", "/run/ptpbox/fault-state.json"))
 IDENTIFICATION_REQUEST_FILE = STATE_DIR / "identification-request.json"
 IDENTIFICATION_STATE_FILE = Path(os.environ.get("PTPBOX_IDENTIFICATION_STATE", "/run/ptpbox/identification-state.json"))
+ALBUM_DIR = Path(os.environ.get("PTPBOX_ALBUM_DIR", STATE_DIR / "album"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
@@ -64,6 +69,9 @@ PHC_HISTORY_MAX_SAMPLES = 7200
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
 RESEARCH_CACHE_SECONDS = max(1.0, float(os.environ.get("PTPBOX_RESEARCH_CACHE_SECONDS", "10")))
+ALBUM_REQUEST_MAX_BYTES = 12_000_000
+ALBUM_MAX_IMAGE_BYTES = 8_000_000
+ALBUM_MAX_ITEMS = 500
 SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"}
 LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
 LOG_PATTERN = re.compile(
@@ -201,6 +209,7 @@ _CAPABILITY_CACHE: tuple[float, dict[str, Any]] = (0.0, {})
 _RESEARCH_SNAPSHOT_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
 _RESEARCH_SNAPSHOT_REFRESHING: set[int] = set()
 _RESEARCH_SNAPSHOT_CONDITION = threading.Condition()
+_ALBUM_LOCK = threading.RLock()
 
 
 @dataclass
@@ -2119,7 +2128,7 @@ def status() -> dict[str, Any]:
         "identification": load_json(IDENTIFICATION_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.5.1",
+        "agent_version": "2.6.0",
         "timestamp": time.time(),
     }
 
@@ -2158,13 +2167,171 @@ def fault_expiry_loop(stop: threading.Event) -> None:
         control("fault")
 
 
+def _album_manifest_file() -> Path:
+    return ALBUM_DIR / "index.json"
+
+
+def _album_identifier(value: object) -> str | None:
+    identifier = str(value or "")
+    return identifier if re.fullmatch(r"shot-\d{13}-[0-9a-f]{8}", identifier) else None
+
+
+def _album_items_locked() -> list[dict[str, Any]]:
+    manifest = load_json(_album_manifest_file(), {"items": []})
+    raw_items = manifest.get("items", []) if isinstance(manifest, dict) else []
+    items: list[dict[str, Any]] = []
+    for raw in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        identifier = _album_identifier(raw.get("id"))
+        if not identifier or not (ALBUM_DIR / f"{identifier}.png").is_file():
+            continue
+        item = dict(raw)
+        item["id"] = identifier
+        item["image_url"] = f"/api/album/{identifier}.png"
+        items.append(item)
+    return sorted(items, key=lambda item: float(item.get("captured_at") or 0.0), reverse=True)
+
+
+def album_snapshot() -> dict[str, Any]:
+    with _ALBUM_LOCK:
+        items = _album_items_locked()
+    return {
+        "items": items,
+        "count": len(items),
+        "storage_bytes": sum(int(item.get("bytes") or 0) for item in items),
+        "storage": "ptpbox-host",
+        "timestamp": time.time(),
+    }
+
+
+def _write_album_manifest_locked(items: list[dict[str, Any]]) -> None:
+    ALBUM_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = _album_manifest_file()
+    pending = manifest.with_suffix(".json.tmp")
+    persisted = [
+        {key: value for key, value in item.items() if key not in {"image_url", "storage"}}
+        for item in items
+    ]
+    pending.write_text(
+        json.dumps({"version": 1, "items": persisted}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    pending.replace(manifest)
+
+
+def save_album_capture(payload: dict[str, Any]) -> dict[str, Any]:
+    encoded = payload.get("data_url")
+    if not isinstance(encoded, str) or not encoded.startswith("data:image/png;base64,"):
+        raise ValueError("data_url must contain a base64-encoded PNG")
+    try:
+        image = base64.b64decode(encoded.partition(",")[2], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("data_url is not valid base64") from exc
+    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("capture is not a PNG image")
+    if not 64 <= len(image) <= ALBUM_MAX_IMAGE_BYTES:
+        raise ValueError(f"capture must be between 64 bytes and {ALBUM_MAX_IMAGE_BYTES} bytes")
+
+    title = str(payload.get("title") or "Untitled graph").strip()[:160]
+    section = str(payload.get("section") or "Observatory").strip()[:64]
+    graph_id = re.sub(r"[^a-z0-9-]+", "-", str(payload.get("graph_id") or title).lower()).strip("-")[:96]
+    captured_at_value = payload.get("captured_at")
+    captured_at = (
+        float(captured_at_value)
+        if isinstance(captured_at_value, (int, float)) and not isinstance(captured_at_value, bool)
+        else time.time()
+    )
+    if not math.isfinite(captured_at):
+        captured_at = time.time()
+    width_value = payload.get("width")
+    height_value = payload.get("height")
+    width = (
+        int(width_value)
+        if isinstance(width_value, (int, float))
+        and not isinstance(width_value, bool)
+        and math.isfinite(float(width_value))
+        else 0
+    )
+    height = (
+        int(height_value)
+        if isinstance(height_value, (int, float))
+        and not isinstance(height_value, bool)
+        and math.isfinite(float(height_value))
+        else 0
+    )
+    if not 1 <= width <= 20_000 or not 1 <= height <= 20_000:
+        raise ValueError("capture width and height must be between 1 and 20,000 pixels")
+    raw_metadata = payload.get("metadata")
+    metadata: dict[str, str | int | float | bool | None] = {}
+    if isinstance(raw_metadata, dict):
+        for key, value in list(raw_metadata.items())[:16]:
+            normalized_key = re.sub(r"[^a-z0-9_-]+", "_", str(key).lower()).strip("_")[:48]
+            serializable = value is None or isinstance(value, (str, int, bool))
+            serializable = serializable or (isinstance(value, float) and math.isfinite(value))
+            if normalized_key and serializable:
+                metadata[normalized_key] = value[:240] if isinstance(value, str) else value
+
+    identifier = f"shot-{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:8]}"
+    item = {
+        "id": identifier,
+        "title": title,
+        "section": section,
+        "graph_id": graph_id or "graph",
+        "captured_at": captured_at,
+        "created_at": time.time(),
+        "width": width,
+        "height": height,
+        "bytes": len(image),
+        "metadata": metadata,
+    }
+    with _ALBUM_LOCK:
+        ALBUM_DIR.mkdir(parents=True, exist_ok=True)
+        image_path = ALBUM_DIR / f"{identifier}.png"
+        pending_image = image_path.with_suffix(".png.tmp")
+        pending_image.write_bytes(image)
+        pending_image.replace(image_path)
+        items = _album_items_locked()
+        items.insert(0, item)
+        discarded = items[ALBUM_MAX_ITEMS:]
+        items = items[:ALBUM_MAX_ITEMS]
+        _write_album_manifest_locked(items)
+        for old in discarded:
+            old_identifier = _album_identifier(old.get("id"))
+            if old_identifier:
+                (ALBUM_DIR / f"{old_identifier}.png").unlink(missing_ok=True)
+    return {**item, "image_url": f"/api/album/{identifier}.png", "storage": "ptpbox-host"}
+
+
+def delete_album_capture(identifier: str) -> bool:
+    normalized = _album_identifier(identifier)
+    if not normalized:
+        return False
+    with _ALBUM_LOCK:
+        items = _album_items_locked()
+        remaining = [item for item in items if item.get("id") != normalized]
+        if len(remaining) == len(items):
+            return False
+        (ALBUM_DIR / f"{normalized}.png").unlink(missing_ok=True)
+        _write_album_manifest_locked(remaining)
+    return True
+
+
+def album_image_path(identifier: str) -> Path | None:
+    normalized = _album_identifier(identifier)
+    if not normalized:
+        return None
+    path = ALBUM_DIR / f"{normalized}.png"
+    return path if path.is_file() else None
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PTPBoxAgent/2.5.0"
+    server_version = "PTPBoxAgent/2.6.0"
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-PTPBox-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -2210,11 +2377,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self) -> dict[str, Any]:
+    def read_json(self, maximum_bytes: int = 1_000_000) -> dict[str, Any]:
         try:
-            length = min(int(self.headers.get("Content-Length", "0")), 1_000_000)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > maximum_bytes:
+                raise OverflowError
             value = json.loads(self.rfile.read(length) or b"{}")
             return value if isinstance(value, dict) else {}
+        except OverflowError:
+            raise
         except (ValueError, json.JSONDecodeError):
             return {}
 
@@ -2274,6 +2445,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"active": experiment_store().active(), "runs": experiment_store().list(100), "timestamp": time.time()})
             elif route == "/api/holdover":
                 self.send_json(holdover_session_snapshot(refresh=True))
+            elif route == "/api/album":
+                self.send_json(album_snapshot())
+            elif re.fullmatch(r"/api/album/shot-\d{13}-[0-9a-f]{8}\.png", route):
+                identifier = route.removeprefix("/api/album/").removesuffix(".png")
+                image = album_image_path(identifier)
+                if image is None:
+                    self.send_json({"error": "capture not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                download = query.get("download") == ["1"]
+                self.send_bytes(
+                    image.read_bytes(),
+                    "image/png",
+                    f"{identifier}.png" if download else None,
+                )
             elif route.startswith("/api/experiments/") and route.endswith("/export"):
                 identifier = route.removeprefix("/api/experiments/").removesuffix("/export").strip("/")
                 if not re.fullmatch(r"run-[0-9A-Za-z-]+", identifier) or not experiment_store().get(identifier):
@@ -2290,7 +2475,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
-        body = self.read_json()
+        try:
+            body = self.read_json(ALBUM_REQUEST_MAX_BYTES if route == "/api/album" else 1_000_000)
+        except OverflowError:
+            self.send_json({"error": "request body is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        if route == "/api/album":
+            try:
+                item = save_album_capture(body)
+            except (OSError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            self.send_json(item, HTTPStatus.CREATED)
+            return
         if route == "/api/config/apply":
             errors = validate_config(body)
             if errors:
@@ -2483,6 +2680,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(response, code)
             return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        route = urlparse(self.path).path
+        match = re.fullmatch(r"/api/album/(shot-\d{13}-[0-9a-f]{8})", route)
+        if not match:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        if not delete_album_capture(match.group(1)):
+            self.send_json({"error": "capture not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, "id": match.group(1), "timestamp": time.time()})
 
 
 def main() -> None:

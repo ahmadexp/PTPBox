@@ -29,6 +29,8 @@ and a separate read-only PHC comparison pipeline. The Precision Observatory is
 the control room: live topology, raw timing traces, per-hop error, selectable
 servos, measured holdover, hardware-backed PPS/`ts2phc` experiments, hardware
 inventory, notifications, and guarded start/stop control.
+Every graph can also be captured as a timestamped PNG and collected in a
+shared, accessible Observatory album.
 
 The reference system is not a simulation: seven NVIDIA ConnectX-6 Dx adapters
 provide fourteen 100G timing ports, with a separate Intel X550 management link.
@@ -65,6 +67,20 @@ frequency adjustment, comparison error bound, servo type, and holdover drift.
 > Every control-room screenshot in this README was captured from the running
 > seven-card reference host. Values are live and will change from sample to
 > sample. The traces are not cosmetically smoothed.
+
+## Capture graph evidence
+
+Every graph panel has a **Capture** action. A capture preserves the complete
+instrument panel—not just its plotted pixels—so the graph title, evidence
+labels, operating mode, and timestamp travel with the image. Captures are
+written to the PTPBox host and appear for every connected operator in the
+**Album** page, where they can be opened full-size, downloaded as PNG files, or
+deleted.
+
+When a hosted or development UI cannot reach the appliance album, the same
+action falls back to browser-local IndexedDB and labels the image **This
+browser**. Host and local captures are presented together in chronological
+order without confusing one storage location for the other.
 
 ## Watch the cascade as a multi-pendulum
 
@@ -305,6 +321,7 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
 | **Notifications & event stream** | Follow measurement health, lock state, active servo mix, threshold events, and operator actions. |
 | **Command palette** | Press <kbd>⌘ K</kbd> or <kbd>Ctrl K</kbd> to search every observatory page, clock, measurement surface, and live control, then open it without leaving the keyboard. |
+| **Graph album** | Capture any graph as an evidence-rich PNG, review host-shared and browser-local images together, open a full-size preview, download, or delete. |
 | **Demo mode** | Use an explicitly labeled deterministic fallback only when the live agent is unavailable. |
 
 ## Product tour

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "html-to-image": "^1.11.13",
     "lucide-react": "^0.468.0",
     "next": "16.2.11",
     "react": "19.2.7",

@@ -14,6 +14,7 @@ import {
   Download,
   FlaskConical,
   Gauge,
+  Images,
   Info,
   LayoutDashboard,
   ListFilter,
@@ -43,8 +44,9 @@ import {
   type DynamicsPayload,
   type IdentificationState,
 } from "./cascade-dynamics";
+import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
@@ -787,6 +789,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   Holdover: { title: "Holdover chamber", description: "Synchronize, release clock discipline, and measure raw free-running PHC wander against the captured release baseline." },
   Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
   Analytics: { title: "Timing analytics", description: "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." },
+  Album: { title: "Graph album", description: "Review, download, and manage timestamped images captured from Observatory graphs." },
   Experiments: { title: "Experiments", description: "Design, run, and compare repeatable servo response tests." },
   Interfaces: { title: "Interfaces & PHCs", description: "Map physical ports, PHCs, namespaces, and timestamping capability." },
   Configuration: { title: "Configuration", description: "Shape protocol, servo, PPS I/O, authentication, and ts2phc behavior with guarded, reviewable changes." },
@@ -3690,6 +3693,7 @@ export default function PTPBoxDashboard() {
   const [commandIndex, setCommandIndex] = useState(0);
   const [pendulumAutoZero, setPendulumAutoZero] = useState(true);
   const [pendulumZeroState, setPendulumZeroState] = useState<PendulumZeroState>({ at: null, baselines: {} });
+  const [albumRevision, setAlbumRevision] = useState(0);
   const tickRef = useRef(0);
   const latestTelemetryAtRef = useRef(0);
   const latestPhcAtRef = useRef(0);
@@ -4308,6 +4312,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
+    { id: "nav-album", group: "Navigate", label: "Graph album", description: "Captured graph images, downloads, and evidence frames", keywords: "photo picture screenshot capture png gallery archive", section: "Album", icon: Images },
     { id: "nav-experiments", group: "Navigate", label: "Experiments", description: "Step, wander, holdover, and gain-sweep recipes", keywords: "test run servo", section: "Experiments", icon: FlaskConical },
     { id: "nav-interfaces", group: "Navigate", label: "Interfaces & PHCs", description: "NIC, namespace, link, and timestamp inventory", keywords: "hardware ports network nic", section: "Interfaces", icon: Cable },
     { id: "nav-config", group: "Navigate", label: "Configuration", description: "PTP profile, servo, PPS I/O, ts2phc, and safety controls", keywords: "settings tune apply pulse", section: "Configuration", icon: SlidersHorizontal },
@@ -4689,6 +4694,7 @@ export default function PTPBoxDashboard() {
     { label: "Holdover", icon: TimerReset, badge: holdover?.session?.phase === "holdover" ? "LIVE" : holdover?.session?.phase === "synchronizing" ? "ARM" : undefined },
     { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
+    { label: "Album", icon: Images },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
     { label: "Configuration", icon: SlidersHorizontal },
@@ -4778,7 +4784,7 @@ export default function PTPBoxDashboard() {
               <p>{SECTION_META[section].description}</p>
             </div>
             <div className="heading-actions">
-              <button className="secondary-button" type="button" onClick={() => setToast("Snapshot saved to run 024")}><Download size={15} /> Snapshot</button>
+              <button className="secondary-button" type="button" onClick={() => setSection("Album")}><Images size={15} /> Album</button>
               <button className={`live-control ${paused ? "paused" : ""}`} type="button" onClick={() => setPaused((value) => !value)}>{paused ? <Play size={14} /> : <Pause size={14} />} {paused ? "Resume" : connection === "simulation" ? "Simulating" : "Raw stream"}</button>
             </div>
           </div>
@@ -5035,6 +5041,10 @@ export default function PTPBoxDashboard() {
             </div>
           )}
 
+          {section === "Album" && (
+            <GraphAlbumView agentBase={agentBaseUrl()} revision={albumRevision} />
+          )}
+
           {section === "Experiments" && (
             <div className="experiments-layout">
               <section className="experiment-hero">
@@ -5239,6 +5249,19 @@ export default function PTPBoxDashboard() {
           )}
         </div>
       </main>
+
+      {section !== "Album" && (
+        <GraphCaptureControls
+          section={section}
+          dataMode={dataModeLabel}
+          agentBase={agentBaseUrl()}
+          onCaptured={(item: GraphAlbumItem) => {
+            setAlbumRevision((value) => value + 1);
+            setToast(`${item.title} saved to ${item.storage === "ptpbox-host" ? "the PTPBox album" : "this browser's album"}`);
+          }}
+          onError={(message) => setToast(`Capture failed: ${message}`)}
+        />
+      )}
 
       {commandOpen && (
         <div className="command-layer" role="dialog" aria-modal="true" aria-labelledby="command-title">

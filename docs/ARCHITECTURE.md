@@ -24,6 +24,7 @@ The React application in `app/` is a client-side instrument UI. It renders:
   and bounded fault injection;
 - interface/PHC inventory;
 - guarded configuration review;
+- evidence-rich graph capture and a host-shared/browser-local image album;
 - event and session summaries.
 
 It probes `http://<browser-host>:8090/api/status`. A query-string override is
@@ -61,7 +62,9 @@ operator account and reads:
   configuration, raw cross-timestamp samples, and event ledger.
 
 It also serves the standalone application and stages JSON configuration under
-`PTPBOX_STATE_DIR`.
+`PTPBOX_STATE_DIR`. Graph captures are validated PNG files stored beside an
+atomic album manifest under `PTPBOX_ALBUM_DIR`. The browser uses IndexedDB only
+as an explicitly labeled fallback when it cannot reach that shared host album.
 
 The browser requests an initial raw window and then polls incrementally with a
 `since` cursor. Direct PHC comparisons and LinuxPTP diagnostics retain their
@@ -279,7 +282,7 @@ sequenceDiagram
 
 | Location | Owner | Lifetime | Contents |
 | --- | --- | --- | --- |
-| `PTPBOX_ROOT/runtime` | operator | durable | staged config, servo/fault requests, and `experiments.sqlite3` |
+| `PTPBOX_ROOT/runtime` | operator | durable | staged config, servo/fault requests, `experiments.sqlite3`, and the graph album |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
 | `/run/ptpbox` | root | boot | managed process IDs, servo and bounded-identification state, estimator snapshots, raw path events, faults, and read-only PHC/PPS map |

@@ -308,6 +308,7 @@ preserves topology data, logs, captures, and the source checkout.
 | `PTPBOX_USER` | invoking sudo user | Account that runs the web agent |
 | `PTPBOX_ROOT` | operator home + `/PTPBox` | Log, runtime-config, and experiment root |
 | `PTPBOX_STATE_DIR` | `$PTPBOX_ROOT/runtime` | Staged config and experiment state |
+| `PTPBOX_ALBUM_DIR` | `$PTPBOX_STATE_DIR/album` | Shared graph PNGs and their atomic manifest |
 | `PTPBOX_WEB_ROOT` | agent-local `static` | Standalone web bundle |
 | `PTPBOX_BIND` | `0.0.0.0` | Agent listen address |
 | `PTPBOX_PORT` | `8090` | Agent listen port |

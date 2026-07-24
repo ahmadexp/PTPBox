@@ -29,8 +29,9 @@ test("server-renders the PTPBox product shell", async () => {
 });
 
 test("ships the live-agent and standalone-host surfaces", async () => {
-  const [page, layout, agent, packageJson, standalone] = await Promise.all([
+  const [page, album, layout, agent, packageJson, standalone] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/graph-album.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../agent/ptpbox_agent.py", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -118,6 +119,12 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /\/api\/research/);
   assert.match(page, /\/api\/experiments/);
   assert.match(page, /\/api\/fault\/control/);
+  assert.match(page, /Graph album/);
+  assert.match(album, /Save .* to album/);
+  assert.match(album, /PTPBOX HOST/);
+  assert.match(album, /THIS BROWSER/);
+  assert.match(album, /Download PNG/);
+  assert.match(album, /indexedDB/);
   assert.match(layout, /PTPBox — Precision Time Lab/);
   assert.match(agent, /\/api\/telemetry/);
   assert.match(agent, /\/api\/config\/apply/);
@@ -129,6 +136,7 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(agent, /\/api\/experiments/);
   assert.match(agent, /\/api\/holdover/);
   assert.match(agent, /\/api\/fault\/control/);
+  assert.match(agent, /\/api\/album/);
   assert.match(packageJson, /build:standalone/);
   assert.match(standalone, /PTPBox — Precision Time Lab/);
 });

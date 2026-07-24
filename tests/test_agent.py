@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import json
 import os
 import sys
@@ -665,6 +666,47 @@ class ResearchSnapshotCacheTests(unittest.TestCase):
         self.assertTrue(second["analysis_cache"]["request_coalescing"])
         self.assertFalse(second["analysis_cache"]["refreshing"])
         self.assertLess(second["analysis_cache"]["age_s"], AGENT.RESEARCH_CACHE_SECONDS)
+
+
+class GraphAlbumTests(unittest.TestCase):
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def test_saves_lists_and_deletes_a_png_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(AGENT, "ALBUM_DIR", Path(temporary)):
+            item = AGENT.save_album_capture(
+                {
+                    "title": "Cascade amplification",
+                    "section": "Cascade dynamics",
+                    "graph_id": "cascade-amplification",
+                    "captured_at": 1_784_867_000.0,
+                    "width": 1280,
+                    "height": 720,
+                    "metadata": {"data_mode": "LIVE", "nested": {"ignored": True}},
+                    "data_url": f"data:image/png;base64,{base64.b64encode(self.PNG).decode()}",
+                }
+            )
+
+            snapshot = AGENT.album_snapshot()
+            self.assertEqual(1, snapshot["count"])
+            self.assertEqual("Cascade amplification", snapshot["items"][0]["title"])
+            self.assertEqual("LIVE", snapshot["items"][0]["metadata"]["data_mode"])
+            self.assertNotIn("nested", snapshot["items"][0]["metadata"])
+            self.assertEqual(self.PNG, AGENT.album_image_path(item["id"]).read_bytes())
+            self.assertTrue(AGENT.delete_album_capture(item["id"]))
+            self.assertEqual(0, AGENT.album_snapshot()["count"])
+
+    def test_rejects_non_png_capture_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(AGENT, "ALBUM_DIR", Path(temporary)):
+            with self.assertRaisesRegex(ValueError, "not a PNG"):
+                AGENT.save_album_capture(
+                    {
+                        "width": 100,
+                        "height": 100,
+                        "data_url": f"data:image/png;base64,{base64.b64encode(b'not a png' * 10).decode()}",
+                    }
+                )
 
 
 if __name__ == "__main__":
