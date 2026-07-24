@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,6 +66,59 @@ class KalmanServoTests(unittest.TestCase):
         servo = KALMAN.KalmanServo(1.0, 1.0, 0.1, 50.0, 100.0)
         status = servo.update(1_000_000.0, 1.0)
         self.assertEqual(50.0, status["correction_ppb"])
+
+    def test_identification_excitation_is_deterministic_bounded_and_targeted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "identification.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "target": "BC4",
+                        "amplitude_ppb": 30.0,
+                        "frequencies_hz": [0.01, 0.04, 0.09],
+                        "started_at": 100.0,
+                        "expires_at": 400.0,
+                        "offset_limit_ns": 5_000.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            first, state = KALMAN.identification_excitation(path, "BC4", 20.0, 135.0)
+            repeated, _state = KALMAN.identification_excitation(path, "BC4", 20.0, 135.0)
+            wrong_target, _state = KALMAN.identification_excitation(path, "BC3", 20.0, 135.0)
+
+            self.assertEqual(first, repeated)
+            self.assertLessEqual(abs(first), 30.0)
+            self.assertEqual(0.0, wrong_target)
+            self.assertTrue(state["enabled"])
+
+    def test_identification_excitation_aborts_before_applying_an_unsafe_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "identification.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "target": "BC4",
+                        "amplitude_ppb": 30.0,
+                        "frequencies_hz": [0.02],
+                        "started_at": 100.0,
+                        "expires_at": 400.0,
+                        "offset_limit_ns": 1_000.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            correction, state = KALMAN.identification_excitation(path, "BC4", 1_001.0, 140.0)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(0.0, correction)
+            self.assertFalse(state["enabled"])
+            self.assertFalse(persisted["enabled"])
+            self.assertIn("exceeded", persisted["reason"])
 
 
 if __name__ == "__main__":

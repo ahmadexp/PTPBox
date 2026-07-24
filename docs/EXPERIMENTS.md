@@ -69,6 +69,26 @@ RBF Gaussian-process surrogate, and selects additional candidates with expected
 improvement. The winning gain pair is only staged for review. The run result
 records `live_changes: 0`.
 
+### Bounded closed-loop identification
+
+Use **Cascade dynamics → Controlled identification** when you need a physical
+frequency response rather than an observational ARX fit:
+
+1. apply classic Kalman, adaptive Kalman, or IMM to the target clock and wait
+   for stable lock;
+2. choose one to eight tones below 45% of the applied sample rate;
+3. begin with a 10–25 ppb peak, 180 seconds, and a 5 µs raw-offset abort limit;
+4. start a durable run before arming the multisine when immutable raw capture
+   is required; and
+5. stop if the coherence-qualified bins do not cover the servo band, then
+   lengthen the run or adjust tones rather than trusting interpolated margins.
+
+The correction is injected after the PTPBox servo and is automatically bounded,
+expired, and aborted on excessive raw offset. Compare plant gain/phase,
+\(S/T/KS\), the identified Nyquist curve, balanced disk margin, and the
+plant-scatter uncertainty envelope only at bins that pass both coherence gates.
+Do not run active identification on a production timing path.
+
 ### Regime-transition trial
 
 Use the one-hop netem chamber to add a bounded delay, jitter, or loss condition
@@ -112,6 +132,13 @@ servo behavior.
   different sensitivity to phase modulation, white phase noise, and linear
   frequency drift.
 - **Theo1:** extends the useful long-τ region of a finite phase record.
+- **FTU / ADEVS:** first-difference frequency uncertainty and drift-sensitive
+  residual stability; treat direct endpoint results as clock-plus-transfer
+  composite until an independent residual exists.
+- **Dynamic stability atlas:** shows whether any of the above changes through
+  the record rather than assuming stationarity.
+- **Cross-spectral coherence/gain:** localizes shared and amplified motion by
+  frequency and hop; passive gain is not formal string stability.
 
 The Metrology workbench computes all six families at power-of-two averaging
 intervals and reports the usable-pair count. TDEV/MTIE/Theo1 retain nanosecond

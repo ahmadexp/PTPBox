@@ -65,7 +65,7 @@ and whether privileged lifecycle control is installed.
     "certification": false
   },
   "observer_only": false,
-  "agent_version": "2.4.0"
+  "agent_version": "2.5.0"
 }
 ```
 
@@ -465,6 +465,19 @@ The main objects are:
 | --- | --- |
 | `stability` | Endpoint ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 fractional-frequency curves plus TDEV, MTIE, and TIE RMS nanosecond curves, with τ and usable-term counts |
 | `stability_summary` | Record span, detrended RMS, peak-to-peak phase, frequency bias/drift, minimum ADEV, and explicitly qualified local MDEV noise-slope candidates |
+| `dynamics.transfer_noise` | TIE RMS, FTU, and ADEVS with residual qualification and provenance; direct PHC differences are marked clock-plus-transfer composite |
+| `dynamics.dynamic_stability` | Sliding-window clock ADEV/MDEV and composite or qualified-residual FTU/ADEVS cells |
+| `dynamics.spectral_cascade` | Welch PSD/CSD, per-hop/cumulative gain, coherence, phase, and dominant spatial modes; passive results explicitly set `formal_string_stability: false` |
+| `dynamics.multiresolution_modes` | Log-frequency coherent-mode bands, energy shares, and spatial loadings |
+| `dynamics.hybrid_servo` | Observed mode shares, transition probabilities, dwell statistics, correction/offset RMS, and local phase poles |
+| `dynamics.estimator_consistency` | Kalman NIS, 95% inclusion, innovation lag-one correlation, acceptance share, and consistency screen |
+| `dynamics.identifiability` | Normalized ARX information eigenvalues, rank, condition number, input variance, and persistent-excitation flag |
+| `dynamics.active_identification` | Instrumental plant/open-loop estimates, S/T/KS, Nyquist points, coherence gates, balanced disk-margin screen, and uncertainty envelope |
+| `dynamics.holdover_risk` | Phase/frequency/drift forecast tube and 5% time-to-mask crossings |
+| `dynamics.clock_decomposition` | N-cornered individual-clock variance screen with independent-holdover eligibility gate |
+| `dynamics.timing_oam` | cTE, dTE, P95/max/peak-to-peak TE, hop accumulation, and operator reference masks |
+| `dynamics.path_regimes` | Nearest-in-time paired Sync/Delay round-trip and directional-imbalance regimes; never labeled calibrated asymmetry |
+| `dynamics.nonlinear` | Bicoherence, delay-embedding Betti curves, predictive variance-reduction links, and multiscale sample entropy |
 | `fusion` | Fused offsets, 1σ uncertainty, residuals, χ², and degrees of freedom |
 | `ensemble` | Covariance-regularized clock weights, virtual offset, and 1σ |
 | `error_budget` | Per-clock components and covariance-aware cascade uncertainty |
@@ -487,6 +500,40 @@ No research endpoint adjusts a clock.
 Adaptive-Kalman and IMM controller state is returned per clock in
 `GET /api/telemetry` under `clocks[].kalman`, because it is the state of the
 actual selected servo rather than a parallel research-only estimate.
+
+### `POST /api/identification/control`
+
+Starts or stops one bounded independent multisine on a downstream
+Kalman-family servo. Starting requires a currently enabled `kalman`,
+`adaptive-kalman`, or `imm` controller.
+
+```json
+{
+  "target": "BC7",
+  "enabled": true,
+  "amplitude_ppb": 25,
+  "duration_s": 180,
+  "offset_limit_ns": 5000,
+  "frequencies_hz": [0.01, 0.025, 0.05, 0.1]
+}
+```
+
+Limits are 0.1–500 ppb, 30–900 seconds, 100–100,000 ns, and one to eight
+frequencies between 0.002 Hz and 45% of the configured PHC sample rate. The
+root controller repeats the validation before arming the worker. The worker
+automatically disables excitation when the duration expires or the raw
+LinuxPTP master offset crosses the abort limit.
+
+Stop the active instrument with:
+
+```json
+{ "target": "BC7", "enabled": false }
+```
+
+`GET /api/status` returns the persisted `identification` state. Every
+instrumented Kalman snapshot records the base correction,
+`excitation_ppb`, `applied_correction_ppb`, active flag, and safety outcome so
+`GET /api/research` can evaluate coherence without reconstructing the command.
 
 ### `GET /api/capabilities?refresh=1`
 

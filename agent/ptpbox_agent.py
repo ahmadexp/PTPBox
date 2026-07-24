@@ -34,7 +34,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ptpbox_research import ExperimentStore, RollingResearchEngine  # noqa: E402
+from ptpbox_research import ExperimentStore, RollingResearchEngine, path_regime_analysis  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -53,6 +53,8 @@ PPS_PROCESS_FILE = Path(os.environ.get("PTPBOX_PROCESS_STATE", "/run/ptpbox/proc
 PATH_EVENT_FILE = Path(os.environ.get("PTPBOX_PATH_EVENTS", "/run/ptpbox/path-events.jsonl"))
 FAULT_REQUEST_FILE = STATE_DIR / "fault-request.json"
 FAULT_STATE_FILE = Path(os.environ.get("PTPBOX_FAULT_STATE", "/run/ptpbox/fault-state.json"))
+IDENTIFICATION_REQUEST_FILE = STATE_DIR / "identification-request.json"
+IDENTIFICATION_STATE_FILE = Path(os.environ.get("PTPBOX_IDENTIFICATION_STATE", "/run/ptpbox/identification-state.json"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
 TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
@@ -1053,6 +1055,53 @@ def load_kalman_status(name: str, now: float | None = None) -> dict[str, Any] | 
     return result
 
 
+def load_kalman_history(name: str, limit: int = 2048) -> list[dict[str, Any]]:
+    """Read raw per-update Kalman records without using UI poll cadence."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return []
+    candidates = [
+        LOG_DIR / f"{name}-KALMAN.log",
+        LOG_DIR / f"{name}-ADAPTIVE-KALMAN.log",
+        LOG_DIR / f"{name}-IMM.log",
+    ]
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        return []
+    path = max(existing, key=lambda item: item.stat().st_mtime)
+    requested = max(1, min(4096, int(limit)))
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - min(4_000_000, max(128_000, requested * 1_500)))
+            handle.seek(start)
+            text = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    marker = text.rfind("PTPBox session start")
+    if marker >= 0:
+        text = text[marker:]
+    lines = text.splitlines()
+    if start and lines:
+        lines = lines[1:]
+    history = []
+    for line in lines:
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(item, dict)
+            and item.get("node") == name
+            and item.get("servo") in {"kalman", "adaptive-kalman", "imm"}
+            and isinstance(item.get("observed_at"), (int, float))
+        ):
+            history.append(item)
+    return history[-requested:]
+
+
 def display_path(path: Path) -> str:
     for base in (LOG_DIR, ROOT):
         try:
@@ -1747,21 +1796,44 @@ def research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
     endpoint_id = str(telemetry_payload["clocks"][-1].get("id")) if telemetry_payload["clocks"] else ""
     control_nodes = (telemetry_payload.get("servo_control") or {}).get("nodes", {})
     active_controller = str((control_nodes.get(endpoint_id) or {}).get("type") or "pi")
+    receiver_controls = [
+        control_nodes.get(str(clock.get("id"))) or {}
+        for clock in telemetry_payload.get("clocks", [])[1:]
+    ]
+    independent_clock_mode = bool(receiver_controls) and all(
+        item.get("enabled") is False
+        for item in receiver_controls
+    )
+    independent_clock_reason = (
+        "all downstream PHCs are in measured holdover"
+        if independent_clock_mode
+        else "N-cornered separation is gated until all downstream PHCs are independently free-running"
+    )
+    kalman_histories = {
+        str(clock.get("id")): load_kalman_history(str(clock.get("id")))
+        for clock in telemetry_payload.get("clocks", [])[1:]
+        if (control_nodes.get(str(clock.get("id"))) or {}).get("type") in {"kalman", "adaptive-kalman", "imm"}
+    }
     snapshot = RESEARCH_ENGINE.snapshot(
         telemetry_payload["clocks"],
         float(telemetry_payload.get("phc_sample_rate_hz") or configured_phc_sample_rate_hz()),
         float(servo.get("kp", 0.7)),
         float(servo.get("ki", 0.3)),
         active_controller,
+        independent_clock_mode,
+        independent_clock_reason,
+        kalman_histories,
     )
+    path_events = raw_path_events(128)
+    snapshot.setdefault("dynamics", {})["path_regimes"] = path_regime_analysis(path_events)
     snapshot.update(
         {
             "mode": telemetry_payload["phc_mode"],
             "capabilities": hardware_capabilities(),
             "profiles": profile_compliance(config_value),
             "path_microscope": {
-                "events": raw_path_events(128),
-                "mode": "live" if raw_path_events(1) else "waiting",
+                "events": path_events,
+                "mode": "live" if path_events else "waiting",
                 "provenance": "LinuxPTP slave-event-monitor TLVs; no exchange timestamps are synthesized",
             },
             "experiments": experiment_store().list(20),
@@ -1961,15 +2033,16 @@ def status() -> dict[str, Any]:
         "holdover": holdover_session_snapshot(refresh=False, include_series=False),
         "profile_compliance": profile_compliance(),
         "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
+        "identification": load_json(IDENTIFICATION_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.4.0",
+        "agent_version": "2.5.0",
         "timestamp": time.time(),
     }
 
 
 def control(action: str) -> tuple[int, dict[str, Any]]:
-    if action not in {"start", "stop", "restart", "status", "servo", "fault"}:
+    if action not in {"start", "stop", "restart", "status", "servo", "fault", "identify"}:
         return HTTPStatus.BAD_REQUEST, {"error": "unsupported control action"}
     if not CONTROL.exists():
         return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "privileged control helper is not installed", "observer_only": True}
@@ -2003,7 +2076,7 @@ def fault_expiry_loop(stop: threading.Event) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PTPBoxAgent/2.4.0"
+    server_version = "PTPBoxAgent/2.5.0"
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
@@ -2245,6 +2318,85 @@ class Handler(BaseHTTPRequestHandler):
             code, response = control("fault")
             if code == HTTPStatus.OK:
                 experiment_store().event("fault", "warning" if enabled else "info", f"{'Applied' if enabled else 'Cleared'} guarded netem on {target}", normalized)
+            self.send_json(response, code)
+            return
+        if route == "/api/identification/control":
+            target = body.get("target")
+            enabled = body.get("enabled")
+            receiver_ids = [node["name"] for node in topology_nodes()[1:]]
+            if target not in receiver_ids or not isinstance(enabled, bool):
+                self.send_json(
+                    {"error": "target must be a downstream clock and enabled must be boolean"},
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
+                return
+            control_node = (load_servo_state().get("nodes", {}) or {}).get(str(target), {})
+            if enabled and (
+                not isinstance(control_node, dict)
+                or control_node.get("enabled") is not True
+                or control_node.get("type") not in {"kalman", "adaptive-kalman", "imm"}
+            ):
+                self.send_json(
+                    {"error": "active identification requires a running PTPBox Kalman, adaptive-Kalman, or IMM servo"},
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            normalized: dict[str, Any] = {"target": target, "enabled": enabled}
+            if enabled:
+                amplitude = body.get("amplitude_ppb", 25.0)
+                duration = body.get("duration_s", 180.0)
+                offset_limit = body.get("offset_limit_ns", 5_000.0)
+                frequencies = body.get("frequencies_hz", [0.01, 0.025, 0.05, 0.1])
+                if (
+                    isinstance(amplitude, bool)
+                    or not isinstance(amplitude, (int, float))
+                    or not 0.1 <= float(amplitude) <= 500.0
+                    or isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not 30.0 <= float(duration) <= 900.0
+                    or isinstance(offset_limit, bool)
+                    or not isinstance(offset_limit, (int, float))
+                    or not 100.0 <= float(offset_limit) <= 100_000.0
+                    or not isinstance(frequencies, list)
+                    or not 1 <= len(frequencies) <= 8
+                ):
+                    self.send_json(
+                        {"error": "amplitude, duration, offset limit, or frequency list is outside the guarded range"},
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                    )
+                    return
+                nyquist_limit = 0.45 * configured_phc_sample_rate_hz()
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not 0.002 <= float(value) <= nyquist_limit
+                    for value in frequencies
+                ):
+                    self.send_json(
+                        {"error": f"every excitation frequency must be between 0.002 Hz and {nyquist_limit:.4f} Hz"},
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                    )
+                    return
+                normalized.update(
+                    {
+                        "amplitude_ppb": float(amplitude),
+                        "duration_s": float(duration),
+                        "offset_limit_ns": float(offset_limit),
+                        "frequencies_hz": sorted({float(value) for value in frequencies}),
+                    }
+                )
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            pending = IDENTIFICATION_REQUEST_FILE.with_suffix(".json.tmp")
+            pending.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
+            pending.replace(IDENTIFICATION_REQUEST_FILE)
+            code, response = control("identify")
+            if code == HTTPStatus.OK:
+                experiment_store().event(
+                    "identification",
+                    "warning" if enabled else "info",
+                    f"{'Started' if enabled else 'Stopped'} bounded servo identification on {target}",
+                    normalized,
+                )
             self.send_json(response, code)
             return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)

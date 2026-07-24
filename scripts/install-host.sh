@@ -82,8 +82,9 @@ install -d -o "$PTPBOX_USER_NAME" -g "$PTPBOX_GROUP_NAME" -m 0755 "$PTPBOX_ROOT_
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/config.json" "$ETC_DIR/config.json"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.json"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/fault-request.json" "$ETC_DIR/fault-request.json"
+ln -sfn "$PTPBOX_ROOT_DIR/runtime/identification-request.json" "$ETC_DIR/identification-request.json"
 
-printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo, /usr/local/sbin/ptpboxctl fault" > /etc/sudoers.d/ptpbox-web
+printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo, /usr/local/sbin/ptpboxctl fault, /usr/local/sbin/ptpboxctl identify" > /etc/sudoers.d/ptpbox-web
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 

@@ -85,6 +85,32 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(all(sample["valid"] for sample in samples))
         self.assertAlmostEqual(0.063, samples[1]["observed_at"] - samples[0]["observed_at"], places=3)
 
+    def test_reads_every_raw_kalman_update_from_the_current_worker_session(self) -> None:
+        path = self.log_dir / "BC7-ADAPTIVE-KALMAN.log"
+        records = [
+            {
+                "node": "BC7",
+                "servo": "adaptive-kalman",
+                "sample_count": index,
+                "source_time": 100.0 + index * 0.125,
+                "observed_at": 1_000.0 + index * 0.125,
+                "excitation_ppb": float(index),
+            }
+            for index in range(6)
+        ]
+        path.write_text(
+            '{"node":"BC7","servo":"adaptive-kalman","sample_count":999,"observed_at":1}\n'
+            "PTPBox session start [99.000]\n"
+            + "\n".join(json.dumps(item) for item in records)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        history = AGENT.load_kalman_history("BC7", limit=4)
+
+        self.assertEqual([2, 3, 4, 5], [item["sample_count"] for item in history])
+        self.assertEqual([2.0, 3.0, 4.0, 5.0], [item["excitation_ppb"] for item in history])
+
     def test_config_accepts_only_protocol_representable_sync_rates(self) -> None:
         value = json.loads(json.dumps(AGENT.DEFAULT_CONFIG))
         value["log_sync_interval"] = -3

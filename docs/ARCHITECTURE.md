@@ -124,9 +124,11 @@ original project's one Sync per second cadence to avoid overdriving a shared
 multi-port timestamp engine.
 
 The web sudo policy permits only `start`, `stop`, `restart`, `status`, `servo`,
-and `fault` with no additional arguments. The agent validates and atomically
-stages servo and fault requests before invoking those fixed verbs. `setup` and
-`teardown` remain manual root operations.
+`fault`, and `identify` with no additional arguments. The agent validates and
+atomically stages servo, fault, and bounded-identification requests before
+invoking those fixed verbs. The root controller repeats the actuator, duration,
+frequency, target, and Nyquist checks before writing the identification state.
+`setup` and `teardown` remain manual root operations.
 The observation service uses `KillMode=process`, so restarting or upgrading the
 web agent does not terminate the separately tracked timing processes.
 
@@ -205,6 +207,14 @@ from aligned raw measurements and reports a state such as `waiting`,
 | Replay bifurcation map | Settled endpoint-phase extrema across a bounded offline PI gain-scale sweep | `live_changes` is always zero; a replay response branch is not a physical bifurcation claim. |
 | Fractal scaling | Higuchi graph dimension, delay-embedded correlation dimension across \(m=2..5\), and MF-DFA with shuffled surrogates | Finite-record scaling is not proof of chaos, exact self-similarity, or a strange attractor. |
 | Koopman/DMD | Least-squares snapshot operator and singular-value amplification | Singular values describe the fitted local operator; they are not closed-loop gain margins. |
+| Dynamic stability | Sliding ADEV/MDEV plus first-difference FTU/ADEVS | Transfer qualification is separate from the calculation; direct PHC difference is a clock-plus-path composite. |
+| Spectral cascade | Welch cross-spectral matrices, coherence, per-hop gain, and dominant spatial modes | Passive amplification is not formal string stability. |
+| Estimator consistency | Scalar NIS, 95% inclusion, innovation lag correlation, and acceptance share | A calibration screen, not a full portmanteau test. |
+| Active identification | Bounded multisine instrument, instrumental cross spectra, S/T/KS, Nyquist, disk/IQC-style screens | Available only on an active Kalman-family servo; coherence gates every margin claim. |
+| Holdover reachability | Quadratic clock state and residual-derived forecast tube | Decision-grade risk requires repeated backtesting and coverage calibration. |
+| N-cornered clocks | Non-negative pair-variance decomposition | Gated until clocks are independently free-running or observed on a qualified common edge. |
+| Timing OAM | cTE, dTE, peak/P95 TE, and hop accumulation | Reference masks are not automatic profile certification. |
+| Nonlinear structure | Bicoherence, Vietoris–Rips Betti curves, multiscale entropy, and predictive variance reduction | Coupling, loops, complexity, and direction do not prove cause or chaos. |
 
 The path microscope deliberately distinguishes observable timestamp algebra from
 calibrated one-way delay. With two unsynchronized clocks,
@@ -266,7 +276,7 @@ sequenceDiagram
 | `PTPBOX_ROOT/runtime` | operator | durable | staged config, servo/fault requests, and `experiments.sqlite3` |
 | `/etc/ptpbox/topology.json` | root | durable | authoritative interface mapping |
 | `/etc/ptpbox/config.json` | symlink | durable | points to staged operator config |
-| `/run/ptpbox` | root | boot | managed process IDs, servo state, estimator snapshots, raw path events, faults, and read-only PHC/PPS map |
+| `/run/ptpbox` | root | boot | managed process IDs, servo and bounded-identification state, estimator snapshots, raw path events, faults, and read-only PHC/PPS map |
 | `/etc/linuxptp/ptpbox-*.conf` | root | regenerated on start | AppArmor-compatible `ptp4l` and optional `ts2phc` config |
 | `/var/log/ptpbox` | root | durable | one log per managed process |
 | `/opt/ptpbox-web` | root | deployment | agent and static UI |

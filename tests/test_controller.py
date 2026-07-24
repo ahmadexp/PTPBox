@@ -104,6 +104,7 @@ class ControllerConfigTests(unittest.TestCase):
         self.assertEqual("BC7", processes[0]["kalman_for"])
         self.assertIn("/dev/ptp8", processes[0]["command"])
         self.assertIn("/tmp/BC7-OC.log", processes[0]["command"])
+        self.assertIn("--identification-state", processes[0]["command"])
 
     def test_adaptive_and_imm_workers_receive_the_requested_estimator_mode(self) -> None:
         temporary = Path(self.temporary.name)
@@ -268,6 +269,11 @@ class ControllerConfigTests(unittest.TestCase):
         temporary = Path(self.temporary.name)
         pids_file = temporary / "processes.json"
         phc_map_file = temporary / "phcs.json"
+        identification_file = temporary / "identification-state.json"
+        identification_file.write_text(
+            json.dumps({"enabled": True, "target": "BC3"}),
+            encoding="utf-8",
+        )
         CONTROLLER.SERVO_REQUEST_FILE.write_text(json.dumps({"target": "BC3", "enabled": False, "type": "linreg"}), encoding="utf-8")
         pids_file.write_text(
             json.dumps(
@@ -288,6 +294,7 @@ class ControllerConfigTests(unittest.TestCase):
             patch.object(CONTROLLER, "STATE_DIR", temporary),
             patch.object(CONTROLLER, "PIDS_FILE", pids_file),
             patch.object(CONTROLLER, "PHC_MAP_FILE", phc_map_file),
+            patch.object(CONTROLLER, "IDENTIFICATION_STATE_FILE", identification_file),
             patch.object(CONTROLLER, "require_root"),
             patch.object(CONTROLLER, "topology", return_value=topology),
             patch.object(CONTROLLER, "stop_process") as stop_process,
@@ -302,6 +309,81 @@ class ControllerConfigTests(unittest.TestCase):
         stop_process.assert_called_once()
         self.assertTrue(render.call_args.kwargs["free_running"])
         self.assertEqual({"type": "linreg"}, render.call_args.kwargs["servo_override"])
+        identification = json.loads(identification_file.read_text(encoding="utf-8"))
+        self.assertFalse(identification["enabled"])
+        self.assertEqual("target servo changed", identification["reason"])
+
+    def test_identification_request_is_bounded_by_servo_state_and_sample_rate(self) -> None:
+        temporary = Path(self.temporary.name)
+        request_path = temporary / "identification-request.json"
+        state_path = temporary / "identification-state.json"
+        topology = {
+            "nodes": [
+                {"name": "BC1", "ingress": "p1", "egress": "p2"},
+                {"name": "BC2", "ingress": "p3", "egress": "p4"},
+            ]
+        }
+        request_path.write_text(
+            json.dumps(
+                {
+                    "target": "BC2",
+                    "enabled": True,
+                    "amplitude_ppb": 25.0,
+                    "duration_s": 180.0,
+                    "offset_limit_ns": 5_000.0,
+                    "frequencies_hz": [0.01, 0.05, 0.2],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch.object(CONTROLLER, "IDENTIFICATION_REQUEST_FILE", request_path),
+            patch.object(CONTROLLER, "IDENTIFICATION_STATE_FILE", state_path),
+            patch.object(CONTROLLER, "STATE_DIR", temporary),
+            patch.object(CONTROLLER, "require_root"),
+            patch.object(CONTROLLER, "topology", return_value=topology),
+            patch.object(
+                CONTROLLER,
+                "servo_state",
+                return_value={"nodes": {"BC2": {"enabled": True, "type": "adaptive-kalman"}}},
+            ),
+            patch.object(CONTROLLER, "config", return_value={"log_sync_interval": 0}),
+        ):
+            result = CONTROLLER.identification_apply()
+
+        self.assertTrue(result["identification"]["enabled"])
+        self.assertEqual("adaptive-kalman", result["identification"]["servo"])
+        self.assertEqual([0.01, 0.05, 0.2], result["identification"]["frequencies_hz"])
+        self.assertTrue(state_path.exists())
+
+        request_path.write_text(
+            json.dumps(
+                {
+                    "target": "BC2",
+                    "enabled": True,
+                    "amplitude_ppb": 25.0,
+                    "duration_s": 180.0,
+                    "offset_limit_ns": 5_000.0,
+                    "frequencies_hz": [0.49],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch.object(CONTROLLER, "IDENTIFICATION_REQUEST_FILE", request_path),
+            patch.object(CONTROLLER, "IDENTIFICATION_STATE_FILE", state_path),
+            patch.object(CONTROLLER, "STATE_DIR", temporary),
+            patch.object(CONTROLLER, "require_root"),
+            patch.object(CONTROLLER, "topology", return_value=topology),
+            patch.object(
+                CONTROLLER,
+                "servo_state",
+                return_value={"nodes": {"BC2": {"enabled": True, "type": "adaptive-kalman"}}},
+            ),
+            patch.object(CONTROLLER, "config", return_value={"log_sync_interval": 0}),
+        ):
+            with self.assertRaises(ValueError):
+                CONTROLLER.identification_apply()
 
     def test_captures_interface_metadata_inside_namespace(self) -> None:
         def fake_command(args, check=True):

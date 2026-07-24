@@ -2298,6 +2298,1295 @@ def error_budget(
     }
 
 
+def residual_transfer_metrics(
+    residual_ns: Sequence[float],
+    sample_period_s: float,
+) -> dict[str, Any]:
+    """First-difference transfer statistics from a residual phase/delay record.
+
+    ``FTU`` follows Parker (2025): TIErms/tau. ``ADEVS`` applies the ordinary
+    ADEV equation for frequency samples to averaged residual-phase samples, so
+    its units remain nanoseconds.  These curves must only be interpreted as
+    transfer noise when the input is a loopback, double difference, calibrated
+    common-edge residual, or another explicitly qualified residual.
+    """
+    samples = [float(value) for value in residual_ns if math.isfinite(value)]
+    if len(samples) < 4 or not math.isfinite(sample_period_s) or sample_period_s <= 0:
+        return {
+            "status": "learning",
+            "samples": len(samples),
+            "tierms": [],
+            "ftu": [],
+            "adevs": [],
+        }
+    tierms: list[dict[str, Any]] = []
+    ftu: list[dict[str, Any]] = []
+    adevs: list[dict[str, Any]] = []
+    for factor in _tau_factors(len(samples)):
+        tau_s = factor * sample_period_s
+        differences = [
+            samples[index + factor] - samples[index]
+            for index in range(len(samples) - factor)
+        ]
+        if differences:
+            tie = math.sqrt(mean([value * value for value in differences]))
+            tierms.append(_stability_point(tau_s, tie, len(differences)))
+            # ns / s divided by 1e9 ns/s is fractional frequency.
+            ftu.append(_stability_point(tau_s, tie / max(EPSILON, tau_s * 1e9), len(differences)))
+        if len(samples) >= 2 * factor:
+            averages = [
+                mean(samples[index:index + factor])
+                for index in range(len(samples) - factor + 1)
+            ]
+            average_differences = [
+                averages[index + factor] - averages[index]
+                for index in range(len(averages) - factor)
+            ]
+            if average_differences:
+                value = math.sqrt(0.5 * mean([item * item for item in average_differences]))
+                adevs.append(_stability_point(tau_s, value, len(average_differences)))
+    return {
+        "status": "ready" if len(tierms) >= 2 and len(adevs) >= 2 else "learning",
+        "samples": len(samples),
+        "tierms": tierms,
+        "ftu": ftu,
+        "adevs": adevs,
+        "units": {"tierms": "ns", "ftu": "fractional-frequency", "adevs": "ns"},
+        "method": "first-difference TIE RMS and FTU; ADEV equation applied to averaged residual phase",
+        "interpretation": (
+            "Transfer-noise statistics are valid only for a qualified residual. "
+            "A direct PHC difference includes both clock and transfer behavior."
+        ),
+    }
+
+
+def dynamic_stability_atlas(
+    clock_phase_ns: Sequence[float],
+    transfer_residual_ns: Sequence[float],
+    sample_period_s: float,
+    maximum_windows: int = 28,
+) -> dict[str, Any]:
+    """Sliding-window clock and transfer stability without hiding regime changes."""
+    clock_samples = [float(value) for value in clock_phase_ns if math.isfinite(value)]
+    transfer_samples = [float(value) for value in transfer_residual_ns if math.isfinite(value)]
+    length = min(len(clock_samples), len(transfer_samples))
+    if length < 64:
+        return {"status": "learning", "samples": length, "cells": [], "taus_s": [], "times_s": []}
+    clock_samples = clock_samples[-length:]
+    transfer_samples = transfer_samples[-length:]
+    window = min(length, max(64, 2 ** int(math.floor(math.log2(max(64, length // 3))))))
+    step = max(1, (length - window) // max(1, maximum_windows - 1))
+    ends = list(range(window, length + 1, step))
+    if ends[-1] != length:
+        ends.append(length)
+    ends = ends[-maximum_windows:]
+    factors = [factor for factor in _tau_factors(window) if 2 * factor < window]
+    factors = factors[:8]
+    cells: list[dict[str, Any]] = []
+    for end in ends:
+        clock_window = clock_samples[end - window:end]
+        transfer_window = transfer_samples[end - window:end]
+        clock_metrics = stability_metrics(clock_window, sample_period_s)
+        transfer_metrics = residual_transfer_metrics(transfer_window, sample_period_s)
+        by_clock = {
+            name: {round(float(point["tau_s"]), 12): point for point in clock_metrics.get(name, [])}
+            for name in ("adev", "mdev")
+        }
+        by_transfer = {
+            name: {round(float(point["tau_s"]), 12): point for point in transfer_metrics.get(name, [])}
+            for name in ("ftu", "adevs")
+        }
+        for factor in factors:
+            tau_s = factor * sample_period_s
+            key = round(tau_s, 12)
+            if key not in by_clock["adev"] or key not in by_transfer["ftu"]:
+                continue
+            cells.append(
+                {
+                    "time_s": (end - length) * sample_period_s,
+                    "tau_s": tau_s,
+                    "adev": by_clock["adev"][key]["value"],
+                    "mdev": by_clock["mdev"].get(key, {}).get("value"),
+                    "ftu": by_transfer["ftu"][key]["value"],
+                    "adevs_ns": by_transfer["adevs"].get(key, {}).get("value"),
+                    "pairs": min(
+                        int(by_clock["adev"][key]["pairs"]),
+                        int(by_transfer["ftu"][key]["pairs"]),
+                    ),
+                }
+            )
+    return {
+        "status": "ready" if cells else "learning",
+        "samples": length,
+        "window_samples": window,
+        "window_s": window * sample_period_s,
+        "times_s": sorted({float(cell["time_s"]) for cell in cells}),
+        "taus_s": sorted({float(cell["tau_s"]) for cell in cells}),
+        "cells": cells,
+        "method": "overlapping sliding windows; no interpolation or synthetic confidence intervals",
+    }
+
+
+def _linear_detrend(values: Sequence[float]) -> list[float]:
+    if len(values) < 2:
+        return [float(value) for value in values]
+    center = (len(values) - 1) / 2.0
+    value_center = mean(values)
+    denominator = sum((index - center) ** 2 for index in range(len(values)))
+    slope = (
+        sum((index - center) * (float(value) - value_center) for index, value in enumerate(values))
+        / max(EPSILON, denominator)
+    )
+    return [
+        float(value) - (value_center + slope * (index - center))
+        for index, value in enumerate(values)
+    ]
+
+
+def _welch_spectra(
+    channels: Sequence[Sequence[float]],
+    sample_period_s: float,
+    maximum_window: int = 128,
+) -> dict[str, Any]:
+    length = min((len(channel) for channel in channels), default=0)
+    if not channels or length < 32 or sample_period_s <= 0:
+        return {"status": "learning", "samples": length}
+    segment_length = min(maximum_window, 2 ** int(math.floor(math.log2(length))))
+    if segment_length < 32:
+        return {"status": "learning", "samples": length}
+    step = max(1, segment_length // 2)
+    starts = list(range(0, length - segment_length + 1, step))
+    if len(starts) < 2:
+        starts = [0]
+    window = [
+        0.5 - 0.5 * math.cos(2.0 * math.pi * index / max(1, segment_length - 1))
+        for index in range(segment_length)
+    ]
+    window_energy = sum(value * value for value in window)
+    selected_bins = list(range(1, segment_length // 2 + 1))
+    if len(selected_bins) > 40:
+        selected_bins = sorted(
+            {
+                max(1, min(segment_length // 2, round(math.exp(
+                    math.log(1) + index * (math.log(segment_length // 2) - math.log(1)) / 39
+                ))))
+                for index in range(40)
+            }
+        )
+    transforms: list[list[list[complex]]] = [
+        [[] for _ in selected_bins]
+        for _ in channels
+    ]
+    for channel_index, channel in enumerate(channels):
+        values = [float(value) for value in channel[-length:]]
+        for start in starts:
+            segment = _linear_detrend(values[start:start + segment_length])
+            weighted = [value * taper for value, taper in zip(segment, window)]
+            for output_index, frequency_bin in enumerate(selected_bins):
+                omega = -2.0 * math.pi * frequency_bin / segment_length
+                coefficient = sum(
+                    value * complex(math.cos(omega * index), math.sin(omega * index))
+                    for index, value in enumerate(weighted)
+                )
+                transforms[channel_index][output_index].append(coefficient)
+    return {
+        "status": "ready",
+        "samples": length,
+        "segment_samples": segment_length,
+        "segments": len(starts),
+        "window_energy": window_energy,
+        "frequencies_hz": [
+            frequency_bin / (segment_length * sample_period_s)
+            for frequency_bin in selected_bins
+        ],
+        "transforms": transforms,
+    }
+
+
+def _dominant_hermitian_mode(matrix: Sequence[Sequence[complex]]) -> tuple[float, list[complex]]:
+    size = len(matrix)
+    if not size:
+        return 0.0, []
+    vector = [complex(1.0 / math.sqrt(size), 0.0) for _ in range(size)]
+    for _ in range(48):
+        next_vector = [
+            sum(matrix[row][column] * vector[column] for column in range(size))
+            for row in range(size)
+        ]
+        norm = math.sqrt(sum(abs(value) ** 2 for value in next_vector))
+        if norm < EPSILON:
+            return 0.0, vector
+        vector = [value / norm for value in next_vector]
+    eigenvalue = sum(
+        vector[row].conjugate() * matrix[row][column] * vector[column]
+        for row in range(size)
+        for column in range(size)
+    ).real
+    return max(0.0, eigenvalue), vector
+
+
+def spectral_cascade_analysis(
+    hop_ids: Sequence[str],
+    hop_channels: Sequence[Sequence[float]],
+    sample_period_s: float,
+) -> dict[str, Any]:
+    """Welch cross spectra, spatial modes, coherence, and hop amplification."""
+    aligned = min((len(channel) for channel in hop_channels), default=0)
+    if not hop_ids or len(hop_ids) != len(hop_channels) or aligned < 32:
+        return {"status": "learning", "samples": aligned, "channels": list(hop_ids), "points": []}
+    spectra = _welch_spectra(hop_channels, sample_period_s)
+    if spectra.get("status") != "ready":
+        return {**spectra, "channels": list(hop_ids), "points": []}
+    transforms: list[list[list[complex]]] = spectra["transforms"]
+    segment_count = int(spectra["segments"])
+    points: list[dict[str, Any]] = []
+    for frequency_index, frequency_hz in enumerate(spectra["frequencies_hz"]):
+        csd: list[list[complex]] = []
+        powers: list[float] = []
+        for channel_index in range(len(hop_ids)):
+            coefficients = transforms[channel_index][frequency_index]
+            power = mean([abs(value) ** 2 for value in coefficients])
+            powers.append(power)
+        for left in range(len(hop_ids)):
+            row: list[complex] = []
+            for right in range(len(hop_ids)):
+                row.append(
+                    sum(
+                        transforms[left][frequency_index][segment]
+                        * transforms[right][frequency_index][segment].conjugate()
+                        for segment in range(segment_count)
+                    )
+                    / max(1, segment_count)
+                )
+            csd.append(row)
+        dominant, vector = _dominant_hermitian_mode(csd)
+        total_power = sum(powers)
+        hops = []
+        cumulative_gain_db = 0.0
+        for channel_index, channel_id in enumerate(hop_ids):
+            if channel_index == 0:
+                gain_db = 0.0
+                coherence = 1.0
+                phase_deg = 0.0
+            else:
+                previous_power = powers[channel_index - 1]
+                gain_db = 10.0 * math.log10(max(EPSILON, powers[channel_index]) / max(EPSILON, previous_power))
+                cross = csd[channel_index][channel_index - 1]
+                coherence = min(
+                    1.0,
+                    abs(cross) ** 2 / max(EPSILON, powers[channel_index] * previous_power),
+                )
+                phase_deg = math.degrees(math.atan2(cross.imag, cross.real))
+                cumulative_gain_db += gain_db
+            hops.append(
+                {
+                    "id": channel_id,
+                    "psd_db_ns2_hz": 10.0 * math.log10(max(EPSILON, powers[channel_index])),
+                    "gain_db": gain_db,
+                    "cumulative_gain_db": cumulative_gain_db,
+                    "coherence": coherence,
+                    "phase_deg": phase_deg,
+                }
+            )
+        points.append(
+            {
+                "frequency_hz": frequency_hz,
+                "total_power_db": 10.0 * math.log10(max(EPSILON, total_power)),
+                "dominant_share": dominant / max(EPSILON, total_power),
+                "mode": [
+                    {
+                        "id": channel_id,
+                        "magnitude": abs(value),
+                        "phase_deg": math.degrees(math.atan2(value.imag, value.real)),
+                    }
+                    for channel_id, value in zip(hop_ids, vector)
+                ],
+                "hops": hops,
+            }
+        )
+    coherent = [
+        hop["coherence"]
+        for point in points
+        for hop in point["hops"][1:]
+    ]
+    return {
+        "status": "ready",
+        "samples": aligned,
+        "channels": list(hop_ids),
+        "segment_samples": spectra["segment_samples"],
+        "segments": segment_count,
+        "points": points,
+        "median_adjacent_coherence": statistics.median(coherent) if coherent else None,
+        "method": "Hann-window Welch CSD; hop gain is a passive cascade-amplification screen",
+        "formal_string_stability": False,
+        "interpretation": (
+            "Gain above 0 dB shows spatial amplification in the observed record. "
+            "It becomes a formal input-output claim only with independent persistent excitation."
+        ),
+    }
+
+
+def multiresolution_coherent_modes(spectral: dict[str, Any]) -> dict[str, Any]:
+    points = spectral.get("points") if isinstance(spectral, dict) else None
+    channels = spectral.get("channels") if isinstance(spectral, dict) else None
+    if not isinstance(points, list) or not points or not isinstance(channels, list):
+        return {"status": "learning", "bands": []}
+    frequencies = [float(point["frequency_hz"]) for point in points]
+    low, high = min(frequencies), max(frequencies)
+    if high <= low:
+        return {"status": "learning", "bands": []}
+    edges = [
+        low,
+        math.exp(math.log(low) + (math.log(high) - math.log(low)) * 0.25),
+        math.exp(math.log(low) + (math.log(high) - math.log(low)) * 0.50),
+        math.exp(math.log(low) + (math.log(high) - math.log(low)) * 0.75),
+        high * (1.0 + 1e-9),
+    ]
+    labels = ["wander", "slow servo", "servo band", "fast residual"]
+    total_linear_power = sum(10.0 ** (float(point["total_power_db"]) / 10.0) for point in points)
+    bands = []
+    for band_index, label in enumerate(labels):
+        selected = [
+            point for point in points
+            if edges[band_index] <= float(point["frequency_hz"]) < edges[band_index + 1]
+        ]
+        if not selected:
+            continue
+        band_power = sum(10.0 ** (float(point["total_power_db"]) / 10.0) for point in selected)
+        loadings = []
+        for channel in channels:
+            magnitudes = [
+                next(
+                    (float(item["magnitude"]) for item in point.get("mode", []) if item.get("id") == channel),
+                    0.0,
+                )
+                for point in selected
+            ]
+            phases = [
+                next(
+                    (float(item["phase_deg"]) for item in point.get("mode", []) if item.get("id") == channel),
+                    0.0,
+                )
+                for point in selected
+            ]
+            loadings.append(
+                {
+                    "id": channel,
+                    "magnitude": mean(magnitudes),
+                    "phase_deg": mean(phases),
+                }
+            )
+        bands.append(
+            {
+                "label": label,
+                "minimum_hz": edges[band_index],
+                "maximum_hz": min(high, edges[band_index + 1]),
+                "energy_share": band_power / max(EPSILON, total_linear_power),
+                "dominant_share": mean([float(point["dominant_share"]) for point in selected]),
+                "loadings": loadings,
+            }
+        )
+    return {
+        "status": "ready" if bands else "learning",
+        "bands": bands,
+        "method": "log-frequency coherent spatial modes derived from Welch cross-spectral matrices",
+        "provenance": "mrCOSTS-inspired multiresolution decomposition; not the reference mrCOSTS implementation",
+    }
+
+
+def hybrid_servo_dynamics(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    valid = [
+        sample for sample in samples
+        if sample.get("valid")
+        and sample.get("offset_ns") is not None
+        and sample.get("frequency_ppb") is not None
+    ]
+    if len(valid) < 8:
+        return {"status": "learning", "samples": len(valid), "states": [], "transitions": [], "timeline": []}
+
+    def normalize_state(value: Any) -> str:
+        text = str(value or "").lower()
+        if text in {"s2", "locked", "servo_locked_stable"}:
+            return "locked"
+        if "hold" in text or "free" in text:
+            return "holdover"
+        if text in {"s1", "uncalibrated", "acquiring", "tracking"}:
+            return "acquiring"
+        if text in {"s0", "faulty", "unlocked"}:
+            return "unlocked"
+        return "unknown"
+
+    states = [normalize_state(sample.get("servo_state")) for sample in valid]
+    transition_counts: dict[tuple[str, str], int] = {}
+    runs: list[tuple[str, int]] = []
+    current = states[0]
+    count = 1
+    for previous, state in zip(states, states[1:]):
+        transition_counts[(previous, state)] = transition_counts.get((previous, state), 0) + 1
+        if state == current:
+            count += 1
+        else:
+            runs.append((current, count))
+            current, count = state, 1
+    runs.append((current, count))
+    state_summaries = []
+    for state in sorted(set(states)):
+        indexes = [index for index, value in enumerate(states) if value == state]
+        offsets = [float(valid[index]["offset_ns"]) for index in indexes]
+        corrections = [float(valid[index]["frequency_ppb"]) for index in indexes]
+        pairs = [
+            (offsets[index - 1], offsets[index])
+            for index in range(1, len(offsets))
+        ]
+        if len(pairs) >= 3:
+            previous = [pair[0] for pair in pairs]
+            following = [pair[1] for pair in pairs]
+            centered_previous = [value - mean(previous) for value in previous]
+            centered_following = [value - mean(following) for value in following]
+            pole = sum(left * right for left, right in zip(centered_previous, centered_following)) / max(
+                EPSILON,
+                sum(value * value for value in centered_previous),
+            )
+        else:
+            pole = None
+        dwell = [length for run_state, length in runs if run_state == state]
+        state_summaries.append(
+            {
+                "state": state,
+                "samples": len(indexes),
+                "share": len(indexes) / len(valid),
+                "offset_rms_ns": math.sqrt(mean([value * value for value in offsets])),
+                "correction_rms_ppb": math.sqrt(mean([value * value for value in corrections])),
+                "median_dwell_samples": statistics.median(dwell) if dwell else 0,
+                "local_pole": pole,
+            }
+        )
+    outgoing: dict[str, int] = {}
+    for (source, _target), value in transition_counts.items():
+        outgoing[source] = outgoing.get(source, 0) + value
+    transitions = [
+        {
+            "source": source,
+            "target": target,
+            "count": count,
+            "probability": count / max(1, outgoing[source]),
+        }
+        for (source, target), count in sorted(transition_counts.items())
+    ]
+    timeline = [
+        {
+            "observed_at": float(sample.get("observed_at") or index),
+            "state": states[index],
+            "offset_ns": float(sample["offset_ns"]),
+            "correction_ppb": float(sample["frequency_ppb"]),
+        }
+        for index, sample in enumerate(valid[-256:])
+    ]
+    return {
+        "status": "ready",
+        "samples": len(valid),
+        "states": state_summaries,
+        "transitions": transitions,
+        "timeline": timeline,
+        "method": "observed LinuxPTP/PTPBox state sequence with mode-conditioned first-order phase dynamics",
+    }
+
+
+def estimator_consistency(history: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    points = []
+    for index, item in enumerate(history):
+        innovation = item.get("innovation_ns")
+        phase_sigma = item.get("phase_sigma_ns")
+        measurement_sigma = item.get("adaptive_measurement_noise_ns", item.get("measurement_noise_ns"))
+        if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in (innovation, phase_sigma, measurement_sigma)):
+            continue
+        variance_value = float(phase_sigma) ** 2 + float(measurement_sigma) ** 2
+        points.append(
+            {
+                "index": index,
+                "observed_at": float(item.get("observed_at") or index),
+                "innovation_ns": float(innovation),
+                "nis": float(innovation) ** 2 / max(EPSILON, variance_value),
+                "accepted": bool(item.get("measurement_accepted", True)),
+            }
+        )
+    if len(points) < 8:
+        return {"status": "learning", "samples": len(points), "points": points}
+    innovations = [float(point["innovation_ns"]) for point in points]
+    center = mean(innovations)
+    centered = [value - center for value in innovations]
+    lag_one = sum(left * right for left, right in zip(centered, centered[1:])) / max(
+        EPSILON,
+        sum(value * value for value in centered),
+    )
+    mean_nis = mean([float(point["nis"]) for point in points])
+    within_95 = mean([1.0 if float(point["nis"]) <= 3.841458820694124 else 0.0 for point in points])
+    acceptance = mean([1.0 if point["accepted"] else 0.0 for point in points])
+    return {
+        "status": "ready",
+        "samples": len(points),
+        "points": points[-256:],
+        "mean_nis": mean_nis,
+        "within_95_pct": 100.0 * within_95,
+        "lag_one_autocorrelation": lag_one,
+        "acceptance_pct": 100.0 * acceptance,
+        "consistent": 0.5 <= mean_nis <= 2.0 and abs(lag_one) < 0.25 and within_95 >= 0.88,
+        "method": "scalar normalized innovation squared and lag-one whiteness screen",
+        "interpretation": "A screen for estimator calibration, not a replacement for a full chi-square/portmanteau test.",
+    }
+
+
+def identifiability_diagnostics(
+    input_values: Sequence[float],
+    output_values: Sequence[float],
+) -> dict[str, Any]:
+    length = min(len(input_values), len(output_values))
+    if length < 12:
+        return {"status": "learning", "samples": length}
+    inputs = [float(value) for value in input_values[-length:]]
+    outputs = [float(value) for value in output_values[-length:]]
+    rows = [
+        [outputs[index - 1], outputs[index - 2], inputs[index - 1], inputs[index - 2], 1.0]
+        for index in range(2, length)
+    ]
+    gram = matrix_multiply(transpose(rows), rows)
+    scale = [math.sqrt(max(EPSILON, gram[index][index])) for index in range(len(gram))]
+    normalized = [
+        [
+            gram[row][column] / max(EPSILON, scale[row] * scale[column])
+            for column in range(len(gram))
+        ]
+        for row in range(len(gram))
+    ]
+    eigenvalues = [max(0.0, value) for value in symmetric_eigenvalues(normalized)]
+    positive = [value for value in eigenvalues if value > 1e-10]
+    condition = max(positive) / min(positive) if positive else math.inf
+    input_sigma = math.sqrt(variance(inputs))
+    return {
+        "status": "ready",
+        "samples": length,
+        "normalized_information_eigenvalues": eigenvalues,
+        "condition_number": condition if math.isfinite(condition) else None,
+        "rank": len(positive),
+        "parameter_count": len(normalized),
+        "input_rms_ppb": math.sqrt(mean([value * value for value in inputs])),
+        "input_sigma_ppb": input_sigma,
+        "persistently_exciting": len(positive) == len(normalized) and condition < 1e5 and input_sigma > 0.01,
+        "method": "normalized ARX information-matrix spectrum",
+    }
+
+
+def instrumental_closed_loop_identification(
+    history: Sequence[dict[str, Any]],
+    sample_period_s: float,
+) -> dict[str, Any]:
+    """Estimate plant and loop functions using injected correction as an instrument.
+
+    The bounded multisine is statistically independent of ordinary timing
+    disturbances.  Cross spectra with that injected signal avoid the feedback
+    bias that affects a direct output/applied-correction ratio.
+    """
+    qualified = [
+        item for item in history
+        if all(
+            isinstance(item.get(name), (int, float))
+            and math.isfinite(float(item[name]))
+            for name in ("excitation_ppb", "applied_correction_ppb", "measurement_ns")
+        )
+    ]
+    if len(qualified) < 64:
+        return {
+            "status": "learning",
+            "samples": len(qualified),
+            "active": bool(qualified and any(abs(float(item["excitation_ppb"])) > 1e-6 for item in qualified)),
+            "points": [],
+            "reason": "A bounded identification run needs at least 64 instrumented samples.",
+        }
+    excitation = [float(item["excitation_ppb"]) for item in qualified]
+    applied = [float(item["applied_correction_ppb"]) for item in qualified]
+    output = [float(item["measurement_ns"]) for item in qualified]
+    controller_output = [
+        applied_value - excitation_value
+        for applied_value, excitation_value in zip(applied, excitation)
+    ]
+    excitation_rms = math.sqrt(mean([value * value for value in excitation]))
+    if excitation_rms < 0.01:
+        return {
+            "status": "gated",
+            "samples": len(qualified),
+            "active": False,
+            "points": [],
+            "reason": "No independent correction excitation is present in the captured record.",
+        }
+    source_times = [
+        float(item.get("source_time", item.get("observed_at")))
+        for item in qualified
+        if isinstance(item.get("source_time", item.get("observed_at")), (int, float))
+    ]
+    source_intervals = [
+        right - left
+        for left, right in zip(source_times, source_times[1:])
+        if 0.0001 <= right - left <= 30.0
+    ]
+    effective_sample_period_s = (
+        statistics.median(source_intervals)
+        if source_intervals
+        else sample_period_s
+    )
+    spectra = _welch_spectra(
+        [excitation, applied, output, controller_output],
+        effective_sample_period_s,
+        maximum_window=128,
+    )
+    if spectra.get("status") != "ready":
+        return {**spectra, "active": True, "points": []}
+    transforms: list[list[list[complex]]] = spectra["transforms"]
+    segments = int(spectra["segments"])
+    points = []
+    for frequency_index, frequency_hz in enumerate(spectra["frequencies_hz"]):
+        d = transforms[0][frequency_index]
+        u = transforms[1][frequency_index]
+        y = transforms[2][frequency_index]
+        c = transforms[3][frequency_index]
+
+        def cross(left: Sequence[complex], right: Sequence[complex]) -> complex:
+            return sum(a * b.conjugate() for a, b in zip(left, right)) / max(1, segments)
+
+        s_dd = max(EPSILON, cross(d, d).real)
+        s_uu = max(EPSILON, cross(u, u).real)
+        s_yy = max(EPSILON, cross(y, y).real)
+        s_ud = cross(u, d)
+        s_yd = cross(y, d)
+        s_cy = cross(c, y)
+        if abs(s_ud) < EPSILON:
+            continue
+        plant = s_yd / s_ud
+        # c is the controller contribution after removing the injected dither.
+        # The negative sign follows u_controller = -C*y.
+        controller = -s_cy / s_yy
+        loop = plant * controller
+        sensitivity = 1.0 / (1.0 + loop) if abs(1.0 + loop) > EPSILON else complex(math.inf, 0.0)
+        complementary = loop * sensitivity
+        control_sensitivity = controller * sensitivity
+        coherence_dy = min(1.0, abs(s_yd) ** 2 / max(EPSILON, s_dd * s_yy))
+        coherence_du = min(1.0, abs(s_ud) ** 2 / max(EPSILON, s_dd * s_uu))
+        segment_plants = [
+            y[index] / u[index]
+            for index in range(segments)
+            if abs(u[index]) > EPSILON and abs(d[index]) > EPSILON
+        ]
+        plant_scatter = (
+            math.sqrt(mean([abs(value - plant) ** 2 for value in segment_plants]))
+            / max(EPSILON, abs(plant))
+            if segment_plants else 1.0
+        )
+        disk_delta = (
+            2.0 * abs(1.0 + loop) / max(EPSILON, abs(1.0 - loop))
+            if math.isfinite(abs(loop)) else 0.0
+        )
+        iqc_lower_distance = abs(1.0 + loop) - plant_scatter * abs(loop)
+        points.append(
+            {
+                "frequency_hz": frequency_hz,
+                "plant_magnitude_db": 20.0 * math.log10(max(EPSILON, abs(plant))),
+                "plant_phase_deg": math.degrees(math.atan2(plant.imag, plant.real)),
+                "loop_magnitude_db": 20.0 * math.log10(max(EPSILON, abs(loop))),
+                "loop_phase_deg": math.degrees(math.atan2(loop.imag, loop.real)),
+                "loop_real": loop.real,
+                "loop_imag": loop.imag,
+                "sensitivity_db": 20.0 * math.log10(max(EPSILON, abs(sensitivity))),
+                "complementary_sensitivity_db": 20.0 * math.log10(max(EPSILON, abs(complementary))),
+                "control_sensitivity_db": 20.0 * math.log10(max(EPSILON, abs(control_sensitivity))),
+                "coherence_excitation_output": coherence_dy,
+                "coherence_excitation_input": coherence_du,
+                "relative_plant_scatter": plant_scatter,
+                "balanced_disk_delta": disk_delta,
+                "iqc_lower_distance": iqc_lower_distance,
+            }
+        )
+    reliable = [
+        point for point in points
+        if point["coherence_excitation_output"] >= 0.55
+        and point["coherence_excitation_input"] >= 0.75
+    ]
+    disk_margin = min((float(point["balanced_disk_delta"]) for point in reliable), default=None)
+    if disk_margin is not None and disk_margin < 1.0:
+        gain_lower = (1.0 - disk_margin) / (1.0 + disk_margin)
+        gain_upper = (1.0 + disk_margin) / (1.0 - disk_margin)
+        phase_margin = math.degrees(2.0 * math.asin(max(0.0, min(1.0, disk_margin))))
+    else:
+        gain_lower, gain_upper, phase_margin = 0.0, None, 180.0 if disk_margin is not None else None
+    return {
+        "status": "ready" if len(reliable) >= 4 else "low-evidence",
+        "active": True,
+        "samples": len(qualified),
+        "segments": segments,
+        "sample_period_s": effective_sample_period_s,
+        "excitation_rms_ppb": excitation_rms,
+        "points": points,
+        "reliable_bins": len(reliable),
+        "disk_margin": {
+            "balanced_alpha": disk_margin,
+            "gain_lower": gain_lower,
+            "gain_upper": gain_upper,
+            "phase_deg": phase_margin,
+            "qualified_bins": len(reliable),
+        },
+        "iqc_envelope": {
+            "model": "frequency-dependent multiplicative plant-scatter disk",
+            "robustly_separated": bool(reliable) and all(float(point["iqc_lower_distance"]) > 0 for point in reliable),
+            "minimum_distance": min((float(point["iqc_lower_distance"]) for point in reliable), default=None),
+        },
+        "method": "multisine instrumental-variable cross spectra with empirical segment scatter",
+        "provenance": "physical correction injected after the PTPBox servo and recorded with every applied update",
+        "interpretation": (
+            "S/T/KS, Nichols, balanced disk margin, and the uncertainty envelope are published only "
+            "at bins that pass excitation-to-input and excitation-to-output coherence gates."
+        ),
+    }
+
+
+def timing_oam_analysis(
+    node_ids: Sequence[str],
+    direct_series: dict[str, Sequence[float]],
+    hop_series: dict[str, Sequence[float]],
+) -> dict[str, Any]:
+    rows = []
+    for node in node_ids:
+        values = [float(value) for value in direct_series.get(node, []) if math.isfinite(value)]
+        if len(values) < 4:
+            continue
+        cte = mean(values)
+        dynamic = [value - cte for value in values]
+        rows.append(
+            {
+                "id": node,
+                "samples": len(values),
+                "cte_ns": cte,
+                "dte_rms_ns": math.sqrt(mean([value * value for value in dynamic])),
+                "peak_to_peak_ns": max(values) - min(values),
+                "max_abs_te_ns": max(abs(value) for value in values),
+                "p95_abs_te_ns": percentile([abs(value) for value in values], 0.95),
+            }
+        )
+    hop_rows = []
+    accumulated_cte = 0.0
+    for node in node_ids[1:]:
+        values = [float(value) for value in hop_series.get(node, []) if math.isfinite(value)]
+        if not values:
+            continue
+        hop_cte = mean(values)
+        accumulated_cte += hop_cte
+        hop_rows.append(
+            {
+                "id": node,
+                "hop_cte_ns": hop_cte,
+                "accumulated_cte_ns": accumulated_cte,
+                "hop_p2p_ns": max(values) - min(values),
+            }
+        )
+    thresholds = []
+    for limit_ns, label in ((100.0, "100 ns"), (1_000.0, "1 µs"), (10_000.0, "10 µs")):
+        violations = [
+            row["id"] for row in rows
+            if float(row["max_abs_te_ns"]) > limit_ns
+        ]
+        thresholds.append(
+            {
+                "label": label,
+                "limit_ns": limit_ns,
+                "violations": violations,
+                "pass": not violations,
+                "provenance": "operator reference threshold; not an automatic profile conformance verdict",
+            }
+        )
+    return {
+        "status": "ready" if rows else "learning",
+        "nodes": rows,
+        "accumulation": hop_rows,
+        "thresholds": thresholds,
+        "method": "constant TE plus zero-mean dynamic TE; measured hop accumulation",
+    }
+
+
+def path_regime_analysis(events: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Classify directional-delay regimes without claiming calibrated asymmetry."""
+    points = []
+    pending: dict[str, dict[str, dict[str, Any]]] = {}
+    ordered_events = sorted(
+        (event for event in events if isinstance(event, dict)),
+        key=lambda event: float(event.get("observed_at") or 0.0),
+    )
+    for event in ordered_events:
+        forward = event.get("forward_transit_ns")
+        reverse = event.get("reverse_transit_ns")
+        valid_forward = isinstance(forward, (int, float)) and math.isfinite(float(forward))
+        valid_reverse = isinstance(reverse, (int, float)) and math.isfinite(float(reverse))
+        node = str(event.get("node") or "unknown")
+        observed_at = float(event.get("observed_at") or 0.0)
+        if valid_forward and valid_reverse:
+            paired = {"forward": event, "reverse": event}
+        elif valid_forward or valid_reverse:
+            direction = "forward" if valid_forward else "reverse"
+            opposite = "reverse" if valid_forward else "forward"
+            node_pending = pending.setdefault(node, {})
+            candidate = node_pending.get(opposite)
+            if candidate is None or abs(observed_at - float(candidate.get("observed_at") or 0.0)) > 5.0:
+                node_pending[direction] = event
+                continue
+            paired = {direction: event, opposite: candidate}
+            node_pending.pop(opposite, None)
+        else:
+            continue
+        forward_event = paired["forward"]
+        reverse_event = paired["reverse"]
+        forward_value = float(forward_event["forward_transit_ns"])
+        reverse_value = float(reverse_event["reverse_transit_ns"])
+        points.append(
+            {
+                "node": node,
+                "observed_at": max(
+                    float(forward_event.get("observed_at") or 0.0),
+                    float(reverse_event.get("observed_at") or 0.0),
+                ),
+                "forward_sequence_id": forward_event.get("sequence_id"),
+                "reverse_sequence_id": reverse_event.get("sequence_id"),
+                "forward_ns": forward_value,
+                "reverse_ns": reverse_value,
+                "round_trip_ns": forward_value + reverse_value,
+                "imbalance_ns": forward_value - reverse_value,
+            }
+        )
+    if len(points) < 8:
+        return {
+            "status": "learning",
+            "samples": len(points),
+            "timeline": points,
+            "calibrated_asymmetry": False,
+        }
+    round_trips = [float(point["round_trip_ns"]) for point in points]
+    imbalances = [float(point["imbalance_ns"]) for point in points]
+    round_center = statistics.median(round_trips)
+    imbalance_center = statistics.median(imbalances)
+    round_scale = max(1.0, 1.4826 * median_absolute_deviation(round_trips))
+    imbalance_scale = max(1.0, 1.4826 * median_absolute_deviation(imbalances))
+    counts: dict[str, int] = {}
+    for point in points:
+        round_score = (float(point["round_trip_ns"]) - round_center) / round_scale
+        imbalance_score = (float(point["imbalance_ns"]) - imbalance_center) / imbalance_scale
+        if round_score > 4.0:
+            regime = "congested"
+        elif imbalance_score > 3.0:
+            regime = "forward-heavy"
+        elif imbalance_score < -3.0:
+            regime = "reverse-heavy"
+        else:
+            regime = "baseline"
+        point["regime"] = regime
+        point["round_trip_score"] = round_score
+        point["imbalance_score"] = imbalance_score
+        counts[regime] = counts.get(regime, 0) + 1
+    return {
+        "status": "ready",
+        "samples": len(points),
+        "timeline": points[-256:],
+        "regimes": [
+            {"name": name, "samples": count, "share": count / len(points)}
+            for name, count in sorted(counts.items())
+        ],
+        "median_round_trip_ns": round_center,
+        "median_directional_imbalance_ns": imbalance_center,
+        "calibrated_asymmetry": False,
+        "method": "nearest-in-time Sync/Delay pairing plus robust round-trip and forward-minus-reverse delay state classification",
+        "interpretation": (
+            "Directional imbalance is not one-way delay asymmetry. Calibrated PPS, cable reversal, "
+            "or loopback ground truth is required before compensation."
+        ),
+    }
+
+
+def holdover_reachability(
+    phase_ns: Sequence[float],
+    sample_period_s: float,
+    horizons_s: Sequence[float] = (0, 10, 30, 60, 120, 300, 600, 900),
+) -> dict[str, Any]:
+    samples = [float(value) for value in phase_ns if math.isfinite(value)]
+    if len(samples) < 32:
+        return {"status": "learning", "samples": len(samples), "forecast": [], "thresholds": []}
+    window = samples[-min(512, len(samples)):]
+    times = [index * sample_period_s for index in range(len(window))]
+    rows = [[1.0, time, 0.5 * time * time] for time in times]
+    intercept, frequency_ppb, drift_ppb_s = least_squares(rows, window, ridge=1e-8)
+    residuals = [
+        value - (intercept + frequency_ppb * time + 0.5 * drift_ppb_s * time * time)
+        for value, time in zip(window, times)
+    ]
+    phase_sigma = max(0.1, math.sqrt(variance(residuals)))
+    differences = [
+        (residuals[index] - residuals[index - 1]) / max(EPSILON, sample_period_s)
+        for index in range(1, len(residuals))
+    ]
+    frequency_sigma = max(1e-6, math.sqrt(variance(differences)))
+    origin = window[-1]
+    forecast = []
+    for horizon in horizons_s:
+        horizon = float(horizon)
+        expected = origin + frequency_ppb * horizon + 0.5 * drift_ppb_s * horizon * horizon
+        sigma = math.sqrt(
+            phase_sigma**2
+            + (frequency_sigma * horizon) ** 2
+            + (max(abs(drift_ppb_s) * 0.12, 1e-5) * horizon * horizon / 2.0) ** 2
+        )
+        forecast.append(
+            {
+                "horizon_s": horizon,
+                "expected_ns": expected,
+                "sigma_ns": sigma,
+                "lower_95_ns": expected - 1.96 * sigma,
+                "upper_95_ns": expected + 1.96 * sigma,
+            }
+        )
+    threshold_rows = []
+    normal = statistics.NormalDist()
+    for limit in (100.0, 1_000.0, 10_000.0):
+        risks = []
+        for point in forecast:
+            sigma = max(EPSILON, float(point["sigma_ns"]))
+            expected = float(point["expected_ns"])
+            inside = normal.cdf((limit - expected) / sigma) - normal.cdf((-limit - expected) / sigma)
+            risks.append(
+                {
+                    "horizon_s": point["horizon_s"],
+                    "probability": max(0.0, min(1.0, 1.0 - inside)),
+                }
+            )
+        crossing = next((item["horizon_s"] for item in risks if item["probability"] >= 0.05), None)
+        threshold_rows.append(
+            {
+                "limit_ns": limit,
+                "risks": risks,
+                "first_5pct_horizon_s": crossing,
+            }
+        )
+    return {
+        "status": "ready",
+        "samples": len(window),
+        "initial_phase_ns": origin,
+        "frequency_ppb": frequency_ppb,
+        "drift_ppb_s": drift_ppb_s,
+        "forecast": forecast,
+        "thresholds": threshold_rows,
+        "calibration": "unvalidated-live-forecast",
+        "method": "quadratic clock state with residual-derived stochastic forecast tube",
+        "interpretation": "Risk becomes decision-grade only after repeated holdover backtesting and coverage calibration.",
+    }
+
+
+def n_cornered_clock_decomposition(
+    clock_ids: Sequence[str],
+    phase_channels: Sequence[Sequence[float]],
+    sample_period_s: float,
+    eligible: bool,
+    eligibility_reason: str,
+) -> dict[str, Any]:
+    length = min((len(channel) for channel in phase_channels), default=0)
+    if len(clock_ids) < 3 or length < 16:
+        return {"status": "learning", "samples": length, "eligible": eligible, "clocks": []}
+    frequency_channels = [
+        [
+            (float(channel[index]) - float(channel[index - 1])) / max(EPSILON, sample_period_s)
+            for index in range(1, length)
+        ]
+        for channel in phase_channels
+    ]
+    rows: list[list[float]] = []
+    values: list[float] = []
+    pairs = []
+    for left in range(len(clock_ids)):
+        for right in range(left + 1, len(clock_ids)):
+            difference = [
+                frequency_channels[left][index] - frequency_channels[right][index]
+                for index in range(length - 1)
+            ]
+            pair_variance = variance(difference, sample=True)
+            row = [0.0] * len(clock_ids)
+            row[left] = row[right] = 1.0
+            rows.append(row)
+            values.append(pair_variance)
+            pairs.append({"left": clock_ids[left], "right": clock_ids[right], "variance_ppb2": pair_variance})
+    estimates = least_squares(rows, values, ridge=1e-9)
+    estimates = [max(0.0, value) for value in estimates]
+    reconstructed = matrix_vector(rows, estimates)
+    residual = math.sqrt(mean([(observed - predicted) ** 2 for observed, predicted in zip(values, reconstructed)]))
+    return {
+        "status": "ready" if eligible else "gated",
+        "samples": length,
+        "eligible": eligible,
+        "eligibility_reason": eligibility_reason,
+        "clocks": [
+            {
+                "id": clock_id,
+                "variance_ppb2": estimate,
+                "sigma_ppb": math.sqrt(estimate),
+            }
+            for clock_id, estimate in zip(clock_ids, estimates)
+        ],
+        "pairs": pairs,
+        "fit_residual_ppb2": residual,
+        "method": "non-negative constrained N-cornered least-squares screen",
+        "interpretation": (
+            "The estimate assumes negligible inter-clock correlation. Use it in independent holdover "
+            "or a qualified common-edge comparison, not while the cascade is mutually disciplined."
+        ),
+    }
+
+
+def higher_order_spectrum(values: Sequence[float], sample_period_s: float) -> dict[str, Any]:
+    samples = [float(value) for value in values if math.isfinite(value)]
+    if len(samples) < 128:
+        return {"status": "learning", "samples": len(samples), "couplings": []}
+    segment_length = min(64, 2 ** int(math.floor(math.log2(len(samples) // 2))))
+    starts = list(range(0, len(samples) - segment_length + 1, segment_length // 2))
+    if len(starts) < 4:
+        return {"status": "learning", "samples": len(samples), "couplings": []}
+    bins = list(range(1, min(17, segment_length // 4)))
+    transforms: list[dict[int, complex]] = []
+    for start in starts:
+        segment = _linear_detrend(samples[start:start + segment_length])
+        taper = [
+            value * (0.5 - 0.5 * math.cos(2.0 * math.pi * index / max(1, segment_length - 1)))
+            for index, value in enumerate(segment)
+        ]
+        transforms.append(
+            {
+                frequency_bin: sum(
+                    value * complex(
+                        math.cos(-2.0 * math.pi * frequency_bin * index / segment_length),
+                        math.sin(-2.0 * math.pi * frequency_bin * index / segment_length),
+                    )
+                    for index, value in enumerate(taper)
+                )
+                for frequency_bin in range(1, min(segment_length // 2 + 1, 2 * max(bins) + 1))
+            }
+        )
+    couplings = []
+    for first in bins:
+        for second in bins:
+            target = first + second
+            if target >= segment_length // 2:
+                continue
+            triple = [
+                transform[first] * transform[second] * transform[target].conjugate()
+                for transform in transforms
+            ]
+            numerator = abs(sum(triple)) ** 2
+            denominator = (
+                sum(abs(transform[first] * transform[second]) ** 2 for transform in transforms)
+                * sum(abs(transform[target]) ** 2 for transform in transforms)
+            )
+            bicoherence = min(1.0, numerator / max(EPSILON, denominator))
+            couplings.append(
+                {
+                    "f1_hz": first / (segment_length * sample_period_s),
+                    "f2_hz": second / (segment_length * sample_period_s),
+                    "sum_hz": target / (segment_length * sample_period_s),
+                    "bicoherence": bicoherence,
+                }
+            )
+    couplings.sort(key=lambda item: float(item["bicoherence"]), reverse=True)
+    surrogate_floor = min(1.0, 3.0 / max(1, len(starts)))
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "segments": len(starts),
+        "couplings": couplings[:96],
+        "strongest": couplings[0] if couplings else None,
+        "screening_floor": surrogate_floor,
+        "method": "normalized direct bispectrum with a finite-segment screening floor",
+        "interpretation": "Bicoherence indicates quadratic phase coupling; it does not identify the physical mechanism.",
+    }
+
+
+def topological_dynamics(values: Sequence[float], max_points: int = 48) -> dict[str, Any]:
+    samples = [float(value) for value in values if math.isfinite(value)]
+    if len(samples) < 96:
+        return {"status": "learning", "samples": len(samples), "curve": []}
+    delay = max(1, min(12, len(samples) // 64))
+    vectors, _indexes = _delay_vectors(samples, 3, delay)
+    stride = max(1, len(vectors) // max_points)
+    points = vectors[::stride][-max_points:]
+    centers = [mean([point[dimension] for point in points]) for dimension in range(3)]
+    scales = [
+        max(EPSILON, math.sqrt(variance([point[dimension] for point in points])))
+        for dimension in range(3)
+    ]
+    normalized = [
+        [(point[dimension] - centers[dimension]) / scales[dimension] for dimension in range(3)]
+        for point in points
+    ]
+    distances: dict[tuple[int, int], float] = {}
+    for left in range(len(normalized)):
+        for right in range(left + 1, len(normalized)):
+            distances[(left, right)] = math.dist(normalized[left], normalized[right])
+    distance_values = list(distances.values())
+    thresholds = [
+        percentile(distance_values, fraction)
+        for fraction in (0.03, 0.05, 0.08, 0.12, 0.17, 0.23, 0.30, 0.40)
+    ]
+    curve = []
+    for threshold in thresholds:
+        parent = list(range(len(normalized)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        edges = [pair for pair, distance in distances.items() if distance <= threshold]
+        edge_index = {edge: index for index, edge in enumerate(edges)}
+        for left, right in edges:
+            union(left, right)
+        components = len({find(index) for index in range(len(normalized))})
+        basis: dict[int, int] = {}
+        triangle_count = 0
+        for first in range(len(normalized)):
+            for second in range(first + 1, len(normalized)):
+                first_edge = (first, second)
+                if first_edge not in edge_index:
+                    continue
+                for third in range(second + 1, len(normalized)):
+                    second_edge = (first, third)
+                    third_edge = (second, third)
+                    if second_edge not in edge_index or third_edge not in edge_index:
+                        continue
+                    triangle_count += 1
+                    column = (
+                        (1 << edge_index[first_edge])
+                        | (1 << edge_index[second_edge])
+                        | (1 << edge_index[third_edge])
+                    )
+                    while column:
+                        pivot = column.bit_length() - 1
+                        if pivot not in basis:
+                            basis[pivot] = column
+                            break
+                        column ^= basis[pivot]
+        beta_one = max(0, len(edges) - len(normalized) + components - len(basis))
+        curve.append(
+            {
+                "radius_sigma": threshold,
+                "beta0": components,
+                "beta1": beta_one,
+                "edges": len(edges),
+                "triangles": triangle_count,
+            }
+        )
+    return {
+        "status": "ready",
+        "samples": len(samples),
+        "points": len(normalized),
+        "delay_samples": delay,
+        "curve": curve,
+        "max_beta1": max((point["beta1"] for point in curve), default=0),
+        "method": "Vietoris-Rips beta-0/beta-1 over a normalized three-dimensional delay embedding",
+        "interpretation": "Persistent loops are candidate geometry and require stationary-window and surrogate confirmation.",
+    }
+
+
+def predictive_directed_dependence(
+    channel_ids: Sequence[str],
+    channels: Sequence[Sequence[float]],
+) -> dict[str, Any]:
+    length = min((len(channel) for channel in channels), default=0)
+    if len(channel_ids) < 2 or length < 32:
+        return {"status": "learning", "samples": length, "links": []}
+    aligned = [[float(value) for value in channel[-length:]] for channel in channels]
+    links = []
+    for source in range(len(channel_ids)):
+        for target in range(len(channel_ids)):
+            if source == target:
+                continue
+            target_values = aligned[target]
+            source_values = aligned[source]
+            reduced_rows = [[target_values[index - 1], 1.0] for index in range(1, length)]
+            full_rows = [
+                [target_values[index - 1], source_values[index - 1], 1.0]
+                for index in range(1, length)
+            ]
+            response = target_values[1:]
+            reduced_coefficients = least_squares(reduced_rows, response, ridge=1e-8)
+            full_coefficients = least_squares(full_rows, response, ridge=1e-8)
+            reduced_residuals = [
+                value - sum(coefficient * item for coefficient, item in zip(reduced_coefficients, row))
+                for row, value in zip(reduced_rows, response)
+            ]
+            full_residuals = [
+                value - sum(coefficient * item for coefficient, item in zip(full_coefficients, row))
+                for row, value in zip(full_rows, response)
+            ]
+            reduced_variance = variance(reduced_residuals)
+            full_variance = variance(full_residuals)
+            score = max(0.0, math.log(max(EPSILON, reduced_variance) / max(EPSILON, full_variance)))
+            links.append(
+                {
+                    "source": channel_ids[source],
+                    "target": channel_ids[target],
+                    "score": score,
+                    "variance_reduction_pct": 100.0 * max(
+                        0.0,
+                        1.0 - full_variance / max(EPSILON, reduced_variance),
+                    ),
+                }
+            )
+    return {
+        "status": "ready",
+        "samples": length,
+        "links": links,
+        "method": "pairwise lag-one predictive variance reduction",
+        "causal": False,
+        "interpretation": "Predictive direction is not physical causality; shared BC1 reference and cascade topology are confounders.",
+    }
+
+
+def multiscale_sample_entropy(values: Sequence[float]) -> dict[str, Any]:
+    samples = [float(value) for value in values if math.isfinite(value)]
+    if len(samples) < 128:
+        return {"status": "learning", "samples": len(samples), "points": []}
+    sigma = math.sqrt(variance(samples))
+    if sigma < EPSILON:
+        return {"status": "ready", "samples": len(samples), "points": [], "interpretation": "constant record"}
+    points = []
+    for scale in (1, 2, 4, 8, 16, 32):
+        coarse = [
+            mean(samples[index:index + scale])
+            for index in range(0, len(samples) - scale + 1, scale)
+        ]
+        if len(coarse) < 16:
+            continue
+        tolerance = 0.2 * sigma
+        counts = {2: 0, 3: 0}
+        for dimension in (2, 3):
+            vectors = [coarse[index:index + dimension] for index in range(len(coarse) - dimension)]
+            for left in range(len(vectors)):
+                for right in range(left + 1, len(vectors)):
+                    if max(abs(a - b) for a, b in zip(vectors[left], vectors[right])) <= tolerance:
+                        counts[dimension] += 1
+        entropy = -math.log((counts[3] + 0.5) / (counts[2] + 0.5))
+        points.append({"scale_samples": scale, "entropy": entropy, "matches": counts[3]})
+    return {
+        "status": "ready" if points else "learning",
+        "samples": len(samples),
+        "points": points,
+        "method": "coarse-grained sample entropy, m=2, r=0.2σ with finite-count correction",
+    }
+
+
 class ExperimentStore:
     """SQLite/WAL recorder for raw samples, events, configuration, and results."""
 
@@ -2634,6 +3923,7 @@ class RollingResearchEngine:
     def __init__(self, max_samples: int = 7200) -> None:
         self.samples: deque[dict[str, Any]] = deque(maxlen=max_samples)
         self.temperatures: deque[tuple[float, dict[str, float]]] = deque(maxlen=max_samples)
+        self.estimator_history: dict[str, deque[dict[str, Any]]] = {}
         self._lock = threading.Lock()
 
     def add(self, sample: dict[str, Any], temperatures: dict[str, float] | None = None) -> None:
@@ -2648,10 +3938,49 @@ class RollingResearchEngine:
         kp: float,
         ki: float,
         active_controller: str = "pi",
+        independent_clock_mode: bool = False,
+        independent_clock_reason: str = "downstream clocks are actively disciplined",
+        estimator_histories: dict[str, Sequence[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             samples = list(self.samples)
             temperatures = list(self.temperatures)
+            estimator_signatures: dict[str, set[tuple[Any, ...]]] = {}
+
+            def append_estimator_status(node: str, status: dict[str, Any]) -> None:
+                history = self.estimator_history.setdefault(node, deque(maxlen=2048))
+                signatures = estimator_signatures.setdefault(
+                    node,
+                    {
+                        tuple(item.get("_signature", ()))
+                        for item in history
+                        if isinstance(item.get("_signature"), tuple)
+                    },
+                )
+                signature = (
+                    status.get("sample_count"),
+                    status.get("accepted_count"),
+                    status.get("rejected_count"),
+                    status.get("observed_at"),
+                )
+                if signature not in signatures:
+                    history.append({**status, "_signature": signature})
+                    signatures.add(signature)
+
+            for node, statuses in (estimator_histories or {}).items():
+                for status in statuses:
+                    if isinstance(status, dict):
+                        append_estimator_status(str(node), status)
+            for clock in telemetry_clocks:
+                node = str(clock.get("id") or "")
+                status = clock.get("kalman")
+                if not node or not isinstance(status, dict):
+                    continue
+                append_estimator_status(node, status)
+            estimator_history = {
+                node: [dict(item) for item in history]
+                for node, history in self.estimator_history.items()
+            }
         node_ids = [str(clock.get("id")) for clock in telemetry_clocks]
         if not node_ids and samples:
             node_ids = [str(clock["id"]) for clock in samples[-1].get("clocks", [])]
@@ -2672,11 +4001,37 @@ class RollingResearchEngine:
         period = 1.0 / max(0.01, sample_rate_hz)
         endpoint = node_ids[-1] if node_ids else None
         endpoint_series = series.get(endpoint, []) if endpoint else []
-        hop_channels = [hop_series[node] for node in node_ids[1:] if hop_series.get(node)]
+        hop_ids = [node for node in node_ids[1:] if hop_series.get(node)]
+        hop_channels = [hop_series[node] for node in hop_ids]
         aligned_hop_length = min((len(channel) for channel in hop_channels), default=0)
         hop_channels = [channel[-aligned_hop_length:] for channel in hop_channels] if aligned_hop_length else []
+        # Adjacent-hop PHC differences are formed from these same BC1-referenced
+        # cross timestamps, so summing them telescopes to the endpoint value.
+        # Calling that algebraic zero a closure residual would fabricate a
+        # transfer-noise floor.  Publish the direct composite until a genuinely
+        # independent loopback/common-edge observable exists.
+        transfer_residual = list(endpoint_series)
+        transfer_residual_provenance = (
+            "direct BC1-to-endpoint PHC difference; clock and transfer behavior are combined. "
+            "Independent loopback/common-edge data is required for a qualified transfer residual"
+        )
+        transfer_residual_qualified = False
         stability = stability_metrics(endpoint_series, period)
         stability_summary = clock_stability_summary(endpoint_series, period, stability)
+        transfer_noise = residual_transfer_metrics(transfer_residual, period)
+        transfer_noise.update(
+            {
+                "qualified_residual": transfer_residual_qualified,
+                "provenance": transfer_residual_provenance,
+            }
+        )
+        dynamic_stability = dynamic_stability_atlas(
+            endpoint_series,
+            transfer_residual,
+            period,
+        )
+        spectral_cascade = spectral_cascade_analysis(hop_ids, hop_channels, period)
+        multiresolution = multiresolution_coherent_modes(spectral_cascade)
         changes = bayesian_change_points(endpoint_series)
         recurrence = recurrence_analysis(hop_channels)
         bifurcation = replay_bifurcation_analysis(
@@ -2705,6 +4060,7 @@ class RollingResearchEngine:
         auto_tune = safe_bayesian_tune(endpoint_series, period, kp, ki)
         inputs = []
         outputs = []
+        ptp_samples: list[dict[str, Any]] = []
         endpoint_clock = next((clock for clock in telemetry_clocks if str(clock.get("id")) == endpoint), None)
         if endpoint_clock:
             ptp_samples = [
@@ -2714,6 +4070,49 @@ class RollingResearchEngine:
             inputs = [float(sample["frequency_ppb"]) for sample in ptp_samples]
             outputs = [float(sample["offset_ns"]) for sample in ptp_samples]
         system_id = identify_arx(inputs, outputs, period)
+        hybrid_dynamics = hybrid_servo_dynamics(ptp_samples)
+        endpoint_estimator_history = estimator_history.get(endpoint or "", [])
+        estimator_diagnostics = estimator_consistency(endpoint_estimator_history)
+        identifiability = identifiability_diagnostics(inputs, outputs)
+        identification_energy = {
+            node: sum(abs(float(item.get("excitation_ppb") or 0.0)) for item in history)
+            for node, history in estimator_history.items()
+        }
+        identification_target = max(
+            (node for node, energy in identification_energy.items() if energy > EPSILON),
+            key=identification_energy.get,
+            default=endpoint or "",
+        )
+        identification_history = estimator_history.get(
+            identification_target,
+            endpoint_estimator_history,
+        )
+        active_identification = instrumental_closed_loop_identification(
+            identification_history,
+            period,
+        )
+        active_identification["target"] = identification_target or None
+        timing_oam = timing_oam_analysis(node_ids, series, hop_series)
+        holdover_risk = holdover_reachability(endpoint_series, period)
+        decomposition_ids = [node for node in node_ids[1:] if series.get(node)]
+        decomposition_length = min((len(series[node]) for node in decomposition_ids), default=0)
+        decomposition_channels = [
+            series[node][-decomposition_length:]
+            for node in decomposition_ids
+        ] if decomposition_length else []
+        clock_decomposition = n_cornered_clock_decomposition(
+            decomposition_ids,
+            decomposition_channels,
+            period,
+            independent_clock_mode,
+            independent_clock_reason,
+        )
+        nonlinear_dynamics = {
+            "bicoherence": higher_order_spectrum(endpoint_series, period),
+            "topology": topological_dynamics(endpoint_series),
+            "directed_dependence": predictive_directed_dependence(hop_ids, hop_channels),
+            "multiscale_entropy": multiscale_sample_entropy(endpoint_series),
+        }
         observations: list[Observation] = []
         if samples and node_ids:
             latest = {str(clock["id"]): clock for clock in samples[-1].get("clocks", [])}
@@ -2783,6 +4182,20 @@ class RollingResearchEngine:
             "endpoint": endpoint,
             "stability": stability,
             "stability_summary": stability_summary,
+            "dynamics": {
+                "transfer_noise": transfer_noise,
+                "dynamic_stability": dynamic_stability,
+                "spectral_cascade": spectral_cascade,
+                "multiresolution_modes": multiresolution,
+                "hybrid_servo": hybrid_dynamics,
+                "estimator_consistency": estimator_diagnostics,
+                "identifiability": identifiability,
+                "active_identification": active_identification,
+                "timing_oam": timing_oam,
+                "holdover_risk": holdover_risk,
+                "clock_decomposition": clock_decomposition,
+                "nonlinear": nonlinear_dynamics,
+            },
             "fusion": factor_graph_fusion(node_ids, observations, node_ids[0]) if node_ids else {"status": "waiting"},
             "ensemble": ensemble,
             "change_detection": changes,

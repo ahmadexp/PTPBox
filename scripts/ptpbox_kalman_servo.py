@@ -295,6 +295,64 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.chmod(0o644)
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def identification_excitation(
+    path: Path,
+    node: str,
+    offset_ns: float,
+    now: float,
+) -> tuple[float, dict[str, Any]]:
+    state = load_json(path)
+    if not state.get("enabled") or state.get("target") != node:
+        return 0.0, state
+    expires_at = state.get("expires_at")
+    offset_limit = state.get("offset_limit_ns")
+    if isinstance(expires_at, (int, float)) and now >= float(expires_at):
+        state.update({"enabled": False, "stopped_at": now, "reason": "duration complete"})
+        atomic_json(path, state)
+        return 0.0, state
+    if isinstance(offset_limit, (int, float)) and abs(offset_ns) > float(offset_limit):
+        state.update(
+            {
+                "enabled": False,
+                "aborted_at": now,
+                "reason": f"raw master offset exceeded {float(offset_limit):.1f} ns",
+                "peak_offset_ns": abs(offset_ns),
+            }
+        )
+        atomic_json(path, state)
+        return 0.0, state
+    amplitude = state.get("amplitude_ppb")
+    started_at = state.get("started_at")
+    frequencies = state.get("frequencies_hz")
+    if (
+        not isinstance(amplitude, (int, float))
+        or not isinstance(started_at, (int, float))
+        or not isinstance(frequencies, list)
+        or not frequencies
+    ):
+        return 0.0, state
+    elapsed = max(0.0, now - float(started_at))
+    components = [
+        math.sin(2.0 * math.pi * float(frequency) * elapsed + index * 2.399963229728653)
+        for index, frequency in enumerate(frequencies)
+        if isinstance(frequency, (int, float)) and math.isfinite(float(frequency))
+    ]
+    if not components:
+        return 0.0, state
+    # The configured amplitude is a hard composite peak bound rather than the
+    # amplitude of every tone, keeping the actuator excursion predictable.
+    correction = float(amplitude) * sum(components) / len(components)
+    return max(-float(amplitude), min(float(amplitude), correction)), state
+
+
 def parse_log_sample(line: str) -> tuple[float, float, float] | None:
     match = LOG_PATTERN.search(line)
     if not match:
@@ -339,6 +397,7 @@ def main() -> None:
     parser.add_argument("--max-frequency-ppb", type=float, default=200_000.0)
     parser.add_argument("--innovation-gate-sigma", type=float, default=6.0)
     parser.add_argument("--first-step-threshold-ns", type=float, default=20_000.0)
+    parser.add_argument("--identification-state", type=Path, default=Path("/run/ptpbox/identification-state.json"))
     args = parser.parse_args()
 
     for name in (
@@ -392,8 +451,24 @@ def main() -> None:
                 stepped = True
                 offset_ns = 0.0
             status = servo.update(offset_ns, source_time)
+            base_correction_ppb = float(status["correction_ppb"])
+            excitation_ppb, identification = identification_excitation(
+                args.identification_state,
+                args.node,
+                offset_ns,
+                time.time(),
+            )
+            requested_correction_ppb = max(
+                -args.max_frequency_ppb,
+                min(args.max_frequency_ppb, base_correction_ppb + excitation_ppb),
+            )
             if status["measurement_accepted"]:
-                adjuster.set_servo_frequency_ppb(float(status["correction_ppb"]))
+                adjuster.set_servo_frequency_ppb(requested_correction_ppb)
+                # Keep the estimator's known control input equal to the actual
+                # kernel correction, including the independent instrument.
+                servo.last_correction_ppb = requested_correction_ppb
+            applied_correction_ppb = float(servo.last_correction_ppb)
+            applied_excitation_ppb = applied_correction_ppb - base_correction_ppb
             payload = {
                 "node": args.node,
                 "servo": args.mode,
@@ -408,6 +483,15 @@ def main() -> None:
                 "phase_time_constant_s": args.phase_time_constant_s,
                 "innovation_gate_sigma": args.innovation_gate_sigma,
                 **status,
+                "servo_correction_ppb": base_correction_ppb,
+                "requested_excitation_ppb": excitation_ppb,
+                "excitation_ppb": applied_excitation_ppb,
+                "applied_correction_ppb": applied_correction_ppb,
+                "correction_ppb": applied_correction_ppb,
+                "identification_active": bool(
+                    identification.get("enabled")
+                    and identification.get("target") == args.node
+                ),
             }
             atomic_json(args.state, payload)
             print(json.dumps(payload, separators=(",", ":")), flush=True)

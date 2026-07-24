@@ -374,6 +374,186 @@ class DiagnosticsTests(unittest.TestCase):
             result["cascade"]["independent_sigma_ns"],
         )
 
+    def test_transfer_metrics_preserve_constant_phase_rate_that_clock_adev_rejects(self) -> None:
+        residual = [5.0 * index for index in range(256)]
+        transfer = RESEARCH.residual_transfer_metrics(residual, 1.0)
+        clock = RESEARCH.stability_metrics(residual, 1.0)
+
+        self.assertEqual("ready", transfer["status"])
+        self.assertAlmostEqual(5.0, transfer["tierms"][0]["value"])
+        self.assertAlmostEqual(5e-9, transfer["ftu"][0]["value"])
+        self.assertAlmostEqual(5.0 / math.sqrt(2.0), transfer["adevs"][0]["value"])
+        self.assertLess(clock["adev"][0]["value"], 1e-18)
+        self.assertEqual("fractional-frequency", transfer["units"]["ftu"])
+
+    def test_rolling_engine_never_calls_a_telescoping_hop_sum_transfer_residual(self) -> None:
+        engine = RESEARCH.RollingResearchEngine()
+        for index in range(128):
+            first_hop = 8.0 * math.sin(index * 0.17)
+            second_hop = 11.0 * math.sin(index * 0.09 + 0.4)
+            engine.add(
+                {
+                    "observed_at": float(index),
+                    "clocks": [
+                        {"id": "BC1", "valid": True, "offset_ns": 0.0, "comparison_uncertainty_ns": 1.0},
+                        {
+                            "id": "BC2",
+                            "valid": True,
+                            "offset_ns": first_hop,
+                            "previous_hop_offset_ns": first_hop,
+                            "comparison_uncertainty_ns": 2.0,
+                        },
+                        {
+                            "id": "BC3",
+                            "valid": True,
+                            "offset_ns": first_hop + second_hop,
+                            "previous_hop_offset_ns": second_hop,
+                            "comparison_uncertainty_ns": 2.0,
+                        },
+                    ],
+                }
+            )
+        telemetry_clocks = [
+            {"id": "BC1", "samples": [], "rms_ns": 0.0},
+            {"id": "BC2", "samples": [], "rms_ns": 4.0},
+            {"id": "BC3", "samples": [], "rms_ns": 6.0},
+        ]
+
+        snapshot = engine.snapshot(telemetry_clocks, 1.0, 0.7, 0.3)
+        transfer = snapshot["dynamics"]["transfer_noise"]
+
+        self.assertFalse(transfer["qualified_residual"])
+        self.assertIn("clock and transfer", transfer["provenance"])
+        self.assertGreater(transfer["ftu"][0]["value"], 1e-12)
+
+    def test_dynamic_atlas_and_spectral_cascade_expose_regime_and_hop_amplification(self) -> None:
+        length = 512
+        first = [
+            15.0 * math.sin(2 * math.pi * index / 32)
+            + 4.0 * math.sin(2 * math.pi * index / 11)
+            for index in range(length)
+        ]
+        second = [1.8 * value + 0.3 * math.sin(index * 0.41) for index, value in enumerate(first)]
+        third = [1.5 * value + 0.2 * math.cos(index * 0.29) for index, value in enumerate(second)]
+        endpoint = [left + right + last for left, right, last in zip(first, second, third)]
+        residual = [0.7 * math.sin(index * 0.13) for index in range(length)]
+
+        atlas = RESEARCH.dynamic_stability_atlas(endpoint, residual, 1.0)
+        spectral = RESEARCH.spectral_cascade_analysis(["BC2", "BC3", "BC4"], [first, second, third], 1.0)
+        modes = RESEARCH.multiresolution_coherent_modes(spectral)
+
+        self.assertEqual("ready", atlas["status"])
+        self.assertGreater(len(atlas["times_s"]), 2)
+        self.assertTrue(all({"adev", "ftu", "adevs_ns"} <= set(cell) for cell in atlas["cells"]))
+        self.assertEqual("ready", spectral["status"])
+        self.assertFalse(spectral["formal_string_stability"])
+        self.assertGreater(spectral["median_adjacent_coherence"], 0.9)
+        self.assertGreater(max(point["hops"][1]["gain_db"] for point in spectral["points"]), 4.0)
+        self.assertEqual("ready", modes["status"])
+        self.assertIn("not the reference", modes["provenance"])
+
+    def test_active_identification_uses_independent_multisine_and_coherence_gates(self) -> None:
+        history = []
+        output = 0.0
+        frequencies = (4 / 128, 8 / 128, 16 / 128, 24 / 128)
+        for index in range(640):
+            excitation = sum(math.sin(2 * math.pi * frequency * index) for frequency in frequencies)
+            output = 0.88 * output + 0.12 * excitation
+            history.append(
+                {
+                    "excitation_ppb": excitation,
+                    "applied_correction_ppb": excitation,
+                    "measurement_ns": output,
+                    "source_time": index * 0.125,
+                }
+            )
+
+        result = RESEARCH.instrumental_closed_loop_identification(history, 1.0)
+
+        self.assertTrue(result["active"])
+        self.assertAlmostEqual(0.125, result["sample_period_s"])
+        self.assertGreaterEqual(result["reliable_bins"], 4)
+        self.assertIn(result["status"], {"ready", "low-evidence"})
+        self.assertGreater(max(point["coherence_excitation_output"] for point in result["points"]), 0.95)
+        self.assertIn("injected after", result["provenance"])
+        self.assertIn("plant-scatter", result["iqc_envelope"]["model"])
+
+    def test_path_regime_pairs_separate_sync_and_delay_records(self) -> None:
+        events = []
+        for index in range(12):
+            forward = 80.0 + (index % 3)
+            reverse = 82.0 - (index % 2)
+            if index == 10:
+                forward += 60.0
+            events.extend(
+                [
+                    {
+                        "node": "BC4",
+                        "kind": "sync",
+                        "observed_at": index * 2.0,
+                        "sequence_id": 100 + index,
+                        "forward_transit_ns": forward,
+                    },
+                    {
+                        "node": "BC4",
+                        "kind": "delay",
+                        "observed_at": index * 2.0 + 0.2,
+                        "sequence_id": 500 + index,
+                        "reverse_transit_ns": reverse,
+                    },
+                ]
+            )
+
+        result = RESEARCH.path_regime_analysis(events)
+
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(12, result["samples"])
+        self.assertFalse(result["calibrated_asymmetry"])
+        self.assertEqual(100, result["timeline"][0]["forward_sequence_id"])
+        self.assertEqual(500, result["timeline"][0]["reverse_sequence_id"])
+        self.assertTrue(any(item["name"] == "congested" for item in result["regimes"]))
+
+    def test_holdover_clock_decomposition_and_nonlinear_diagnostics_are_evidence_gated(self) -> None:
+        phase = [
+            2.4 * index + 0.004 * index * index + 3.0 * math.sin(index * 0.17)
+            for index in range(384)
+        ]
+        holdover = RESEARCH.holdover_reachability(phase, 1.0)
+        clocks = [
+            [phase[index] + amplitude * math.sin(index * frequency) for index in range(len(phase))]
+            for amplitude, frequency in ((1.0, 0.11), (1.7, 0.13), (2.3, 0.19))
+        ]
+        decomposition = RESEARCH.n_cornered_clock_decomposition(
+            ["BC2", "BC3", "BC4"],
+            clocks,
+            1.0,
+            False,
+            "clocks remain mutually disciplined",
+        )
+        bicoherence = RESEARCH.higher_order_spectrum(
+            [
+                math.sin(2 * math.pi * .04 * index)
+                + 0.7 * math.sin(2 * math.pi * .08 * index)
+                + 0.35 * math.sin(2 * math.pi * .12 * index)
+                for index in range(512)
+            ],
+            1.0,
+        )
+        topology = RESEARCH.topological_dynamics(phase)
+        entropy = RESEARCH.multiscale_sample_entropy(phase)
+
+        self.assertEqual("ready", holdover["status"])
+        self.assertAlmostEqual(2.4, holdover["frequency_ppb"], delta=0.1)
+        self.assertTrue(holdover["forecast"])
+        self.assertEqual("gated", decomposition["status"])
+        self.assertFalse(decomposition["eligible"])
+        self.assertEqual("ready", bicoherence["status"])
+        self.assertTrue(bicoherence["couplings"])
+        self.assertEqual("ready", topology["status"])
+        self.assertTrue(topology["curve"])
+        self.assertEqual("ready", entropy["status"])
+        self.assertTrue(entropy["points"])
+
 
 class ExperimentStoreTests(unittest.TestCase):
     def test_records_raw_cycles_and_exports_csv(self) -> None:

@@ -33,12 +33,18 @@ import {
   Square,
   Terminal,
   TimerReset,
+  Waves,
   X,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CascadeDynamicsObservatory,
+  type DynamicsPayload,
+  type IdentificationState,
+} from "./cascade-dynamics";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Holdover" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
@@ -234,6 +240,7 @@ type AgentStatus = {
   agent_version?: string;
   advanced_capabilities?: Record<string, boolean>;
   active_experiment?: ResearchExperiment | null;
+  identification?: IdentificationState;
   profile_compliance?: ResearchPayload["profiles"];
   fault?: { enabled?: boolean; target?: string; expires_at?: number };
 };
@@ -353,6 +360,7 @@ type ResearchPayload = {
   endpoint: string | null;
   stability: Record<StabilityMetric, StabilityPoint[]>;
   stability_summary: StabilitySummary;
+  dynamics?: DynamicsPayload;
   fusion: {
     status?: string;
     reference?: string;
@@ -775,6 +783,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   Metrology: { title: "Metrology workbench", description: "Quantify stability, fuse clock states, build an ensemble timescale, and preserve reproducible raw experiments." },
   "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
   Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
+  "Cascade dynamics": { title: "Cascade Dynamics Observatory", description: "Separate clock, transfer, servo, spatial, holdover, and nonlinear evidence across the complete timing chain." },
   Holdover: { title: "Holdover chamber", description: "Synchronize, release clock discipline, and measure raw free-running PHC wander against the captured release baseline." },
   Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
   Analytics: { title: "Timing analytics", description: "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." },
@@ -1037,6 +1046,141 @@ function mergeRawHistory(current: HistoryPoint[], incoming: HistoryPoint[], seco
     if (point.t >= cutoff) unique.set(point.key ?? `${point.t}:${Object.keys(point.values)[0]}`, point);
   }
   return [...unique.values()].sort((left, right) => left.t - right.t).slice(-30_000);
+}
+
+function buildDynamicsModel(history: HistoryPoint[], nodes: ClockNode[]): DynamicsPayload {
+  const endpoint = nodes.at(-1)?.id;
+  const endpointValues = endpoint ? history.map((point) => point.values[endpoint]).filter(Number.isFinite) : [];
+  const hopIds = nodes.slice(1).map((node) => node.id);
+  const hopChannels = hopIds.map((id) => history.map((point) => point.hopValues?.[id]).filter((value): value is number => Number.isFinite(value)));
+  const length = Math.min(endpointValues.length, ...hopChannels.map((channel) => channel.length));
+  const endpointTail = endpointValues.slice(-length);
+  const factors = [1, 2, 4, 8, 16, 32].filter((factor) => length > factor * 3);
+  const transferResidual = endpointTail;
+  const transferCurves = factors.map((factor) => {
+    const differences = transferResidual.slice(0, -factor).map((value, index) => transferResidual[index + factor] - value);
+    const tie = Math.sqrt(differences.reduce((sum, value) => sum + value * value, 0) / Math.max(1, differences.length));
+    const averages = Array.from({ length: Math.max(0, transferResidual.length - factor + 1) }, (_value, index) => (
+      transferResidual.slice(index, index + factor).reduce((sum, value) => sum + value, 0) / factor
+    ));
+    const averageDifferences = averages.slice(0, -factor).map((value, index) => averages[index + factor] - value);
+    const adevs = Math.sqrt(averageDifferences.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * averageDifferences.length));
+    return { factor, tie, ftu: tie / (factor * 1e9), adevs, pairs: differences.length };
+  });
+  const dynamicCells: NonNullable<DynamicsPayload["dynamic_stability"]>["cells"] = [];
+  const window = Math.min(length, 64);
+  const ends = length >= 64 ? [64, 76, 88, 100, 112, length].filter((value, index, all) => value <= length && all.indexOf(value) === index) : [];
+  ends.forEach((end) => {
+    const values = endpointTail.slice(end - window, end);
+    const residual = transferResidual.slice(end - window, end);
+    factors.filter((factor) => factor <= 8).forEach((factor) => {
+      const second = values.slice(0, -2 * factor).map((value, index) => values[index + 2 * factor] - 2 * values[index + factor] + value);
+      const adev = Math.sqrt(second.reduce((sum, value) => sum + value * value, 0) / Math.max(1, 2 * second.length)) * 1e-9 / factor;
+      const differences = residual.slice(0, -factor).map((value, index) => residual[index + factor] - value);
+      const tie = Math.sqrt(differences.reduce((sum, value) => sum + value * value, 0) / Math.max(1, differences.length));
+      dynamicCells.push({ time_s: end - length, tau_s: factor, adev, mdev: adev * .82, ftu: tie / (factor * 1e9), adevs_ns: tie / Math.SQRT2, pairs: differences.length });
+    });
+  });
+  const frequencies = [0.008, .012, .018, .027, .04, .06, .09, .13, .19, .28, .38, .48];
+  const spectralPoints = frequencies.map((frequency, frequencyIndex) => {
+    const rawPowers = hopChannels.map((channel, channelIndex) => {
+      const values = channel.slice(-Math.min(96, channel.length));
+      const center = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+      const coefficient = values.reduce((sum, value, index) => sum + (value - center) * Math.cos(2 * Math.PI * frequency * index), 0);
+      return Math.max(1e-9, coefficient * coefficient / Math.max(1, values.length) + .01 * (channelIndex + 1));
+    });
+    const hops = hopIds.map((id, index) => {
+      const gain = index ? 10 * Math.log10(rawPowers[index] / rawPowers[index - 1]) : 0;
+      const cumulative = index ? 10 * Math.log10(rawPowers[index] / rawPowers[0]) : 0;
+      return { id, psd_db_ns2_hz: 10 * Math.log10(rawPowers[index]), gain_db: gain, cumulative_gain_db: cumulative, coherence: .72 + .25 * Math.abs(Math.cos(frequencyIndex * .4 + index)), phase_deg: Math.sin(frequencyIndex * .31 + index * .5) * 70 };
+    });
+    const totalPower = rawPowers.reduce((sum, value) => sum + value, 0);
+    return {
+      frequency_hz: frequency,
+      total_power_db: 10 * Math.log10(totalPower),
+      dominant_share: .42 + .38 * Math.abs(Math.sin(frequencyIndex * .35)),
+      hops,
+      mode: hopIds.map((id, index) => ({ id, magnitude: Math.sqrt(rawPowers[index] / totalPower), phase_deg: hops[index].phase_deg })),
+    };
+  });
+  const bands = [
+    { label: "wander", minimum_hz: .008, maximum_hz: .027 },
+    { label: "slow servo", minimum_hz: .027, maximum_hz: .09 },
+    { label: "servo band", minimum_hz: .09, maximum_hz: .28 },
+    { label: "fast residual", minimum_hz: .28, maximum_hz: .48 },
+  ].map((band, bandIndex) => ({
+    ...band,
+    energy_share: [.34, .29, .24, .13][bandIndex],
+    dominant_share: .54 + bandIndex * .07,
+    loadings: hopIds.map((id, index) => ({ id, magnitude: .18 + .75 * Math.abs(Math.sin((index + 1) * (bandIndex + 1) * .41)), phase_deg: Math.sin(index + bandIndex) * 80 })),
+  }));
+  const oamNodes = nodes.map((node) => {
+    const values = history.map((point) => point.values[node.id]).filter(Number.isFinite);
+    const center = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+    const dynamic = values.map((value) => value - center);
+    return { id: node.id, samples: values.length, cte_ns: center, dte_rms_ns: Math.sqrt(dynamic.reduce((sum, value) => sum + value * value, 0) / Math.max(1, dynamic.length)), peak_to_peak_ns: values.length ? Math.max(...values) - Math.min(...values) : 0, max_abs_te_ns: Math.max(0, ...values.map(Math.abs)), p95_abs_te_ns: percentile(values.map(Math.abs), .95) };
+  });
+  const last = endpointValues.at(-1) ?? 0;
+  const forecast = [0, 10, 30, 60, 120, 300, 600, 900].map((horizon) => {
+    const expected = last + 7.2 * horizon + .002 * horizon * horizon;
+    const sigma = 4 + .16 * horizon;
+    return { horizon_s: horizon, expected_ns: expected, sigma_ns: sigma, lower_95_ns: expected - 1.96 * sigma, upper_95_ns: expected + 1.96 * sigma };
+  });
+  return {
+    transfer_noise: {
+      status: transferCurves.length ? "ready" : "learning",
+      samples: transferResidual.length,
+      qualified_residual: false,
+      provenance: "MODEL PREVIEW · direct BC1-to-endpoint PHC difference; clock and transfer behavior remain combined",
+      ftu: transferCurves.map((point) => ({ tau_s: point.factor, value: Math.max(1e-16, point.ftu), pairs: point.pairs })),
+      adevs: transferCurves.map((point) => ({ tau_s: point.factor, value: Math.max(1e-4, point.adevs), pairs: point.pairs })),
+      tierms: transferCurves.map((point) => ({ tau_s: point.factor, value: point.tie, pairs: point.pairs })),
+    },
+    dynamic_stability: { status: dynamicCells.length ? "ready" : "learning", samples: length, window_s: window, cells: dynamicCells, times_s: [...new Set(dynamicCells.map((cell) => cell.time_s))], taus_s: [...new Set(dynamicCells.map((cell) => cell.tau_s))] },
+    spectral_cascade: { status: length >= 32 ? "ready" : "learning", samples: length, channels: hopIds, segments: 5, median_adjacent_coherence: .88, formal_string_stability: false, points: spectralPoints },
+    multiresolution_modes: { status: "ready", bands, provenance: "SIMULATION · mrCOSTS-inspired log-frequency coherent spatial modes" },
+    hybrid_servo: {
+      status: "ready",
+      samples: history.length,
+      states: [{ state: "locked", samples: history.length - 18, share: .85, offset_rms_ns: nodes.at(-1)?.rms ?? 0, correction_rms_ppb: 8.4, median_dwell_samples: 71, local_pole: .92 }, { state: "acquiring", samples: 18, share: .15, offset_rms_ns: 61, correction_rms_ppb: 31, median_dwell_samples: 9, local_pole: .71 }],
+      transitions: [{ source: "acquiring", target: "locked", count: 2, probability: 1 }],
+      timeline: history.map((point, index) => ({ observed_at: point.t, state: index > 18 ? "locked" : "acquiring", offset_ns: point.values[endpoint ?? ""] ?? 0, correction_ppb: Math.sin(index * .17) * 8 })),
+    },
+    estimator_consistency: { status: "learning", samples: 0, points: [], interpretation: "Simulation does not invent Kalman innovations." },
+    identifiability: { status: "ready", samples: history.length, normalized_information_eigenvalues: [2.8, 1.1, .62, .21, .04], condition_number: 70, rank: 5, parameter_count: 5, input_sigma_ppb: 5.2, persistently_exciting: false },
+    active_identification: { status: "gated", active: false, samples: 0, points: [], reliable_bins: 0, reason: "Start a bounded hardware identification run to unlock formal loop evidence." },
+    timing_oam: {
+      status: "ready",
+      nodes: oamNodes,
+      accumulation: hopIds.map((id, index) => ({ id, hop_cte_ns: nodes[index + 1]?.hopOffset ?? 0, accumulated_cte_ns: nodes[index + 1]?.offset ?? 0, hop_p2p_ns: 8 + index * 5 })),
+      thresholds: [100, 1000, 10000].map((limit) => ({ label: limit === 100 ? "100 ns" : limit === 1000 ? "1 µs" : "10 µs", limit_ns: limit, violations: oamNodes.filter((node) => node.max_abs_te_ns > limit).map((node) => node.id), pass: oamNodes.every((node) => node.max_abs_te_ns <= limit), provenance: "simulation reference threshold" })),
+    },
+    holdover_risk: {
+      status: "ready",
+      samples: endpointValues.length,
+      initial_phase_ns: last,
+      frequency_ppb: 7.2,
+      drift_ppb_s: .004,
+      calibration: "unvalidated-live-forecast",
+      forecast,
+      thresholds: [100, 1000, 10000].map((limit) => ({
+        limit_ns: limit,
+        first_5pct_horizon_s: forecast.find((point) => Math.abs(point.expected_ns) + 1.645 * point.sigma_ns >= limit)?.horizon_s ?? null,
+        risks: forecast.map((point) => ({
+          horizon_s: point.horizon_s,
+          probability: Math.min(1, Math.max(0, (Math.abs(point.expected_ns) + point.sigma_ns - limit) / Math.max(1, limit))),
+        })),
+      })),
+    },
+    clock_decomposition: { status: "gated", samples: length, eligible: false, eligibility_reason: "SIMULATION · downstream clocks remain disciplined; enter measured holdover to attribute oscillator noise.", clocks: hopIds.map((id, index) => ({ id, variance_ppb2: (index + 1) ** 2 * .4, sigma_ppb: Math.sqrt((index + 1) ** 2 * .4) })) },
+    path_regimes: { status: "learning", samples: 0, calibrated_asymmetry: false, regimes: [], timeline: [], interpretation: "Simulation does not invent one-way delay evidence." },
+    nonlinear: {
+      bicoherence: { status: "ready", samples: length, screening_floor: .12, strongest: { f1_hz: .04, f2_hz: .09, sum_hz: .13, bicoherence: .34 }, couplings: [] },
+      topology: { status: "ready", samples: length, max_beta1: 4, curve: [0.3, .45, .6, .8, 1, 1.3, 1.7].map((radius, index) => ({ radius_sigma: radius, beta0: Math.max(1, 9 - index), beta1: [0, 1, 3, 4, 3, 1, 0][index], edges: 20 + index * 9, triangles: index * 5 })) },
+      directed_dependence: { status: "ready", samples: length, causal: false, links: hopIds.flatMap((source, sourceIndex) => hopIds.filter((target) => target !== source).map((target, targetIndex) => ({ source, target, score: Math.max(0, .3 - Math.abs(sourceIndex - targetIndex) * .04), variance_reduction_pct: Math.max(0, 21 - Math.abs(sourceIndex - targetIndex) * 2.5) }))) },
+      multiscale_entropy: { status: "ready", samples: length, points: [1, 2, 4, 8, 16, 32].map((scale, index) => ({ scale_samples: scale, entropy: .52 + Math.sin(index * .7) * .2, matches: 80 - index * 9 })) },
+    },
+  };
 }
 
 function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): ResearchPayload {
@@ -1351,6 +1495,7 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
     endpoint,
     stability,
     stability_summary: stabilitySummary,
+    dynamics: buildDynamicsModel(history, nodes),
     fusion: {
       status: "solved",
       reference: "BC1",
@@ -3537,6 +3682,7 @@ export default function PTPBoxDashboard() {
   const [faultDurationS, setFaultDurationS] = useState(30);
   const [faultActive, setFaultActive] = useState(false);
   const [faultBusy, setFaultBusy] = useState(false);
+  const [identificationBusy, setIdentificationBusy] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -4158,6 +4304,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Clock stability atlas, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev pdev totdev mtie tie rms theo1 allan hadamard parabolic stability uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-dynamics", group: "Navigate", label: "Cascade dynamics", description: "Transfer noise, spatial amplification, coherent modes, robust loop evidence, and holdover risk", keywords: "dynamic allan davar ftu adevs spectrum coherence string stability mrcosts hybrid nis observability sensitivity disk margin iqc topology bicoherence", section: "Cascade dynamics", icon: Waves },
     { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
     { id: "nav-analytics", group: "Navigate", label: "Timing analytics", description: "Raw PHC statistics, RMS, and exports", keywords: "graphs measurements rms raw", section: "Analytics", icon: BarChart3 },
@@ -4504,6 +4651,32 @@ export default function PTPBoxDashboard() {
     }
   };
 
+  const controlIdentification = async (request: {
+    target: string;
+    enabled: boolean;
+    amplitude_ppb?: number;
+    duration_s?: number;
+    offset_limit_ns?: number;
+    frequencies_hz?: number[];
+  }) => {
+    setIdentificationBusy(true);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/identification/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      const result = await response.json() as { error?: string; identification?: IdentificationState };
+      if (!response.ok) throw new Error(result.error || "identification control failed");
+      setAgentStatus((current) => current ? { ...current, identification: result.identification } : current);
+      setToast(request.enabled ? `${request.target}: bounded multisine identification started` : `${request.target}: identification stopped`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Identification control is unavailable");
+    } finally {
+      setIdentificationBusy(false);
+    }
+  };
+
   const navItems: { label: Section; icon: typeof LayoutDashboard; badge?: string }[] = [
     { label: "Overview", icon: LayoutDashboard },
     { label: "Multi-pendulum", icon: Orbit },
@@ -4512,6 +4685,7 @@ export default function PTPBoxDashboard() {
     { label: "Metrology", icon: TimerReset, badge: activeResearch.active_experiment ? "REC" : undefined },
     { label: "Path microscope", icon: Radio },
     { label: "Intelligence", icon: Gauge },
+    { label: "Cascade dynamics", icon: Waves, badge: agentStatus?.identification?.enabled ? "ID" : undefined },
     { label: "Holdover", icon: TimerReset, badge: holdover?.session?.phase === "holdover" ? "LIVE" : holdover?.session?.phase === "synchronizing" ? "ARM" : undefined },
     { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
@@ -4774,6 +4948,18 @@ export default function PTPBoxDashboard() {
 
           {section === "Intelligence" && (
             <IntelligenceWorkbench research={activeResearch} activeNode={activeNode} stageTune={stageTune} />
+          )}
+
+          {section === "Cascade dynamics" && (
+            <CascadeDynamicsObservatory
+              dynamics={activeResearch.dynamics}
+              nodes={nodes}
+              connection={connection}
+              analysisMode={activeResearch.mode}
+              identification={agentStatus?.identification}
+              identificationBusy={identificationBusy}
+              controlIdentification={(request) => void controlIdentification(request)}
+            />
           )}
 
           {section === "Holdover" && (

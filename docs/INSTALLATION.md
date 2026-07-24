@@ -121,7 +121,7 @@ The installer:
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
 5. creates a systemd unit running as the operator account;
 6. validates a sudoers policy for fixed `start`, `stop`, `restart`, `status`,
-   validated `servo`, and bounded `fault` operations only;
+   validated `servo`, bounded `fault`, and bounded `identify` operations only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
 8. adds a scoped AppArmor local include for multi-PHC boundary clocks and
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
@@ -206,6 +206,20 @@ uncertainty, innovation gate, rejection count, and lock state.
 This is clock-servo holdover, not a simulated graph and not a stopped timing
 process. A servo transition causes a brief restart of the selected `ptp4l`
 instance because LinuxPTP does not switch `clock_servo` dynamically.
+
+## Bounded active identification
+
+Open **Cascade dynamics** after selecting a running Kalman, adaptive-Kalman, or
+IMM servo. The controlled-identification panel can inject a finite multisine
+frequency correction while all PHC and LinuxPTP monitoring remains active.
+Set the target, composite peak in ppb, duration, raw-offset abort limit, and
+one to eight frequencies.
+
+The web agent validates the request, the root controller repeats every limit
+against the applied sample rate, and the PHC worker automatically disables the
+instrument on expiry or excessive offset. The default 25 ppb / 180 s / 5 µs
+settings are intentionally conservative starting points, not universal safe
+limits. Use this only on an isolated lab cascade.
 
 ## Durable measurement runs
 

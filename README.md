@@ -182,6 +182,46 @@ external timebase, it contains twice the inter-clock phase offset as well as
 path asymmetry. PTPBox does not mislabel that observable as calibrated one-way
 delay.
 
+## Observe the cascade as a dynamical system
+
+The **Cascade Dynamics Observatory** brings clock, network, servo, and
+oscillator evidence into one qualification-aware page:
+
+- sliding ADEV/MDEV and first-difference FTU/ADEVS atlases expose stability
+  regime changes instead of collapsing the complete run into one curve;
+- Welch cross-spectral matrices show frequency-by-hop amplification,
+  adjacent-hop coherence, phase, and dominant spatial modes, with
+  multiresolution log-frequency coherent bands;
+- servo-state transitions, dwell time, local pole estimates, Kalman
+  NIS/innovation-whiteness checks, and ARX information eigenvalues reveal
+  estimator health and identifiability;
+- holdover reachability tubes estimate time-to-mask risk, while N-cornered
+  clock decomposition remains gated until the clocks are genuinely independent
+  in holdover;
+- timing OAM separates constant time error, dynamic time error, peak-to-peak
+  error, and measured hop accumulation;
+- paired Sync/Delay observations classify round-trip congestion and directional
+  imbalance without calling the result calibrated path asymmetry; and
+- bicoherence, delay-embedding Betti curves, multiscale sample entropy, and
+  lagged predictive dependence expose nonlinear structure without turning it
+  into a chaos or causality claim.
+
+The passive cascade map is intentionally not labeled formal string stability.
+That claim requires an independent persistently exciting input. For a PTPBox
+Kalman-family servo, the page can run a bounded random-phase multisine
+frequency experiment with a hard peak correction, fixed duration, and
+raw-offset abort limit. Instrumental cross spectra then publish plant and
+open-loop estimates, \(S\), \(T\), \(KS\), Nyquist geometry, a coherence-gated
+balanced disk margin, and a frequency-dependent plant-scatter/IQC-style
+envelope.
+
+> [!CAUTION]
+> BC1-referenced adjacent-hop PHC differences telescope algebraically to the
+> direct endpoint difference. PTPBox never presents that zero as a measured
+> transfer-noise floor. FTU and ADEVS remain explicitly labeled **clock +
+> transfer composite** until an independent loopback, common-edge, or
+> calibrated residual is connected.
+
 <table>
   <tr>
     <td width="50%"><img src="docs/screenshots/intelligence-live.png" alt="Live PTPBox control intelligence workbench"></td>
@@ -254,6 +294,7 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Metrology** | Compare ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 on a shared fractional-frequency scale; compare TDEV, MTIE, and TIE RMS on a shared time-error scale; inspect drift and local noise-slope candidates; fuse redundant offset constraints; build an ensemble clock; and propagate a covariance-aware error budget. |
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
 | **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
+| **Cascade Dynamics Observatory** | Follow dynamic stability, coherent spatial modes, passive hop amplification, estimator consistency, identifiability, timing OAM, holdover reachability, nonlinear structure, and evidence-gated active loop identification from one surface. |
 | **Holdover chamber** | Qualify continuous lock, capture a per-node release baseline, stop adjustment without stopping observation, plot raw wander, report rate error, and restore the exact saved servos. |
 | **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |

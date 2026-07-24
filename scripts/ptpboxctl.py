@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import signal
@@ -26,6 +27,8 @@ SERVO_STATE_FILE = STATE_DIR / "servo-state.json"
 SERVO_REQUEST_FILE = CONFIG_FILE.with_name("servo-request.json")
 FAULT_REQUEST_FILE = CONFIG_FILE.with_name("fault-request.json")
 FAULT_STATE_FILE = STATE_DIR / "fault-state.json"
+IDENTIFICATION_REQUEST_FILE = CONFIG_FILE.with_name("identification-request.json")
+IDENTIFICATION_STATE_FILE = STATE_DIR / "identification-state.json"
 KALMAN_HELPER = Path(os.environ.get("PTPBOX_KALMAN_HELPER", "/usr/local/sbin/ptpbox-kalman-servo"))
 EVENT_MONITOR_HELPER = Path(os.environ.get("PTPBOX_EVENT_MONITOR_HELPER", "/usr/local/sbin/ptpbox-event-monitor"))
 PPS_COMPARE_HELPER = Path(os.environ.get("PTPBOX_PPS_COMPARE_HELPER", "/usr/local/sbin/ptpbox-pps-compare"))
@@ -526,6 +529,8 @@ def spawn_kalman(
         str(max_frequency),
         "--first-step-threshold-ns",
         str(float(servo["first_step_threshold_ns"])),
+        "--identification-state",
+        str(IDENTIFICATION_STATE_FILE),
     ]
     spawn(f"{node}-{mode.upper()}", args, processes)
     processes[-1].update(
@@ -861,6 +866,24 @@ def servo_apply() -> dict[str, Any]:
     targets = receivers if target == "all" else [target]
     if not enabled:
         targets = list(reversed(targets))
+    identification = load_json(IDENTIFICATION_STATE_FILE, {})
+    if (
+        isinstance(identification, dict)
+        and identification.get("enabled")
+        and identification.get("target") in targets
+    ):
+        identification.update(
+            {
+                "enabled": False,
+                "stopped_at": time.time(),
+                "reason": "target servo changed",
+            }
+        )
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary_identification = IDENTIFICATION_STATE_FILE.with_suffix(".json.tmp")
+        temporary_identification.write_text(json.dumps(identification, indent=2) + "\n", encoding="utf-8")
+        temporary_identification.replace(IDENTIFICATION_STATE_FILE)
+        IDENTIFICATION_STATE_FILE.chmod(0o644)
 
     processes = load_json(PIDS_FILE, [])
     if not isinstance(processes, list) or not processes:
@@ -969,6 +992,7 @@ def status() -> dict[str, Any]:
         "namespaces": [node["name"] for node in topo["nodes"] if namespace_exists(node["name"])],
         "servo": servo_state(topo),
         "fault": load_json(FAULT_STATE_FILE, {"enabled": False}),
+        "identification": load_json(IDENTIFICATION_STATE_FILE, {"enabled": False}),
     }
 
 
@@ -1007,6 +1031,11 @@ def stop() -> dict[str, Any]:
                 except OSError:
                     pass
     PIDS_FILE.unlink(missing_ok=True)
+    if IDENTIFICATION_STATE_FILE.exists():
+        state = load_json(IDENTIFICATION_STATE_FILE, {})
+        if isinstance(state, dict):
+            state.update({"enabled": False, "stopped_at": time.time(), "reason": "cascade stopped"})
+            IDENTIFICATION_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     return {"ok": True, "running": False, "stopped": stopped}
 
 
@@ -1095,6 +1124,74 @@ def fault_apply() -> dict[str, Any]:
     return {"ok": True, "fault": state}
 
 
+def identification_apply() -> dict[str, Any]:
+    """Arm or disarm one bounded multisine correction on a PTPBox servo."""
+    require_root()
+    request = load_json(IDENTIFICATION_REQUEST_FILE)
+    if not isinstance(request, dict):
+        raise ValueError("missing identification request")
+    target = request.get("target")
+    enabled = request.get("enabled")
+    topo = topology()
+    receivers = {node["name"] for node in topo["nodes"][1:]}
+    if target not in receivers or not isinstance(enabled, bool):
+        raise ValueError("identification target must be a downstream clock")
+    if not enabled:
+        previous = load_json(IDENTIFICATION_STATE_FILE, {})
+        state = {
+            **(previous if isinstance(previous, dict) else {}),
+            "enabled": False,
+            "target": target,
+            "stopped_at": time.time(),
+            "reason": "stopped by operator",
+        }
+    else:
+        control_node = servo_state(topo)["nodes"].get(str(target), {})
+        if control_node.get("enabled") is not True or control_node.get("type") not in {"kalman", "adaptive-kalman", "imm"}:
+            raise RuntimeError("active identification requires a running PTPBox Kalman-family servo")
+        amplitude = float(request.get("amplitude_ppb", 25.0))
+        duration = float(request.get("duration_s", 180.0))
+        offset_limit = float(request.get("offset_limit_ns", 5_000.0))
+        frequencies = request.get("frequencies_hz")
+        sample_rate_hz = 2.0 ** (-int(config()["log_sync_interval"]))
+        frequency_limit_hz = 0.45 * sample_rate_hz
+        if (
+            not 0.1 <= amplitude <= 500.0
+            or not 30.0 <= duration <= 900.0
+            or not 100.0 <= offset_limit <= 100_000.0
+            or not isinstance(frequencies, list)
+            or not 1 <= len(frequencies) <= 8
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.002 <= float(value) <= frequency_limit_hz
+                for value in frequencies
+            )
+        ):
+            raise ValueError("identification request is outside guarded limits")
+        started_at = time.time()
+        state = {
+            "enabled": True,
+            "target": target,
+            "servo": control_node["type"],
+            "amplitude_ppb": amplitude,
+            "frequencies_hz": [float(value) for value in frequencies],
+            "offset_limit_ns": offset_limit,
+            "started_at": started_at,
+            "expires_at": started_at + duration,
+            "duration_s": duration,
+            "waveform": "equal-amplitude deterministic random-phase multisine",
+            "safety": "automatic offset-limit and expiry abort",
+        }
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = IDENTIFICATION_STATE_FILE.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(IDENTIFICATION_STATE_FILE)
+    IDENTIFICATION_STATE_FILE.chmod(0o644)
+    return {"ok": True, "identification": state}
+
+
 def discover() -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for interface in sorted(Path("/sys/class/net").iterdir(), key=lambda item: item.name):
@@ -1112,7 +1209,7 @@ def discover() -> dict[str, Any]:
 def main() -> None:
     enter_namespace_mount_context()
     parser = argparse.ArgumentParser(description="Manage the PTPBox namespace cascade")
-    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "fault", "teardown"])
+    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "fault", "identify", "teardown"])
     args = parser.parse_args()
     try:
         if args.action == "discover":
@@ -1132,6 +1229,8 @@ def main() -> None:
             result = servo_apply()
         elif args.action == "fault":
             result = fault_apply()
+        elif args.action == "identify":
+            result = identification_apply()
         else:
             result = teardown()
         print(json.dumps(result))

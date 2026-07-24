@@ -177,6 +177,70 @@ uncertainty. With no hardware temperature sensor it returns `learning` or
 Holdover itself is real: the selected servo is stopped while LinuxPTP packet
 reception and direct PHC monitoring continue.
 
+## Dynamic cascade metrology
+
+### Clock stability versus transfer stability
+
+The rolling atlas evaluates clock ADEV/MDEV and first-difference FTU/ADEVS in
+overlapping windows. This preserves time localization: a lock transition, path
+regime, or oscillator warm-up is not silently averaged into one stationary
+curve.
+
+For a residual phase record \(r_k\), PTPBox reports:
+
+\[
+\mathrm{TIE}_{\mathrm{rms}}(\tau)=
+\sqrt{\left\langle(r_{k+m}-r_k)^2\right\rangle},
+\qquad
+\mathrm{FTU}(\tau)=\frac{\mathrm{TIE}_{\mathrm{rms}}(\tau)}
+{\tau\cdot10^9}
+\]
+
+and applies the two-sample Allan equation to \(m\)-sample averages of \(r_k\)
+for ADEVS, retaining nanosecond units. ADEVS is sensitive to a linear trend
+that ordinary phase-derived ADEV rejects.
+
+These names do not qualify the observable. Direct BC1-to-endpoint PHC
+difference combines oscillator and path behavior. Because adjacent-hop PHC
+differences come from those same BC1 cross timestamps, their sum telescopes
+exactly to the endpoint; subtracting it would create an algebraic zero rather
+than an independently measured closure. `qualified_residual` therefore remains
+false until a loopback, common-edge, calibrated PPS/TIC, or another independent
+residual is supplied.
+
+### Cross-spectral cascade modes
+
+Aligned adjacent-hop channels are linearly detrended and analyzed with
+overlapping Hann-window Welch cross spectra. At each frequency bin the engine
+returns:
+
+- per-hop PSD, phase, adjacent-hop magnitude-squared coherence, incremental
+  gain, and cumulative gain;
+- the dominant eigenvector of the Hermitian cross-spectral matrix and its share
+  of total spatial power; and
+- four log-frequency coherent bands with average spatial loadings and energy
+  shares.
+
+This decomposition is inspired by multiresolution coherent spatio-temporal
+analysis but is not presented as the reference mrCOSTS implementation. Passive
+gain above 0 dB means the recorded cascade amplified motion at that frequency;
+`formal_string_stability` remains false without an independent input and
+coherence-qualified input/output estimate.
+
+### Servo, estimator, and observability diagnostics
+
+The hybrid-state view derives the empirical transition matrix, state shares,
+dwell distributions, offset/correction RMS, and a local first-order phase pole
+for acquisition, lock, holdover, and unknown states. For a Kalman-family servo,
+the consistency screen reports scalar normalized innovation squared (NIS),
+the fraction inside the 95% \(\chi^2_1\) gate, lag-one innovation
+autocorrelation, and accepted-update share.
+
+Separately, the normalized ARX information-matrix eigenvalues expose rank,
+condition number, and input variance. A fitted model may look stable while its
+parameters remain weakly observable; the UI therefore shows fit and
+identifiability as separate evidence.
+
 ## System identification
 
 The ARX instrument fits a regularized discrete-time autoregressive model with a
@@ -240,6 +304,68 @@ Notre Dame's linear-systems text documents the
 This is a local empirical model of the captured operating regime. It is useful
 for comparing controller settings but does not constitute a formal robust
 stability proof.
+
+### Active closed-loop identification and robust-control screens
+
+Operational correction and phase data are correlated through feedback, so a
+direct output/input ratio is biased. The active instrument adds a deterministic
+random-phase multisine *after* a selected PTPBox Kalman-family servo. Each
+sample records the independent excitation \(d\), base controller correction,
+actual applied correction \(u\), and PHC phase observation \(y\).
+
+The controller enforces:
+
+- 0.1–500 ppb composite peak correction;
+- 30–900 second duration;
+- one to eight tones from 0.002 Hz to 45% of the configured sample rate;
+- a 100–100,000 ns raw-offset abort limit; and
+- automatic expiry or immediate operator stop.
+
+Instrumental cross spectra estimate the plant as
+\(\hat G=S_{yd}/S_{ud}\), avoiding ordinary closed-loop correlation bias at
+excited frequencies. The separately observed controller contribution yields
+\(\hat C\), \(\hat L=\hat G\hat C\), and:
+
+\[
+S=\frac{1}{1+L},\qquad T=\frac{L}{1+L},\qquad KS=\frac{C}{1+L}.
+\]
+
+PTPBox publishes these curves, the identified Nyquist locus, empirical
+segment-to-segment plant scatter, a balanced disk-margin screen, and a
+frequency-dependent multiplicative uncertainty/IQC-style separation test only
+at bins passing both excitation-to-input and excitation-to-output coherence
+gates. `low-evidence` is a valid result; the UI does not promote a margin from
+unexcited bins.
+
+## Holdover reachability and independent clock attribution
+
+The reachability screen fits phase, frequency, and frequency drift to the
+recent endpoint record, then propagates residual-derived phase and frequency
+dispersion into a 95% forecast tube. For ±100 ns, ±1 µs, and ±10 µs masks it
+reports the first horizon where the modeled violation probability reaches 5%.
+The calibration state remains `unvalidated-live-forecast` until repeated
+holdover trials demonstrate empirical coverage.
+
+N-cornered analysis solves the pairwise variance system
+\(\sigma_{ij}^{2}\approx\sigma_i^2+\sigma_j^2\) with non-negative estimates.
+It assumes negligible inter-clock correlation, so PTPBox gates its
+interpretation while the cascade clocks discipline one another. The result
+becomes eligible only in independently free-running holdover or with a
+qualified common-edge comparison.
+
+## Timing OAM and path regimes
+
+Timing OAM reports constant time error (mean TE), dynamic time-error RMS,
+P95/max absolute TE, peak-to-peak TE, and measured hop-by-hop cTE accumulation.
+Reference masks are operator thresholds rather than automatic profile
+certification.
+
+The event monitor emits Sync and Delay records separately. The regime analyzer
+pairs the nearest opposite-direction record for the same node within five
+seconds, preserves both sequence IDs, and robustly classifies baseline,
+congested, forward-heavy, and reverse-heavy observations from round-trip delay
+and directional imbalance. The imbalance remains an apparent observable, not
+calibrated asymmetry.
 
 ## Replay-safe Bayesian tuning
 
@@ -455,6 +581,21 @@ It reports the operator, singular-value amplification spectrum, and one-step
 residual. This follows the snapshot philosophy introduced by
 [Schmid](https://doi.org/10.1017/S0022112010001217). The plotted singular values
 describe the fitted local map; they are not controller gain or phase margins.
+
+### Higher-order, topological, and directed diagnostics
+
+- **Bicoherence** uses a normalized direct bispectrum across overlapping,
+  tapered segments. It screens quadratic phase coupling
+  \(f_1+f_2\rightarrow f_3\), not its physical cause.
+- **Topological dynamics** constructs a normalized three-coordinate delay
+  embedding and computes Vietoris–Rips \(\beta_0\) and \(\beta_1\) curves by
+  finite-field boundary rank. Persistent loops are candidate geometry and
+  still require stationary windows and surrogate confirmation.
+- **Multiscale sample entropy** coarse-grains the record at powers of two and
+  reports finite-count-corrected sample entropy with \(m=2,r=0.2\sigma\).
+- **Predictive direction** compares lag-one target-only and target-plus-source
+  regressions. The logged variance reduction is explicitly `causal: false`;
+  the shared BC1 reference and physical cascade are confounders.
 
 ## Packet-path interpretation
 
