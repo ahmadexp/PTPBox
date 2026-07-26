@@ -337,6 +337,15 @@ at bins passing both excitation-to-input and excitation-to-output coherence
 gates. `low-evidence` is a valid result; the UI does not promote a margin from
 unexcited bins.
 
+The same coherence-qualified bins also produce empirical \(H_2\) and
+\(H_\infty\) norms for \(\hat G\), \(S\), \(T\), and \(KS\). PTPBox reports
+\(H_2\) as the RMS gain integrated over the measured frequency span, and
+\(H_\infty\) as the largest coherent-bin gain with its peak frequency. These
+are band-limited robust-performance scores for the captured experiment. They
+answer practical questions such as "how much random correction or delay noise
+gets through?" and "where is the worst measured amplification?", but they are
+not a full continuous-time robust-control proof outside the excited band.
+
 ## Holdover reachability and independent clock attribution
 
 The reachability screen fits phase, frequency, and frequency drift to the

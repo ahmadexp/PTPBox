@@ -236,7 +236,9 @@ frequency experiment with a hard peak correction, fixed duration, and
 raw-offset abort limit. Instrumental cross spectra then publish plant and
 open-loop estimates, \(S\), \(T\), \(KS\), Nyquist geometry, a coherence-gated
 balanced disk margin, and a frequency-dependent plant-scatter/IQC-style
-envelope.
+envelope. The same qualified bins now report empirical \(H_2\) and
+\(H_\infty\) norms for \(\hat G\), \(S\), \(T\), and \(KS\), separating average
+noise-energy gain from worst measured disturbance amplification.
 
 > [!CAUTION]
 > BC1-referenced adjacent-hop PHC differences telescope algebraically to the

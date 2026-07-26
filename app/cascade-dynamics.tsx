@@ -143,6 +143,16 @@ export type DynamicsPayload = {
       phase_deg?: number | null;
       qualified_bins?: number;
     };
+    robust_performance?: {
+      status?: string;
+      scope?: string;
+      qualified_bins?: number;
+      interpretation?: string;
+      plant?: RobustNorm;
+      sensitivity?: RobustNorm;
+      complementary_sensitivity?: RobustNorm;
+      control_sensitivity?: RobustNorm;
+    };
     iqc_envelope?: { robustly_separated?: boolean; minimum_distance?: number | null; model?: string };
   };
   timing_oam?: Status & {
@@ -215,6 +225,17 @@ export type DynamicsPayload = {
       points?: Array<{ scale_samples: number; entropy: number; matches: number }>;
     };
   };
+};
+
+type RobustNorm = {
+  h2?: number | null;
+  h2_db?: number | null;
+  hinfinity?: number | null;
+  hinfinity_db?: number | null;
+  peak_frequency_hz?: number | null;
+  minimum_frequency_hz?: number | null;
+  maximum_frequency_hz?: number | null;
+  bins?: number;
 };
 
 type Props = {
@@ -473,6 +494,34 @@ function RobustLoopPlots({ analysis }: { analysis?: DynamicsPayload["active_iden
   );
 }
 
+function RobustNormCards({ analysis }: { analysis?: DynamicsPayload["active_identification"] }) {
+  const performance = analysis?.robust_performance;
+  const metrics = [
+    ["plant", "Plant G", "actuation to phase"],
+    ["sensitivity", "Sensitivity S", "disturbance rejection"],
+    ["complementary_sensitivity", "Complementary T", "tracking / noise feedthrough"],
+    ["control_sensitivity", "Control KS", "correction effort"],
+  ] as const;
+  const ready = (performance?.qualified_bins ?? 0) >= 1;
+  if (!ready) return <EmptyAnalysis analysis={analysis} message={analysis?.reason ?? "Run bounded identification to estimate H2 and H∞ norms"} />;
+  return (
+    <div className="dyn-robust-norms">
+      {metrics.map(([key, label, description]) => {
+        const norm = performance?.[key];
+        return (
+          <article key={key}>
+            <span>{description}</span>
+            <strong>{label}</strong>
+            <div><small>H2</small><b>{norm?.h2_db == null ? "—" : `${norm.h2_db.toFixed(2)} dB`}</b></div>
+            <div><small>H∞</small><b>{norm?.hinfinity_db == null ? "—" : `${norm.hinfinity_db.toFixed(2)} dB`}</b></div>
+            <em>{norm?.peak_frequency_hz == null ? "peak pending" : `peak ${norm.peak_frequency_hz.toFixed(4)} Hz · ${norm.bins ?? 0} bins`}</em>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function ResearchDiagnostics({ dynamics }: { dynamics?: DynamicsPayload }) {
   const bicoherence = dynamics?.nonlinear?.bicoherence;
   const topology = dynamics?.nonlinear?.topology;
@@ -625,6 +674,9 @@ export function CascadeDynamicsObservatory({
           <div><span>IQC envelope</span><strong>{activeId?.iqc_envelope?.robustly_separated ? "SEPARATED" : "UNPROVEN"}</strong><small>{activeId?.iqc_envelope?.model ?? "needs active data"}</small></div>
           <div><span>Information rank</span><strong>{identifiability?.rank ?? 0}/{identifiability?.parameter_count ?? 5}</strong><small>κ {compact(identifiability?.condition_number)}</small></div>
         </div>
+        <div className="dyn-subpanel-title"><span>ROBUST PERFORMANCE NORMS</span><strong>H2 average energy gain · H∞ worst-bin gain</strong></div>
+        <RobustNormCards analysis={activeId} />
+        <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{activeId?.robust_performance?.interpretation ?? "H2/H∞ scores appear after coherence-qualified active identification bins are available."}</span></div>
       </section>
 
       <section className="instrument-panel">

@@ -485,7 +485,7 @@ The main objects are:
 | `dynamics.hybrid_servo` | Observed mode shares, transition probabilities, dwell statistics, correction/offset RMS, and local phase poles |
 | `dynamics.estimator_consistency` | Kalman NIS, 95% inclusion, innovation lag-one correlation, acceptance share, and consistency screen |
 | `dynamics.identifiability` | Normalized ARX information eigenvalues, rank, condition number, input variance, and persistent-excitation flag |
-| `dynamics.active_identification` | Instrumental plant/open-loop estimates, S/T/KS, Nyquist points, coherence gates, balanced disk-margin screen, and uncertainty envelope |
+| `dynamics.active_identification` | Instrumental plant/open-loop estimates, S/T/KS, Nyquist points, coherence gates, balanced disk-margin screen, uncertainty envelope, and band-limited H2/H-infinity robust-performance norms |
 | `dynamics.holdover_risk` | Phase/frequency/drift forecast tube and 5% time-to-mask crossings |
 | `dynamics.clock_decomposition` | N-cornered individual-clock variance screen with independent-holdover eligibility gate |
 | `dynamics.timing_oam` | cTE, dTE, P95/max/peak-to-peak TE, hop accumulation, and operator reference masks |

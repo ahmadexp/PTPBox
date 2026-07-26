@@ -453,6 +453,10 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("not the reference", modes["provenance"])
 
     def test_active_identification_uses_independent_multisine_and_coherence_gates(self) -> None:
+        learning = RESEARCH.instrumental_closed_loop_identification([], 1.0)
+        self.assertEqual("learning", learning["robust_performance"]["status"])
+        self.assertIsNone(learning["robust_performance"]["sensitivity"]["h2"])
+
         history = []
         output = 0.0
         frequencies = (4 / 128, 8 / 128, 16 / 128, 24 / 128)
@@ -477,6 +481,12 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertGreater(max(point["coherence_excitation_output"] for point in result["points"]), 0.95)
         self.assertIn("injected after", result["provenance"])
         self.assertIn("plant-scatter", result["iqc_envelope"]["model"])
+        performance = result["robust_performance"]
+        self.assertGreaterEqual(performance["qualified_bins"], 4)
+        self.assertIsNotNone(performance["sensitivity"]["h2"])
+        self.assertIsNotNone(performance["sensitivity"]["hinfinity"])
+        self.assertGreater(performance["plant"]["hinfinity"], 0.0)
+        self.assertIn("band-limited", performance["scope"])
 
     def test_path_regime_pairs_separate_sync_and_delay_records(self) -> None:
         events = []

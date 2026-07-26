@@ -2876,6 +2876,29 @@ def identifiability_diagnostics(
     }
 
 
+def empty_robust_performance(status: str, reason: str, qualified_bins: int = 0) -> dict[str, Any]:
+    empty_norm = {
+        "h2": None,
+        "h2_db": None,
+        "hinfinity": None,
+        "hinfinity_db": None,
+        "peak_frequency_hz": None,
+        "minimum_frequency_hz": None,
+        "maximum_frequency_hz": None,
+        "bins": 0,
+    }
+    return {
+        "status": status,
+        "scope": "band-limited empirical frequency grid",
+        "qualified_bins": qualified_bins,
+        "plant": dict(empty_norm),
+        "sensitivity": dict(empty_norm),
+        "complementary_sensitivity": dict(empty_norm),
+        "control_sensitivity": dict(empty_norm),
+        "interpretation": reason,
+    }
+
+
 def instrumental_closed_loop_identification(
     history: Sequence[dict[str, Any]],
     sample_period_s: float,
@@ -2895,12 +2918,14 @@ def instrumental_closed_loop_identification(
         )
     ]
     if len(qualified) < 64:
+        reason = "A bounded identification run needs at least 64 instrumented samples."
         return {
             "status": "learning",
             "samples": len(qualified),
             "active": bool(qualified and any(abs(float(item["excitation_ppb"])) > 1e-6 for item in qualified)),
             "points": [],
-            "reason": "A bounded identification run needs at least 64 instrumented samples.",
+            "reason": reason,
+            "robust_performance": empty_robust_performance("learning", reason),
         }
     excitation = [float(item["excitation_ppb"]) for item in qualified]
     applied = [float(item["applied_correction_ppb"]) for item in qualified]
@@ -2911,12 +2936,14 @@ def instrumental_closed_loop_identification(
     ]
     excitation_rms = math.sqrt(mean([value * value for value in excitation]))
     if excitation_rms < 0.01:
+        reason = "No independent correction excitation is present in the captured record."
         return {
             "status": "gated",
             "samples": len(qualified),
             "active": False,
             "points": [],
-            "reason": "No independent correction excitation is present in the captured record.",
+            "reason": reason,
+            "robust_performance": empty_robust_performance("gated", reason),
         }
     source_times = [
         float(item.get("source_time", item.get("observed_at")))
@@ -2939,7 +2966,13 @@ def instrumental_closed_loop_identification(
         maximum_window=128,
     )
     if spectra.get("status") != "ready":
-        return {**spectra, "active": True, "points": []}
+        reason = str(spectra.get("reason", "Frequency-domain spectra are still learning."))
+        return {
+            **spectra,
+            "active": True,
+            "points": [],
+            "robust_performance": empty_robust_performance(str(spectra.get("status", "learning")), reason),
+        }
     transforms: list[list[list[complex]]] = spectra["transforms"]
     segments = int(spectra["segments"])
     points = []
@@ -3009,6 +3042,61 @@ def instrumental_closed_loop_identification(
         if point["coherence_excitation_output"] >= 0.55
         and point["coherence_excitation_input"] >= 0.75
     ]
+
+    def band_limited_norms(key: str) -> dict[str, Any]:
+        usable = [
+            point for point in reliable
+            if math.isfinite(float(point["frequency_hz"]))
+            and math.isfinite(float(point[key]))
+        ]
+        if not usable:
+            return {
+                "h2": None,
+                "hinfinity": None,
+                "peak_frequency_hz": None,
+                "bins": 0,
+            }
+        linear = [
+            (
+                float(point["frequency_hz"]),
+                10.0 ** (float(point[key]) / 20.0),
+            )
+            for point in usable
+        ]
+        peak_frequency_hz, peak = max(linear, key=lambda item: item[1])
+        if len(linear) == 1:
+            h2 = peak
+        else:
+            energy = 0.0
+            span = max(EPSILON, linear[-1][0] - linear[0][0])
+            for (left_frequency, left_gain), (right_frequency, right_gain) in zip(linear, linear[1:]):
+                energy += 0.5 * (left_gain * left_gain + right_gain * right_gain) * max(0.0, right_frequency - left_frequency)
+            h2 = math.sqrt(max(0.0, energy / span))
+        return {
+            "h2": h2,
+            "h2_db": 20.0 * math.log10(max(EPSILON, h2)),
+            "hinfinity": peak,
+            "hinfinity_db": 20.0 * math.log10(max(EPSILON, peak)),
+            "peak_frequency_hz": peak_frequency_hz,
+            "minimum_frequency_hz": linear[0][0],
+            "maximum_frequency_hz": linear[-1][0],
+            "bins": len(linear),
+        }
+
+    robust_performance = {
+        "status": "ready" if len(reliable) >= 4 else "low-evidence",
+        "scope": "band-limited empirical frequency grid",
+        "qualified_bins": len(reliable),
+        "plant": band_limited_norms("plant_magnitude_db"),
+        "sensitivity": band_limited_norms("sensitivity_db"),
+        "complementary_sensitivity": band_limited_norms("complementary_sensitivity_db"),
+        "control_sensitivity": band_limited_norms("control_sensitivity_db"),
+        "interpretation": (
+            "H2 estimates average disturbance amplification over the measured coherent band; "
+            "H-infinity reports the worst coherent-bin amplification. These are empirical "
+            "band-limited scores, not a full-model continuous-time robust-control proof."
+        ),
+    }
     disk_margin = min((float(point["balanced_disk_delta"]) for point in reliable), default=None)
     if disk_margin is not None and disk_margin < 1.0:
         gain_lower = (1.0 - disk_margin) / (1.0 + disk_margin)
@@ -3032,6 +3120,7 @@ def instrumental_closed_loop_identification(
             "phase_deg": phase_margin,
             "qualified_bins": len(reliable),
         },
+        "robust_performance": robust_performance,
         "iqc_envelope": {
             "model": "frequency-dependent multiplicative plant-scatter disk",
             "robustly_separated": bool(reliable) and all(float(point["iqc_lower_distance"]) > 0 for point in reliable),
