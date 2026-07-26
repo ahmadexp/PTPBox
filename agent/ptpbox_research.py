@@ -3931,6 +3931,24 @@ class RollingResearchEngine:
             self.samples.append(sample)
             self.temperatures.append((float(sample.get("observed_at", time.time())), temperatures or {}))
 
+    def replace(
+        self,
+        samples: Sequence[dict[str, Any]],
+        temperatures: Sequence[tuple[float, dict[str, float]]] | None = None,
+    ) -> None:
+        """Refresh raw inputs from the external collector without losing estimator history."""
+        with self._lock:
+            self.samples.clear()
+            self.samples.extend(samples)
+            self.temperatures.clear()
+            self.temperatures.extend(
+                temperatures
+                or [
+                    (float(sample.get("observed_at", time.time())), {})
+                    for sample in samples
+                ]
+            )
+
     def snapshot(
         self,
         telemetry_clocks: Sequence[dict[str, Any]],

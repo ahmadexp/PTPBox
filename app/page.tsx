@@ -762,6 +762,16 @@ type PhcTelemetryPayload = {
   fresh_clocks: number;
   mode: "live" | "stale" | "waiting";
   sample_rate_hz?: number;
+  collector?: {
+    source: "external-collector" | "in-process";
+    requested_rate_hz: number;
+    achieved_rate_hz: number | null;
+    sample_count: number;
+    gap_count: number;
+    largest_gap_s: number;
+    last_sample_age_s: number | null;
+    healthy: boolean;
+  };
   method: string;
   raw: true;
   smoothing: "none";
@@ -1675,7 +1685,23 @@ function buildResearchModel(history: HistoryPoint[], nodes: ClockNode[]): Resear
   };
 }
 
-function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPoint[]; selected: string[]; nodes: ClockNode[]; compact?: boolean }) {
+function LineChart({
+  data,
+  selected,
+  nodes,
+  compact = false,
+  scaleMode = "stable",
+  windowSeconds = 120,
+  sampleRateHz = 1,
+}: {
+  data: HistoryPoint[];
+  selected: string[];
+  nodes: ClockNode[];
+  compact?: boolean;
+  scaleMode?: "stable" | "full";
+  windowSeconds?: number;
+  sampleRateHz?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -1694,9 +1720,6 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
     ctx.scale(dpr, dpr);
     const w = bounds.width;
     const h = bounds.height;
-    const pad = compact ? { l: 18, r: 12, t: 12, b: 20 } : { l: 52, r: 18, t: 18, b: 34 };
-    const plotW = w - pad.l - pad.r;
-    const plotH = h - pad.t - pad.b;
     ctx.clearRect(0, 0, w, h);
     const allValues = data.flatMap((point) => selected.map((id) => point.values[id]).filter((value): value is number => Number.isFinite(value)));
     if (data.length < 2 || allValues.length < 2) {
@@ -1707,24 +1730,70 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
       ctx.fillText("Waiting for direct PHC samples", w / 2, h / 2);
       return;
     }
-    const measuredMin = Math.min(...allValues);
-    const measuredMax = Math.max(...allValues);
+    const expectedPeriod = 1 / Math.max(.1, sampleRateHz);
+    const timestamps = [...new Set(data.map((point) => point.t))].sort((left, right) => left - right);
+    const timestampDeltas = timestamps.slice(1).map((timestamp, index) => timestamp - timestamps[index]);
+    const gapThreshold = expectedPeriod * 2.5;
+    let latestSegmentStart = timestamps[0] ?? 0;
+    timestampDeltas.forEach((delta, index) => {
+      if (delta > gapThreshold) latestSegmentStart = timestamps[index + 1];
+    });
+    let scaleValues = allValues;
+    if (scaleMode === "stable") {
+      const latestSegmentValues = data
+        .filter((point) => point.t >= latestSegmentStart)
+        .flatMap((point) => selected.map((id) => point.values[id]).filter((value): value is number => Number.isFinite(value)));
+      const candidates = latestSegmentValues.length >= 8 ? latestSegmentValues : allValues.slice(-Math.min(allValues.length, 240));
+      const center = median(candidates);
+      const sigma = Math.max(1, robustSigma(candidates));
+      const lower = Math.max(percentile(candidates, .01), center - sigma * 8);
+      const upper = Math.min(percentile(candidates, .99), center + sigma * 8);
+      scaleValues = candidates.filter((value) => value >= lower && value <= upper);
+      if (scaleValues.length < 2) scaleValues = candidates;
+    }
+    const measuredMin = Math.min(...scaleValues);
+    const measuredMax = Math.max(...scaleValues);
     const measuredSpan = Math.max(25, measuredMax - measuredMin);
     const padding = Math.max(12.5, measuredSpan * 0.08);
-    const yMax = Math.max(0, measuredMax) + padding;
-    const yMin = Math.min(0, measuredMin) - padding;
+    const yMax = measuredMax + padding;
+    const yMin = measuredMin - padding;
     const span = yMax - yMin;
-    const tMin = Math.min(...data.map((point) => point.t));
     const tMax = Math.max(...data.map((point) => point.t));
-    const timeSpan = Math.max(1, tMax - tMin);
+    const timeSpan = Math.max(1, windowSeconds);
+    const tMin = tMax - timeSpan;
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+    const horizontalLines = compact ? 3 : 5;
+    const tickLabels = Array.from({ length: horizontalLines + 1 }, (_value, index) => (
+      formatNanoseconds(yMax - (index / horizontalLines) * span)
+    ));
+    const labelWidth = compact ? 0 : Math.max(...tickLabels.map((label) => ctx.measureText(label).width));
+    const pad = compact ? { l: 18, r: 12, t: 12, b: 20 } : { l: Math.ceil(labelWidth + 18), r: 18, t: 18, b: 34 };
+    const plotW = w - pad.l - pad.r;
+    const plotH = h - pad.t - pad.b;
     const x = (timestamp: number) => pad.l + ((timestamp - tMin) / timeSpan) * plotW;
     const y = (value: number) => pad.t + ((yMax - value) / span) * plotH;
 
+    timestampDeltas.forEach((delta, index) => {
+      if (delta <= gapThreshold) return;
+      const left = Math.max(pad.l, x(timestamps[index] + expectedPeriod));
+      const right = Math.min(w - pad.r, x(timestamps[index + 1] - expectedPeriod));
+      if (right <= left) return;
+      ctx.fillStyle = "rgba(238, 144, 112, .055)";
+      ctx.fillRect(left, pad.t, right - left, plotH);
+      ctx.strokeStyle = "rgba(238, 144, 112, .2)";
+      ctx.setLineDash([3, 4]);
+      ctx.strokeRect(left, pad.t, right - left, plotH);
+      ctx.setLineDash([]);
+      if (!compact && right - left > 74) {
+        ctx.fillStyle = "rgba(238, 144, 112, .65)";
+        ctx.textAlign = "center";
+        ctx.fillText(`${delta.toFixed(1)}s NO SAMPLES`, (left + right) / 2, pad.t + 11);
+      }
+    });
+
     ctx.lineWidth = 1;
-    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    const horizontalLines = compact ? 3 : 5;
     for (let i = 0; i <= horizontalLines; i++) {
       const value = yMax - (i / horizontalLines) * span;
       const py = y(value);
@@ -1758,20 +1827,29 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
       if (nodeIndex < 0) return;
       const series = data.filter((point) => Number.isFinite(point.values[id]));
       if (series.length < 2) return;
-      const deltas = series.slice(1).map((point, index) => point.t - series[index].t).filter((value) => value > 0).sort((left, right) => left - right);
-      const medianDelta = deltas[Math.floor(deltas.length / 2)] ?? 1;
-      const gapThreshold = Math.max(1, medianDelta * 4);
       ctx.strokeStyle = nodes[nodeIndex].color;
       ctx.lineWidth = id === selected[selected.length - 1] ? 2.2 : 1.25;
       ctx.globalAlpha = id === selected[selected.length - 1] ? 1 : 0.54;
       ctx.beginPath();
       series.forEach((point, index) => {
         const px = x(point.t);
-        const py = y(point.values[id]);
+        const rawValue = point.values[id];
+        const py = y(Math.max(yMin, Math.min(yMax, rawValue)));
         if (index === 0 || point.t - series[index - 1].t > gapThreshold) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       });
       ctx.stroke();
+      if (scaleMode === "stable") {
+        series.forEach((point) => {
+          const value = point.values[id];
+          if (value >= yMin && value <= yMax) return;
+          ctx.globalAlpha = .9;
+          ctx.fillStyle = nodes[nodeIndex].color;
+          ctx.beginPath();
+          ctx.arc(x(point.t), value > yMax ? pad.t + 2 : h - pad.b - 2, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
     });
     ctx.globalAlpha = 1;
 
@@ -1784,10 +1862,10 @@ function LineChart({ data, selected, nodes, compact = false }: { data: HistoryPo
       const last = lastPoint.values[activeId];
       ctx.fillStyle = nodes[nodeIndex].color;
       ctx.beginPath();
-      ctx.arc(x(lastPoint.t), y(last), 3.5, 0, Math.PI * 2);
+      ctx.arc(x(lastPoint.t), y(Math.max(yMin, Math.min(yMax, last))), 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [compact, data, nodes, selected]);
+  }, [compact, data, nodes, sampleRateHz, scaleMode, selected, windowSeconds]);
 
   useEffect(() => {
     draw();
@@ -3628,6 +3706,7 @@ export default function PTPBoxDashboard() {
   const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
   const [range, setRange] = useState("2 min");
+  const [phcScaleMode, setPhcScaleMode] = useState<"stable" | "full">("stable");
   const [experimentRunning, setExperimentRunning] = useState(false);
   const [experimentProgress, setExperimentProgress] = useState(38);
   const [research, setResearch] = useState<ResearchPayload | null>(null);
@@ -3661,6 +3740,7 @@ export default function PTPBoxDashboard() {
   const [syncFrequencyHz, setSyncFrequencyHz] = useState(1);
   const [activeSyncFrequencyHz, setActiveSyncFrequencyHz] = useState(1);
   const [phcSampleRateHz, setPhcSampleRateHz] = useState(1);
+  const [phcCollector, setPhcCollector] = useState<PhcTelemetryPayload["collector"]>(undefined);
   const [ppsEnabled, setPpsEnabled] = useState(false);
   const [ppsSource, setPpsSource] = useState("BC1");
   const [ppsSinks, setPpsSinks] = useState<string[]>(["BC2", "BC3", "BC4", "BC5", "BC6", "BC7"]);
@@ -4076,6 +4156,7 @@ export default function PTPBoxDashboard() {
         const incoming = historyFromPhcTelemetry(payload);
         latestPhcAtRef.current = incoming.reduce((value, point) => Math.max(value, point.t), latestPhcAtRef.current);
         if (typeof payload.sample_rate_hz === "number") setPhcSampleRateHz(payload.sample_rate_hz);
+        setPhcCollector(payload.collector);
         setConnection(payload.mode);
         setNodes((current) => nodesWithPhcTelemetry(current, payload));
         setHistory((current) => mergeRawHistory(current, incoming, seconds));
@@ -4098,7 +4179,8 @@ export default function PTPBoxDashboard() {
   }, [activeSyncFrequencyHz, agentConnected, paused, range]);
 
   useEffect(() => {
-    if (!agentConnected || paused) return;
+    const researchSections: Section[] = ["Multi-pendulum", "Covariance", "State space", "Metrology", "Intelligence", "Cascade dynamics", "Resilience", "Analytics"];
+    if (!agentConnected || paused || !researchSections.includes(section)) return;
     let disposed = false;
     let polling = false;
     const controller = new AbortController();
@@ -4120,13 +4202,13 @@ export default function PTPBoxDashboard() {
       }
     };
     void pollResearch();
-    const timer = window.setInterval(() => void pollResearch(), 5000);
+    const timer = window.setInterval(() => void pollResearch(), 15000);
     return () => {
       disposed = true;
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [agentConnected, paused]);
+  }, [agentConnected, paused, section]);
 
   useEffect(() => {
     if (!agentConnected || paused) return;
@@ -4858,17 +4940,24 @@ export default function PTPBoxDashboard() {
                 <section className="instrument-panel chart-panel">
                   <div className="panel-heading chart-heading">
                     <div><span className="section-kicker">RAW PHC DIFFERENCE</span><h2>NIC clocks relative to BC1</h2></div>
-                    <div className="chart-heading-tools"><span className="phc-rate-badge"><Radio size={12} /> {phcSampleRateHz.toFixed(1)} Hz PHC sampling</span><div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+                    <div className="chart-heading-tools">
+                      <span className="phc-rate-badge"><Radio size={12} /> {phcCollector?.achieved_rate_hz?.toFixed(1) ?? "—"} / {phcSampleRateHz.toFixed(1)} Hz acquired</span>
+                      <div className="segmented-control">{["30 s", "2 min", "15 min"].map((item) => <button className={range === item ? "active" : ""} type="button" key={item} onClick={() => setRange(item)}>{item}</button>)}</div>
+                    </div>
                   </div>
                   <div className="chart-legend">
                     {visibleTraces.map((id) => {
                       const node = nodes.find((item) => item.id === id);
                       return node ? <button type="button" key={id} onClick={() => selectNode(id)} className={selectedNode === id ? "active" : ""}><i style={{ background: node.color }} /> {node.label}<strong>{formatOffset(node.offset, node.measured)}</strong></button> : null;
                     })}
-                    <span className="chart-unit">PHC Δ VS BC1 · AUTO-SCALED</span>
+                    <div className="segmented-control">
+                      <button className={phcScaleMode === "stable" ? "active" : ""} type="button" onClick={() => setPhcScaleMode("stable")}>Stable view</button>
+                      <button className={phcScaleMode === "full" ? "active" : ""} type="button" onClick={() => setPhcScaleMode("full")}>Full range</button>
+                    </div>
+                    <span className="chart-unit">PHC Δ VS BC1 · {phcScaleMode === "stable" ? "ROBUST SCALE" : "FULL RANGE"}</span>
                   </div>
-                  <LineChart data={history} selected={visibleTraces} nodes={nodes} />
-                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch; BC1 is interpolated only between its two bracketing reads. Read-only PHC sampling follows the applied Sync cadence at {phcSampleRateHz.toFixed(1)} Hz; no phc2sys loop or smoothing is involved.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
+                  <LineChart data={history} selected={visibleTraces} nodes={nodes} scaleMode={phcScaleMode} windowSeconds={rangeSeconds(range)} sampleRateHz={phcSampleRateHz} />
+                  <div className="chart-footer-note"><Sparkles size={14} /><span><strong>Provenance:</strong> Kernel cross timestamps place every PHC at a common epoch. Dedicated collector · {phcCollector?.gap_count ?? 0} cadence gaps in its 30 s health window. Stable view clips relock excursions at the plot edge but preserves their markers; Full range shows every raw value. No smoothing or interpolation is applied.</span><button type="button" onClick={() => setSection("Analytics")}>Inspect <ArrowRight size={13} /></button></div>
                 </section>
 
                 <section className="instrument-panel selected-panel">

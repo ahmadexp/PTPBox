@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ptpbox_research import ExperimentStore, RollingResearchEngine, path_regime_analysis  # noqa: E402
+from ptpbox_phc_store import collector_quality, read_records  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -53,6 +54,8 @@ WEB_ROOT = Path(os.environ.get("PTPBOX_WEB_ROOT", Path(__file__).parent / "stati
 LOG_DIR = Path(os.environ.get("PTPBOX_LOG_DIR", "/var/log/ptpbox"))
 TOPOLOGY_FILE = Path(os.environ.get("PTPBOX_TOPOLOGY", Path(__file__).with_name("topology.json")))
 PHC_MAP_FILE = Path(os.environ.get("PTPBOX_PHC_MAP", "/run/ptpbox/phcs.json"))
+PHC_STORE_FILE = Path(os.environ.get("PTPBOX_PHC_STORE", "/run/ptpbox/phc-samples.sqlite3"))
+EXTERNAL_PHC_COLLECTOR = os.environ.get("PTPBOX_EXTERNAL_PHC_COLLECTOR", "0") == "1"
 PPS_PROCESS_FILE = Path(os.environ.get("PTPBOX_PROCESS_STATE", "/run/ptpbox/processes.json"))
 PATH_EVENT_FILE = Path(os.environ.get("PTPBOX_PATH_EVENTS", "/run/ptpbox/path-events.jsonl"))
 FAULT_REQUEST_FILE = STATE_DIR / "fault-request.json"
@@ -65,7 +68,7 @@ TELEMETRY_MAX_BYTES = 2_000_000
 TELEMETRY_MAX_SAMPLES = 4096
 TELEMETRY_STALE_AFTER_SECONDS = 5.0
 TELEMETRY_MAX_PATH_DELAY_NS = 1_000_000.0
-PHC_HISTORY_MAX_SAMPLES = 7200
+PHC_HISTORY_MAX_SAMPLES = 20_000
 PHC_STALE_AFTER_SECONDS = 3.0
 PHC_CROSS_TIMESTAMP_SAMPLES = 9
 RESEARCH_CACHE_SECONDS = max(1.0, float(os.environ.get("PTPBOX_RESEARCH_CACHE_SECONDS", "10")))
@@ -767,8 +770,12 @@ def record_phc_sample() -> dict[str, Any] | None:
 def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) -> dict[str, Any]:
     now = time.time()
     cutoff = now - max(5.0, min(history_seconds, 900.0))
-    with PHC_HISTORY_LOCK:
-        history = list(PHC_HISTORY)
+    records = read_records(PHC_STORE_FILE, history_seconds) if EXTERNAL_PHC_COLLECTOR else []
+    if records:
+        history = [record["sample"] for record in records]
+    else:
+        with PHC_HISTORY_LOCK:
+            history = list(PHC_HISTORY)
     window = [sample for sample in history if float(sample["observed_at"]) >= cutoff]
     inventory = phc_inventory()
     clocks: list[dict[str, Any]] = []
@@ -810,6 +817,20 @@ def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) ->
         "fresh_clocks": fresh,
         "mode": mode,
         "sample_rate_hz": configured_phc_sample_rate_hz(),
+        "collector": (
+            collector_quality(PHC_STORE_FILE, configured_phc_sample_rate_hz())
+            if EXTERNAL_PHC_COLLECTOR
+            else {
+                "source": "in-process",
+                "requested_rate_hz": configured_phc_sample_rate_hz(),
+                "achieved_rate_hz": None,
+                "sample_count": len(window),
+                "gap_count": 0,
+                "largest_gap_s": 0.0,
+                "last_sample_age_s": max(0.0, now - float(history[-1]["observed_at"])) if history else None,
+                "healthy": bool(fresh),
+            }
+        ),
         "raw": True,
         "smoothing": "none",
         "method": "common-system cross timestamps with interpolated BC1 reference",
@@ -1803,6 +1824,18 @@ def holdover_session_loop(stop: threading.Event) -> None:
 
 
 def _build_research_snapshot(history_seconds: float = 900.0) -> dict[str, Any]:
+    if EXTERNAL_PHC_COLLECTOR:
+        records = read_records(PHC_STORE_FILE, history_seconds)
+        RESEARCH_ENGINE.replace(
+            [record["sample"] for record in records],
+            [
+                (
+                    float(record["sample"]["observed_at"]),
+                    record.get("temperatures") if isinstance(record.get("temperatures"), dict) else {},
+                )
+                for record in records
+            ],
+        )
     telemetry_payload = telemetry(history_seconds=history_seconds, limit=TELEMETRY_MAX_SAMPLES)
     config_value = load_config()
     servo = config_value.get("servo", {})
@@ -2128,7 +2161,7 @@ def status() -> dict[str, Any]:
         "identification": load_json(IDENTIFICATION_STATE_FILE, {"enabled": False}),
         "observer_only": os.geteuid() != 0 and not CONTROL.exists(),
         "root": str(ROOT),
-        "agent_version": "2.6.0",
+        "agent_version": "2.7.0",
         "timestamp": time.time(),
     }
 
@@ -2326,7 +2359,7 @@ def album_image_path(identifier: str) -> Path | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PTPBoxAgent/2.6.0"
+    server_version = "PTPBoxAgent/2.7.0"
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
@@ -2700,10 +2733,16 @@ def main() -> None:
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     stop_sampler = threading.Event()
-    sampler = threading.Thread(target=phc_sampler_loop, args=(stop_sampler,), name="ptpbox-phc-sampler", daemon=True)
+    sampler = None if EXTERNAL_PHC_COLLECTOR else threading.Thread(
+        target=phc_sampler_loop,
+        args=(stop_sampler,),
+        name="ptpbox-phc-sampler",
+        daemon=True,
+    )
     fault_expirer = threading.Thread(target=fault_expiry_loop, args=(stop_sampler,), name="ptpbox-fault-expirer", daemon=True)
     holdover_manager = threading.Thread(target=holdover_session_loop, args=(stop_sampler,), name="ptpbox-holdover-manager", daemon=True)
-    sampler.start()
+    if sampler:
+        sampler.start()
     fault_expirer.start()
     holdover_manager.start()
     print(f"PTPBox agent listening on http://{args.bind}:{args.port} (root={ROOT})")
@@ -2713,7 +2752,8 @@ def main() -> None:
         pass
     finally:
         stop_sampler.set()
-        sampler.join(timeout=2)
+        if sampler:
+            sampler.join(timeout=2)
         fault_expirer.join(timeout=2)
         holdover_manager.join(timeout=2)
         server.server_close()

@@ -1,6 +1,7 @@
 [Unit]
 Description=PTPBox observation API
-After=network.target systemd-tmpfiles-setup.service
+After=network.target systemd-tmpfiles-setup.service ptpbox-phc-collector.service
+Wants=ptpbox-phc-collector.service
 
 [Service]
 Type=simple
@@ -11,6 +12,8 @@ Environment=PTPBOX_ROOT=@PTPBOX_ROOT@
 Environment=PTPBOX_STATE_DIR=@PTPBOX_ROOT@/runtime
 Environment=PTPBOX_LOG_DIR=/var/log/ptpbox
 Environment=PTPBOX_TOPOLOGY=/etc/ptpbox/topology.json
+Environment=PTPBOX_PHC_STORE=/run/ptpbox/phc-samples.sqlite3
+Environment=PTPBOX_EXTERNAL_PHC_COLLECTOR=1
 Environment=PTPBOX_BIND=0.0.0.0
 Environment=PTPBOX_PORT=8090
 Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static

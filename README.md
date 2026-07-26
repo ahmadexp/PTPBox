@@ -25,7 +25,7 @@
 PTPBox is a modern revival of the original namespace-based timing experiment.
 It turns one Linux server into a physical chain of isolated PTP clocks using
 real NICs, one network namespace per card, one `ptp4l` boundary clock per stage,
-and a separate read-only PHC comparison pipeline. The Precision Observatory is
+and a separate read-only PHC comparison process. The Precision Observatory is
 the control room: live topology, raw timing traces, per-hop error, selectable
 servos, measured holdover, hardware-backed PPS/`ts2phc` experiments, hardware
 inventory, notifications, and guarded start/stop control.
@@ -53,6 +53,13 @@ This capture comes from the running seven-card host. It shows the ordered
 BC1→BC7 topology, per-node lock state, direct PHC differences, endpoint
 nanosecond RMS, and the unsmoothed BC1-relative trace updating together. The
 animated values are live measurements, not a prerecorded simulation dataset.
+
+The main trace offers two scientifically equivalent views of the same raw
+record. **Stable view** uses a robust scale for the latest contiguous sampling
+regime, keeps relock excursions as edge markers, and shades acquisition gaps.
+**Full range** fits every raw value, including startup and grandmaster-reselection
+transients. The badge reports achieved/requested collector cadence so a sparse
+trace cannot be mistaken for smooth clock behavior.
 
 ## See timing error grow, hop by hop
 
@@ -405,9 +412,11 @@ plane.
 flowchart LR
     Browser["Precision Observatory\nReact UI"]
     Agent["PTPBox agent\nPython · unprivileged"]
+    Collector["PHC collector\nisolated Python process"]
     Inventory["sysfs · ethtool\nNIC / PHC inventory"]
     Logs["LinuxPTP logs\ntelemetry parser"]
     PHCs["/dev/ptp*\nread-only comparisons"]
+    RawStore["SQLite/WAL ring\n20 min raw PHC history"]
     Helper["ptpboxctl\nfixed privileged verbs"]
     Research["Metrology engine\nstability · fusion · modes"]
     Store["SQLite/WAL\nruns + raw samples"]
@@ -419,7 +428,9 @@ flowchart LR
     Browser <-->|"HTTP · :8090"| Agent
     Agent --> Inventory
     Agent --> Logs
-    Agent --> PHCs
+    Collector --> PHCs
+    Collector --> RawStore
+    Agent --> RawStore
     Agent --> Events
     Agent --> Research
     Agent --> Store
@@ -447,7 +458,8 @@ state from sysfs and the managed process table.
 
 - Common-epoch PHC difference for each NIC relative to BC1, using the best of
   nine kernel cross timestamps and an interpolated BC1 reference, sampled at
-  the applied 0.5–8 Hz protocol-valid Sync cadence
+  the applied 0.5–8 Hz protocol-valid Sync cadence by a dedicated collector
+  process that cannot be starved by nonlinear research calculations
 - Raw LinuxPTP servo-offset RMS in nanoseconds, separate from PHC comparison
   dispersion and its reported error bound
 - Overlapping ADEV, MDEV, HDEV, PDEV, TOTDEV, and Theo1 fractional-frequency

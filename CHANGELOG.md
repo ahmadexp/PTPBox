@@ -4,6 +4,11 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Isolated raw PHC acquisition in its own systemd process with a bounded
+  SQLite/WAL ring, achieved-cadence health metrics, and research-engine replay.
+  The Overview now distinguishes cadence gaps from clock motion, dynamically
+  reserves axis-label space, and offers robust Stable view versus complete Full
+  range so relock excursions no longer flatten nanosecond steady-state motion.
 - Added one-click PNG capture to every graph panel and a dedicated Graph Album
   with full-size previews, downloads, deletion, storage totals, and explicit
   host-versus-browser provenance. The agent persists shared captures with

@@ -61,6 +61,13 @@ operator account and reads:
 - an operator-owned SQLite/WAL experiment database containing the applied
   configuration, raw cross-timestamp samples, and event ledger.
 
+Raw PHC acquisition is intentionally outside this process.
+`ptpbox_phc_collector.py` runs as a second unprivileged systemd service, opens
+the mapped PHCs read-only, and writes a bounded 20-minute/20,000-row WAL ring at
+`/run/ptpbox/phc-samples.sqlite3`. The API and research engine read that ring.
+Expensive spectral, nonlinear, or attractor calculations therefore cannot
+delay the acquisition deadline through Python thread contention.
+
 It also serves the standalone application and stages JSON configuration under
 `PTPBOX_STATE_DIR`. Graph captures are validated PNG files stored beside an
 atomic album manifest under `PTPBOX_ALBUM_DIR`. The browser uses IndexedDB only
@@ -177,7 +184,7 @@ hardware-synchronizes its port clocks naturally propagates time. If a card
 exposes genuinely independent PHCs, their divergence remains visible instead
 of being concealed by a host-side control loop.
 
-The PHC sampler opens each mapped `/dev/ptp*` read-only and uses the Linux
+The dedicated PHC collector opens each mapped `/dev/ptp*` read-only and uses the Linux
 `PTP_SYS_OFFSET_EXTENDED` ioctl. Each call requests nine kernel-bracketed
 PHC/system pairs and keeps the pair with the shortest pre/post interval, the
 same estimator used by LinuxPTP. `CLOCK_MONOTONIC_RAW` supplies a common,
@@ -191,6 +198,13 @@ back through extended `CLOCK_REALTIME` measurements to a userspace midpoint.
 The API identifies the selected method, shortest kernel bracket, and a
 conservative comparison-error bound for every sample. The UI keeps PHC
 comparison dispersion separate from LinuxPTP servo RMS.
+
+The Overview trace never joins points across a missed collector interval.
+Missing intervals are shaded, while the API reports requested and achieved
+rate, recent gap count, largest gap, and last-sample age. Stable view derives
+its scale from the most recent contiguous regime and robust quantiles; clipped
+relock samples remain visible as edge markers. Full range renders the complete
+raw domain.
 
 ## Research engine
 

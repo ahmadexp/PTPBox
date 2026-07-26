@@ -65,7 +65,7 @@ and whether privileged lifecycle control is installed.
     "certification": false
   },
   "observer_only": false,
-  "agent_version": "2.5.0"
+  "agent_version": "2.7.0"
 }
 ```
 
@@ -109,7 +109,10 @@ all physical interfaces while the cascade is running.
 ### `GET /api/phc`
 
 Returns read-only PHC comparisons at the applied PTP Sync cadence: 0.5, 1, 2,
-4, or 8 Hz. The `sample_rate_hz` response field reports the active cadence.
+4, or 8 Hz. The `sample_rate_hz` response field reports the requested active
+cadence. `collector.achieved_rate_hz`, `gap_count`, `largest_gap_s`, and
+`last_sample_age_s` report what the isolated acquisition process actually
+delivered over its recent health window.
 The first mapped NIC is the reference. Every PHC is cross timestamped against `CLOCK_MONOTONIC_RAW` using
 the shortest of nine kernel-bracketed samples. BC1 is measured before and after
 the targets and interpolated to each target's measurement epoch. `offset_ns` is
@@ -125,6 +128,16 @@ supervisory path.
   "reference_phc": "ptp2",
   "method": "common-system cross timestamps with interpolated BC1 reference",
   "sample_rate_hz": 8.0,
+  "collector": {
+    "source": "external-collector",
+    "requested_rate_hz": 8.0,
+    "achieved_rate_hz": 7.98,
+    "sample_count": 240,
+    "gap_count": 0,
+    "largest_gap_s": 0.127,
+    "last_sample_age_s": 0.04,
+    "healthy": true
+  },
   "raw": true,
   "smoothing": "none",
   "clocks": [

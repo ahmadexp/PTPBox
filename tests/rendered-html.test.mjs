@@ -76,8 +76,12 @@ test("ships the live-agent and standalone-host surfaces", async () => {
   assert.match(page, /nearest valid rate/);
   assert.match(page, /logSyncInterval/);
   assert.match(page, /\/api\/phc/);
-  assert.match(page, /PHC sampling/);
-  assert.match(page, /sampling follows the applied Sync cadence/);
+  assert.match(page, /Hz acquired/);
+  assert.match(page, /Stable view/);
+  assert.match(page, /Full range/);
+  assert.match(page, /NO SAMPLES/);
+  assert.match(page, /Dedicated collector/);
+  assert.match(page, /Kernel cross timestamps place every PHC at a common epoch/);
   assert.match(page, /Metrology workbench/);
   assert.match(page, /Clock stability atlas/);
   assert.match(page, /Fractional-frequency deviations/);

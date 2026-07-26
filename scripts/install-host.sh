@@ -41,6 +41,8 @@ fi
 
 install -d -m 0755 "$INSTALL_DIR/agent" "$INSTALL_DIR/static" "$ETC_DIR" /etc/linuxptp /run/netns /run/ptpbox /var/log/ptpbox
 install -m 0755 "$SOURCE_DIR/agent/ptpbox_agent.py" "$INSTALL_DIR/agent/ptpbox_agent.py"
+install -m 0755 "$SOURCE_DIR/agent/ptpbox_phc_collector.py" "$INSTALL_DIR/agent/ptpbox_phc_collector.py"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox_phc_store.py" "$INSTALL_DIR/agent/ptpbox_phc_store.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_research.py" "$INSTALL_DIR/agent/ptpbox_research.py"
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_kalman_servo.py" /usr/local/sbin/ptpbox-kalman-servo
@@ -77,7 +79,14 @@ sed \
   -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
   -e "s|@PTPBOX_ROOT@|$PTPBOX_ROOT_DIR|g" \
   "$SOURCE_DIR/agent/ptpbox-agent.service" > /etc/systemd/system/ptpbox-agent.service
+sed \
+  -e "s|@PTPBOX_USER@|$PTPBOX_USER_NAME|g" \
+  -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
+  -e "s|@PTPBOX_ROOT@|$PTPBOX_ROOT_DIR|g" \
+  "$SOURCE_DIR/agent/ptpbox-phc-collector.service" > /etc/systemd/system/ptpbox-phc-collector.service
 chmod 0644 /etc/systemd/system/ptpbox-agent.service
+chmod 0644 /etc/systemd/system/ptpbox-phc-collector.service
+chown "$PTPBOX_USER_NAME:$PTPBOX_GROUP_NAME" /run/ptpbox
 install -d -o "$PTPBOX_USER_NAME" -g "$PTPBOX_GROUP_NAME" -m 0755 "$PTPBOX_ROOT_DIR/runtime"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/config.json" "$ETC_DIR/config.json"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.json"
@@ -95,7 +104,8 @@ if runuser -u "$PTPBOX_USER_NAME" -- tmux has-session -t PTPBoxWeb 2>/dev/null; 
 fi
 
 systemctl daemon-reload
-systemctl enable ptpbox-agent.service
+systemctl enable ptpbox-phc-collector.service ptpbox-agent.service
+systemctl restart ptpbox-phc-collector.service
 systemctl restart ptpbox-agent.service
 
 echo "PTPBox is available at http://$(hostname -I | awk '{print $1}'):8090"

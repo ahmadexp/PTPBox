@@ -119,7 +119,8 @@ The installer:
    event-monitor collector, and the measurement-only PPS comparator;
 3. copies the topology to `/etc/ptpbox/topology.json`;
 4. links `/etc/ptpbox/config.json` to the operator-owned staged configuration;
-5. creates a systemd unit running as the operator account;
+5. creates separate systemd units for the isolated PHC collector and web agent,
+   both running as the operator account with read-only `clock` group access;
 6. validates a sudoers policy for fixed `start`, `stop`, `restart`, `status`,
    validated `servo`, bounded `fault`, and bounded `identify` operations only;
 7. prepares AppArmor-compatible LinuxPTP configuration storage;
@@ -127,7 +128,7 @@ The installer:
    per-namespace management sockets when Ubuntu's `ptp4l` profile is present;
 9. installs a systemd-tmpfiles rule so `/run/netns` and `/run/ptpbox` are
    recreated after every reboot, before the agent starts;
-10. starts the web service on port 8090.
+10. starts the collector, then the web service on port 8090.
 
 The service starts after `network.target`, not `network-online.target`.
 Timing interfaces intentionally have no IP configuration, so waiting for every
@@ -138,7 +139,7 @@ NetworkManager connection to become routable would deadlock host startup.
 These commands do not move interfaces:
 
 ```bash
-systemctl status ptpbox-agent --no-pager
+systemctl status ptpbox-phc-collector ptpbox-agent --no-pager
 ptpboxctl discover
 sudo ptpboxctl status
 python3 - <<'PY'
@@ -322,6 +323,8 @@ preserves topology data, logs, captures, and the source checkout.
 - Open `/api/status` and check that the agent is reachable.
 - Confirm port 8090 is allowed on the management network.
 - Check `journalctl -u ptpbox-agent -n 100 --no-pager`.
+- Check `journalctl -u ptpbox-phc-collector -n 100 --no-pager` and inspect
+  `/api/phc` → `collector` when achieved cadence is below the requested rate.
 - A reachable agent with no active measurements still uses model traces while
   showing real inventory; this is intentional.
 
