@@ -481,8 +481,9 @@ state from sysfs and the managed process table.
 - ARX actuation-to-phase model with poles, fit, residual, settling estimate,
   measured Bode magnitude/phase, Nyquist geometry, direct Jury/Schur digital
   stability, and a bilinear-equivalent Routh–Hurwitz array
-- Replay-only Gaussian-process PI recommendation with the evaluated safe
-  frontier and zero live exploratory changes
+- Replay-only PI autotuning with global/log-local Bayesian optimization,
+  ARX stability penalties, optional \(H_\infty\) sensitivity penalties, an
+  evaluated safe frontier, and zero live exploratory changes
 - Lock/tracking state and recovery events
 - Holdover qualification progress, per-node release baselines, elapsed
   free-run time, current/peak/RMS wander, and frequency drift from the

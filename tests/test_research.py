@@ -348,13 +348,28 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_bayesian_tuner_is_replay_bounded_and_never_changes_live_gains(self) -> None:
         samples = [80.0 * math.sin(index / 7.0) + 0.08 * index for index in range(160)]
-        result = RESEARCH.safe_bayesian_tune(samples, 1.0, 0.7, 0.3)
+        inputs = [math.sin(index / 9.0) for index in range(160)]
+        outputs = [0.0, 0.0]
+        for index in range(2, 160):
+            outputs.append(1.18 * outputs[-1] - 0.31 * outputs[-2] + 0.03 * inputs[index - 1])
+        system_id = RESEARCH.identify_arx(inputs, outputs, 1.0)
+        active_id = {
+            "robust_performance": {
+                "sensitivity": {"hinfinity_db": 1.7},
+            },
+        }
+        result = RESEARCH.safe_bayesian_tune(samples, 1.0, 0.7, 0.3, system_id, active_id)
 
         self.assertEqual("recommended", result["status"])
         self.assertIn("Gaussian-process", result["method"])
         self.assertEqual(0, result["live_changes"])
         self.assertLess(result["evaluated_candidates"], result["candidate_space"])
-        self.assertLessEqual(result["evaluated_candidates"], 20)
+        self.assertLessEqual(result["evaluated_candidates"], 36)
+        self.assertIn("identified-model", result["method"])
+        self.assertEqual("stage-only", result["guardrails"]["live_apply"])
+        self.assertTrue(result["guardrails"]["uses_identified_arx"])
+        self.assertTrue(result["guardrails"]["uses_active_hinfinity"])
+        self.assertIn("model_spectral_radius", result["recommendation"])
 
     def test_error_budget_propagates_cross_hop_covariance(self) -> None:
         first = [float(index) for index in range(20)]

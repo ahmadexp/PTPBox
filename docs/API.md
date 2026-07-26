@@ -496,7 +496,7 @@ The main objects are:
 | `error_budget` | Per-clock components and covariance-aware cascade uncertainty |
 | `temperature_holdover` | Forecast horizon, phase, frequency, and 1σ when sensors are aligned |
 | `system_identification` | ARX coefficients, poles, fit, residual, settling time, unit-circle Bode/Nyquist samples, direct Jury/Schur conditions, and bilinear-equivalent Routh–Hurwitz table |
-| `auto_tune` | Replay-only GP/EI PI recommendation, frontier, candidate counts, and `live_changes: 0` |
+| `auto_tune` | Replay-only GP/EI PI recommendation, guardrails, modeled stability/robust penalties, frontier, candidate counts, and `live_changes: 0` |
 | `change_detection` | Bounded BOCPD probability and detected change indices |
 | `recurrence` | Binary recurrence matrix, recurrence rate, determinism, and threshold |
 | `bifurcation` | Offline PI gain-scale sweep with settled extrema, response bands, replay bounds, provenance, and `live_changes: 0` |

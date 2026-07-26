@@ -223,7 +223,7 @@ from aligned raw measurements and reports a state such as `waiting`,
 | IMM | Quiet, dynamic, and holdover Kalman models with Markov mixing | Mode probabilities are model evidence, not a hardware lock signal. |
 | Thermal holdover | Regularized phase/frequency/drift/temperature regression | Published only when aligned sensor history exists. |
 | ARX identification | Regularized least-squares loop model, poles, fit, and residual | Descriptive local model; not proof of global stability. |
-| Safe tuner | Captured-data PI replay, bounded candidate set, RBF Gaussian process, expected improvement | `live_changes` is always zero; the operator must stage and apply a recommendation. |
+| Safe tuner | Captured-data PI replay, global plus log-local candidate set, RBF Gaussian process, expected improvement, ARX stability penalty, and optional H-infinity sensitivity penalty | `live_changes` is always zero; the operator must stage and apply a recommendation. |
 | BOCPD | Bounded run-length posterior with a Gaussian observation model | A probability of a regime change, not automatic root-cause attribution. |
 | Recurrence | Normalized multichannel distance matrix, recurrence rate, and diagonal determinism | Recurrence does not prove chaos. |
 | Attractor reconstruction | AMI delay, false-nearest-neighbor dimension, Takens coordinates, recurrent cores, return map, dimension plateau, local divergence, and regime stationarity | A candidate label requires five corroborating gates; a finite PHC record cannot prove a strange attractor. |

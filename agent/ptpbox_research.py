@@ -921,6 +921,11 @@ def arx_frequency_domain_diagnostics(
     }
 
 
+def second_order_poles(a1: float, a2: float) -> list[complex]:
+    discriminant = complex(a1 * a1 + 4.0 * a2, 0.0) ** 0.5
+    return [(a1 + discriminant) / 2.0, (a1 - discriminant) / 2.0]
+
+
 def identify_arx(input_values: Sequence[float], output_values: Sequence[float], sample_period_s: float) -> dict[str, Any]:
     length = min(len(input_values), len(output_values))
     if length < 12:
@@ -934,8 +939,7 @@ def identify_arx(input_values: Sequence[float], output_values: Sequence[float], 
     target = outputs[2:]
     coefficients = least_squares(rows, target, ridge=1e-6)
     a1, a2, b1, b2, bias = coefficients
-    discriminant = complex(a1 * a1 + 4.0 * a2, 0.0) ** 0.5
-    poles = [(a1 + discriminant) / 2.0, (a1 - discriminant) / 2.0]
+    poles = second_order_poles(a1, a2)
     spectral_radius = max(abs(pole) for pole in poles)
     settling = math.inf if spectral_radius >= 1.0 else -4.0 * sample_period_s / math.log(max(EPSILON, spectral_radius))
     fitted = [sum(coefficient * value for coefficient, value in zip(coefficients, row)) for row in rows]
@@ -970,18 +974,78 @@ def safe_bayesian_tune(
     sample_period_s: float,
     current_kp: float,
     current_ki: float,
+    system_id: dict[str, Any] | None = None,
+    active_identification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Replay-safe constrained tuning over a deterministic PI candidate set.
+    """Replay-safe constrained PI tuning with modern robustness penalties.
 
-    An RBF Gaussian process ranks the candidate surface after an initial space-
-    filling set. Every score comes from replay; no live gain is changed here.
+    An RBF Gaussian process ranks the candidate surface after an initial
+    log-local plus global design. Every score comes from captured-data replay
+    and identified-model penalties; no live gain is changed here.
     """
     samples = list(phase_ns)
     if len(samples) < 20:
         return {"status": "learning", "samples": len(samples)}
-    candidates = [(kp / 10.0, ki / 20.0) for kp in range(2, 13, 2) for ki in range(1, 17, 3)]
+    candidates_set = {
+        (kp / 10.0, ki / 20.0)
+        for kp in range(1, 16)
+        for ki in range(1, 25)
+    }
+    for kp_scale in (0.25, 0.35, 0.5, 0.7, 0.85, 1.0, 1.18, 1.4, 1.8, 2.4):
+        for ki_scale in (0.2, 0.35, 0.5, 0.75, 1.0, 1.3, 1.7, 2.3, 3.0):
+            kp_value = min(1.8, max(0.05, round(current_kp * kp_scale, 3)))
+            ki_value = min(1.5, max(0.02, round(current_ki * ki_scale, 3)))
+            candidates_set.add((kp_value, ki_value))
+    candidates = sorted(candidates_set)
+    arx_trustworthy = (
+        isinstance(system_id, dict)
+        and system_id.get("status") == "stable"
+        and isinstance(system_id.get("r_squared"), (int, float))
+        and float(system_id["r_squared"]) >= 0.35
+    )
+    arx_coefficients = (system_id or {}).get("coefficients") if arx_trustworthy else None
+    active_performance = (active_identification or {}).get("robust_performance") if isinstance(active_identification, dict) else None
+    sensitivity_peak_db = (
+        float(active_performance.get("sensitivity", {}).get("hinfinity_db"))
+        if isinstance(active_performance, dict)
+        and isinstance(active_performance.get("sensitivity"), dict)
+        and isinstance(active_performance["sensitivity"].get("hinfinity_db"), (int, float))
+        else None
+    )
 
-    def replay(kp: float, ki: float) -> dict[str, float | bool]:
+    def model_penalty(kp: float, ki: float) -> dict[str, float | bool | None]:
+        if not isinstance(arx_coefficients, dict):
+            return {
+                "model_spectral_radius": None,
+                "model_settling_s": None,
+                "robust_penalty": 0.0,
+                "model_stable": True,
+            }
+        a1 = float(arx_coefficients.get("a1", 0.0))
+        a2 = float(arx_coefficients.get("a2", 0.0))
+        b1 = float(arx_coefficients.get("b1", 0.0))
+        b2 = float(arx_coefficients.get("b2", 0.0))
+        reference = max(EPSILON, abs(current_kp) + abs(current_ki))
+        scale = (abs(kp) + abs(ki)) / reference
+        candidate_a1 = a1 - 0.18 * scale * b1 * kp
+        candidate_a2 = a2 - 0.12 * scale * b2 * ki
+        poles = second_order_poles(candidate_a1, candidate_a2)
+        spectral_radius = max(abs(pole) for pole in poles)
+        settling = math.inf if spectral_radius >= 1.0 else -4.0 * sample_period_s / math.log(max(EPSILON, spectral_radius))
+        radius_penalty = 300.0 * max(0.0, spectral_radius - 0.92) ** 2
+        settling_penalty = 0.035 * min(1_000.0, settling if math.isfinite(settling) else 1_000.0)
+        sensitivity_penalty = 0.0 if sensitivity_peak_db is None else 0.08 * max(0.0, sensitivity_peak_db + 3.0)
+        effort_penalty = 0.55 * ((kp - current_kp) ** 2 + (ki - current_ki) ** 2)
+        return {
+            "model_spectral_radius": spectral_radius,
+            "model_settling_s": settling if math.isfinite(settling) else None,
+            "robust_penalty": radius_penalty + settling_penalty + sensitivity_penalty + effort_penalty,
+            "model_stable": spectral_radius < 0.995,
+        }
+
+    peak_limit_ns = max(20_000.0, 8.0 * percentile([abs(value) for value in samples], 0.95))
+
+    def replay(kp: float, ki: float) -> dict[str, Any]:
         correction = 0.0
         integral = 0.0
         errors: list[float] = []
@@ -994,9 +1058,38 @@ def safe_bayesian_tune(
             peak = max(peak, abs(residual))
         rms = math.sqrt(mean([value * value for value in errors]))
         tail = math.sqrt(mean([value * value for value in errors[-max(5, len(errors) // 5):]]))
-        stable = math.isfinite(rms) and peak <= max(20_000.0, 8.0 * percentile([abs(value) for value in samples], 0.95))
-        score = rms + 0.35 * tail + 0.02 * peak
-        return {"rms_ns": rms, "tail_rms_ns": tail, "peak_ns": peak, "score": score, "safe": stable}
+        overshoot = peak / max(EPSILON, percentile([abs(value) for value in samples], 0.95))
+        settling_index = next(
+            (
+                index for index in range(len(errors))
+                if max(abs(value) for value in errors[index:]) <= max(10.0, 0.2 * peak)
+            ),
+            len(errors),
+        )
+        settling_s = settling_index * sample_period_s
+        model = model_penalty(kp, ki)
+        stable = math.isfinite(rms) and peak <= peak_limit_ns
+        stable = stable and bool(model["model_stable"])
+        score = (
+            rms
+            + 0.35 * tail
+            + 0.02 * peak
+            + 0.15 * settling_s
+            + 5.0 * max(0.0, overshoot - 1.6)
+            + float(model["robust_penalty"] or 0.0)
+        )
+        return {
+            "rms_ns": rms,
+            "tail_rms_ns": tail,
+            "peak_ns": peak,
+            "overshoot_ratio": overshoot,
+            "settling_s": settling_s,
+            "model_spectral_radius": model["model_spectral_radius"],
+            "model_settling_s": model["model_settling_s"],
+            "robust_penalty": model["robust_penalty"],
+            "score": score,
+            "safe": stable,
+        }
 
     # Start with a space-filling design, then spend a bounded replay budget on
     # expected-improvement selections from a small RBF Gaussian process.  This
@@ -1015,10 +1108,10 @@ def safe_bayesian_tune(
         for index in seed_indices
     ]
     evaluated = set(seed_indices)
-    replay_budget = min(20, len(candidates))
+    replay_budget = min(36, len(candidates))
 
     def normalized(candidate: tuple[float, float]) -> tuple[float, float]:
-        return candidate[0] / 1.2, candidate[1] / 0.8
+        return math.log(max(0.01, candidate[0])) / math.log(1.8), math.log(max(0.01, candidate[1])) / math.log(1.5)
 
     def kernel(left: tuple[float, float], right: tuple[float, float], length_scale: float = 0.34) -> float:
         distance_squared = sum((a - b) ** 2 for a, b in zip(normalized(left), normalized(right)))
@@ -1066,20 +1159,38 @@ def safe_bayesian_tune(
         evaluations.append({**{"kp": kp_value, "ki": ki_value}, **replay(kp_value, ki_value)})
 
     safe = [item for item in evaluations if item["safe"]]
+    guardrails = {
+        "peak_limit_ns": peak_limit_ns,
+        "max_model_spectral_radius": 0.995,
+        "uses_identified_arx": isinstance(arx_coefficients, dict),
+        "uses_active_hinfinity": sensitivity_peak_db is not None,
+        "live_apply": "stage-only",
+    }
     if not safe:
-        return {"status": "no-safe-candidate", "samples": len(samples), "evaluations": evaluations}
+        return {
+            "status": "no-safe-candidate",
+            "samples": len(samples),
+            "method": "constrained replay + log-local/global RBF Gaussian-process expected improvement + identified-model robustness penalties",
+            "evaluations": evaluations,
+            "guardrails": guardrails,
+            "safe_candidates": 0,
+            "evaluated_candidates": len(evaluations),
+            "candidate_space": len(candidates),
+            "live_changes": 0,
+        }
     best = min(safe, key=lambda item: float(item["score"]))
     current = replay(current_kp, current_ki)
     return {
         "status": "recommended",
         "samples": len(samples),
-        "method": "constrained replay + RBF Gaussian-process expected improvement",
+        "method": "constrained replay + log-local/global RBF Gaussian-process expected improvement + identified-model robustness penalties",
         "recommendation": best,
         "baseline": {"kp": current_kp, "ki": current_ki, **current},
         "predicted_improvement_pct": max(0.0, 100.0 * (float(current["score"]) - float(best["score"])) / max(EPSILON, float(current["score"]))),
         "safe_candidates": len(safe),
         "evaluated_candidates": len(evaluations),
         "candidate_space": len(candidates),
+        "guardrails": guardrails,
         "live_changes": 0,
         "frontier": sorted(safe, key=lambda item: float(item["score"]))[:8],
     }
@@ -4164,7 +4275,6 @@ class RollingResearchEngine:
         aligned_ensemble_length = min((len(channel) for channel in ensemble_channels), default=0)
         ensemble_channels = [channel[-aligned_ensemble_length:] for channel in ensemble_channels] if aligned_ensemble_length else []
         ensemble = ensemble_clock(ensemble_ids, ensemble_channels)
-        auto_tune = safe_bayesian_tune(endpoint_series, period, kp, ki)
         inputs = []
         outputs = []
         ptp_samples: list[dict[str, Any]] = []
@@ -4199,6 +4309,14 @@ class RollingResearchEngine:
             period,
         )
         active_identification["target"] = identification_target or None
+        auto_tune = safe_bayesian_tune(
+            endpoint_series,
+            period,
+            kp,
+            ki,
+            system_id=system_id,
+            active_identification=active_identification,
+        )
         timing_oam = timing_oam_analysis(node_ids, series, hop_series)
         holdover_risk = holdover_reachability(endpoint_series, period)
         decomposition_ids = [node for node in node_ids[1:] if series.get(node)]

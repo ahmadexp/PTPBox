@@ -4,6 +4,10 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Upgraded PI autotuning to a replay-only safe Bayesian optimizer with a
+  global plus log-local candidate set, settling/overshoot constraints,
+  identified ARX stability penalties, optional H-infinity sensitivity
+  penalties, expanded guardrails, and richer UI evidence before staging Kp/Ki.
 - Isolated raw PHC acquisition in its own systemd process with a bounded
   SQLite/WAL ring, achieved-cadence health metrics, and research-engine replay.
   The Overview now distinguishes cadence gaps from clock motion, dynamically

@@ -376,22 +376,32 @@ congested, forward-heavy, and reverse-heavy observations from round-trip delay
 and directional imbalance. The imbalance remains an apparent observable, not
 calibrated asymmetry.
 
-## Replay-safe Bayesian tuning
+## Replay-safe Bayesian PI autotuning
 
-The tuner evaluates a bounded grid of PI gains against captured offset data. A
-candidate is eligible only when replay stays within peak and stability
-constraints. After safe seed evaluations, an RBF Gaussian process models the
-score and expected improvement selects additional candidates.
+The tuner evaluates a bounded global and log-local candidate set of PI gains
+against captured offset data. A candidate is eligible only when replay stays
+within peak, settling, overshoot, and identified-model stability constraints.
+After safe seed evaluations, an RBF Gaussian process models the score and
+expected improvement selects additional candidates.
+
+When the endpoint ARX model is available, the score adds penalties for poor
+model spectral radius and modeled settling time. When active multisine
+identification has produced coherent robust-control evidence, the score also
+penalizes high sensitivity \(H_\infty\). This keeps the recommendation closer
+to modern safe Bayesian optimization / robust loop-shaping practice while
+remaining fully offline.
 
 The response includes the baseline, recommendation, safe frontier, evaluated
-count, predicted improvement, and:
+count, predicted improvement, guardrails, robust penalties, modeled spectral
+radius, and:
 
 ```json
 { "live_changes": 0 }
 ```
 
-The button in the UI stages the recommendation for review. Applying it remains
-a separate guarded operator action. The GP/EI design follows the framework in
+The button in the UI stages the recommended Kp/Ki values for review. Applying
+them remains a separate guarded operator action. The GP/EI design follows the
+framework in
 [Snoek, Larochelle, and Adams](https://papers.nips.cc/paper_files/paper/2012/hash/05311655a15b75fab86956663e1819cd-Abstract.html).
 
 ## Regime and nonlinear-dynamics diagnostics
