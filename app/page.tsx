@@ -46,8 +46,9 @@ import {
 } from "./cascade-dynamics";
 import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
 import { SystemObservatory, type SystemPayload } from "./system-observatory";
+import { ThermalObservatory, type ThermalPayload } from "./thermal-observatory";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "System" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "System" | "Thermal" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
@@ -799,6 +800,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
   Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
   "Cascade dynamics": { title: "Cascade Dynamics Observatory", description: "Separate clock, transfer, servo, spatial, holdover, and nonlinear evidence across the complete timing chain." },
+  Thermal: { title: "Oscillator Thermal Response", description: "Map each oscillator's applied frequency correction against its die temperature, separate a temperature coefficient from ageing, and gate the claim on evidence." },
   System: { title: "System Observatory", description: "Host resources, thermal sensors, PCI inventory, and verification of the declared cascade against observed link state." },
   Holdover: { title: "Holdover chamber", description: "Synchronize, release clock discipline, and measure raw free-running PHC wander against the captured release baseline." },
   Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
@@ -3710,6 +3712,7 @@ export default function PTPBoxDashboard() {
   const [connection, setConnection] = useState<ConnectionMode>("checking");
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [systemInfo, setSystemInfo] = useState<SystemPayload | null>(null);
+  const [thermalInfo, setThermalInfo] = useState<ThermalPayload | null>(null);
   const [interfaceInventory, setInterfaceInventory] = useState<HostInterface[]>(FALLBACK_INTERFACES);
   const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
@@ -3790,6 +3793,20 @@ export default function PTPBoxDashboard() {
   const configuredServoTypeRef = useRef<ServoType>("pi");
   const notificationCenterRef = useRef<HTMLDivElement>(null);
   const commandInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshThermal = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/thermal?history=1800`, { signal: controller.signal });
+      if (!response.ok) throw new Error("thermal analysis unavailable");
+      setThermalInfo(await response.json() as ThermalPayload);
+    } catch {
+      // Keep the previous snapshot; the panel states its own evidence.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
 
   const refreshSystem = useCallback(async () => {
     const controller = new AbortController();
@@ -3951,6 +3968,18 @@ export default function PTPBoxDashboard() {
   // Only poll host resources while the page is visible: CPU utilisation needs
   // two readings, so the first sample after opening the page is intentionally
   // reported as unknown rather than blocking the request.
+  // The regression is recomputed server-side, so poll it slowly and only while
+  // the page is open.
+  useEffect(() => {
+    if (section !== "Thermal") return;
+    const initial = window.setTimeout(() => void refreshThermal(), 0);
+    const timer = window.setInterval(() => void refreshThermal(), 20000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [section, refreshThermal]);
+
   useEffect(() => {
     if (section !== "System") return;
     // Defer the first read out of the effect body so opening the page does not
@@ -4427,6 +4456,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Clock stability atlas, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev pdev totdev mtie tie rms theo1 allan hadamard parabolic stability uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-thermal", group: "Navigate", label: "Thermal", description: "Oscillator temperature coefficient, hysteresis, ageing separation, and evidence gates", keywords: "temperature tempco thermal oscillator drift frequency correction ppb celsius deming theil sen hysteresis ageing aging coefficient regression", section: "Thermal", icon: Thermometer },
     { id: "nav-system", group: "Navigate", label: "System", description: "Host resources, temperatures, PCI inventory, and declared-cascade link verification", keywords: "cpu memory ram swap disk filesystem temperature thermal sensor pci hardware inventory uptime kernel topology cabling admin", section: "System", icon: Cpu },
     { id: "nav-dynamics", group: "Navigate", label: "Cascade dynamics", description: "Transfer noise, spatial amplification, coherent modes, robust loop evidence, and holdover risk", keywords: "dynamic allan davar ftu adevs spectrum coherence string stability mrcosts hybrid nis observability sensitivity disk margin iqc topology bicoherence", section: "Cascade dynamics", icon: Waves },
     { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
@@ -4815,6 +4845,7 @@ export default function PTPBoxDashboard() {
     { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
     { label: "System", icon: Cpu },
+    { label: "Thermal", icon: Thermometer },
     { label: "Album", icon: Images },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -5213,6 +5244,10 @@ export default function PTPBoxDashboard() {
                 </div>
               </section>
             </div>
+          )}
+
+          {section === "Thermal" && (
+            <ThermalObservatory thermal={thermalInfo} />
           )}
 
           {section === "System" && (

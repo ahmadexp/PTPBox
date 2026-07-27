@@ -4,6 +4,14 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added the Oscillator Thermal Response page: correction-against-temperature
+  scatter with the least-squares and Deming fit lines overlaid and sample age
+  encoded as opacity, a residual-against-temperature plot so unmodelled
+  curvature is visible rather than hidden in a coefficient, per-clock estimator
+  comparison, the evidence gates with the unmet ones named, the joint fit that
+  separates a coefficient from ageing, heating and cooling branches, AIC model
+  ranking, and a compensation preview.
+
 - Added per-adapter die temperature to the physical topology, shown behind a
   thermometer beside each clock and tinted amber above 90 C and red above 100 C.
   `GET /api/phc` now carries the collector's latest hardware-monitor reading per

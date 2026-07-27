@@ -737,3 +737,33 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior:auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }
+
+/* Oscillator thermal response */
+.thm-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 12px 16px; }
+.thm-summary > div { display: flex; flex-direction: column; gap: 3px; }
+.thm-summary small { font-size: 8px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.thm-summary b { font-size: 13px; }
+.thm-scatter, .thm-residual { width: 100%; height: auto; display: block; padding: 4px 8px 0; }
+.thm-scatter circle { fill: var(--accent, #61dce3); }
+.thm-scatter .axis, .thm-residual .zero { stroke: var(--line-soft, rgba(255,255,255,.14)); stroke-width: 1; }
+.thm-scatter .fit { stroke: #f2b84b; stroke-width: 1.6; fill: none; }
+.thm-scatter .fit.deming { stroke: #ff6b6b; stroke-dasharray: 5 3; }
+.thm-scatter text, .thm-residual text { fill: var(--muted); font-size: 8px; }
+.thm-scatter .axis-title, .thm-residual .axis-title { font-size: 7.5px; letter-spacing: .08em; }
+.thm-scatter .thm-note { font-size: 7px; opacity: .7; }
+.thm-legend line { stroke-width: 1.6; }
+.thm-legend text { font-size: 7.5px; }
+.thm-residual circle { fill: var(--muted); opacity: .65; }
+.thm-table tbody tr { cursor: pointer; }
+.thm-table tbody tr.selected { background: rgba(97,220,227,.09); }
+.thm-table tbody tr.muted td { color: var(--muted); font-style: italic; }
+.thm-verdict { font-size: 8px; letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px; border-radius: 5px; background: rgba(255,255,255,.06); color: var(--muted); }
+.thm-verdict.supported { background: rgba(93,214,138,.16); color: #5dd68a; }
+.thm-verdict.candidate { background: rgba(242,184,75,.16); color: #f2b84b; }
+.thm-verdict.insufficient-evidence { background: rgba(255,107,107,.14); color: #ff6b6b; }
+.thm-gates { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; padding: 12px 16px; }
+.thm-gates > div { display: flex; align-items: center; gap: 7px; font-size: 9px; color: var(--muted); }
+.thm-gates i { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.thm-gates .pass i { background: #5dd68a; }
+.thm-gates .fail i { background: #ff6b6b; }
+.thm-gates .fail { color: var(--text, #e8eef4); }
