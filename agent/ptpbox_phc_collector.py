@@ -15,6 +15,8 @@ from ptpbox_phc_store import append_sample
 def collect(stop: threading.Event) -> None:
     deadline = time.monotonic()
     consecutive_failures = 0
+    delivered_any = False
+    reported_idle = False
     while not stop.is_set():
         requested_rate = agent.configured_phc_sample_rate_hz()
         period = 1.0 / requested_rate
@@ -28,18 +30,30 @@ def collect(stop: threading.Event) -> None:
                 delivered = True
             except (OSError, sqlite3.Error) as exc:
                 print(f"PTPBox PHC store write failed: {exc}", flush=True)
-        else:
-            print("PTPBox PHC sample unavailable", flush=True)
 
-        # A sustained inability to acquire or store is not something this loop can
-        # repair: exhausted descriptors, a revoked store path, or a disappearing
-        # PHC all persist.  Exit so the supervisor restarts a clean process
-        # instead of leaving a live service that silently delivers nothing.
-        consecutive_failures = 0 if delivered else consecutive_failures + 1
-        if consecutive_failures >= max(10, int(round(requested_rate * 10))):
+        if delivered:
+            if reported_idle:
+                print("PTPBox PHC acquisition resumed", flush=True)
+            delivered_any = True
+            consecutive_failures = 0
+            reported_idle = False
+        else:
+            consecutive_failures += 1
+            if not reported_idle:
+                # Report the transition once rather than every cycle: before the
+                # cascade is started there is legitimately nothing to sample.
+                print("PTPBox PHC samples unavailable; waiting", flush=True)
+                reported_idle = True
+
+        # Exiting is only justified once acquisition has actually worked and then
+        # stopped, which indicates a condition this loop cannot repair (exhausted
+        # descriptors, a revoked store path, a PHC that disappeared).  A process
+        # that has never acquired is simply waiting for the cascade to start, so
+        # it must keep waiting instead of forcing a supervisor restart loop.
+        if delivered_any and consecutive_failures >= max(10, int(round(requested_rate * 10))):
             print(
-                f"PTPBox PHC collector delivered nothing for {consecutive_failures} "
-                "consecutive cycles; exiting for supervisor restart",
+                f"PTPBox PHC collector stopped delivering for {consecutive_failures} "
+                "consecutive cycles after working; exiting for supervisor restart",
                 flush=True,
             )
             raise SystemExit(1)
