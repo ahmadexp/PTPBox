@@ -37,7 +37,7 @@ import {
   Waves,
   X,
   Zap,
-} from "lucide-react";
+  Thermometer,} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CascadeDynamicsObservatory,
@@ -209,6 +209,7 @@ type ClockNode = {
   phcReadSpan: number | null;
   phcUncertainty?: number | null;
   phcMethod?: string | null;
+  temperatureC?: number | null;
   servoType?: ServoType | null;
   servoEnabled?: boolean;
   holdoverStarted?: number | null;
@@ -1012,6 +1013,7 @@ function nodesWithPhcTelemetry(current: ClockNode[], payload: PhcTelemetryPayloa
       phcReadSpan: measurement.read_span_ns,
       phcUncertainty: measurement.comparison_uncertainty_ns ?? null,
       phcMethod: measurement.cross_timestamp_method,
+      temperatureC: (clock as { temperature_c?: number | null }).temperature_c ?? node.temperatureC ?? null,
       source: measurement.error ?? `direct /dev/${clock.phc} read`,
       lastSampleAt: measurement.observed_at,
     };
@@ -1033,6 +1035,7 @@ function preserveNewerPhcTelemetry(incoming: ClockNode[], current: ClockNode[]) 
       phcReadSpan: newer.phcReadSpan,
       phcUncertainty: newer.phcUncertainty,
       phcMethod: newer.phcMethod,
+      temperatureC: newer.temperatureC ?? node.temperatureC ?? null,
       source: newer.source,
       lastSampleAt: newer.lastSampleAt,
     };
@@ -4949,6 +4952,12 @@ export default function PTPBoxDashboard() {
                             title={agentStatus?.pps?.nodes[node.id]?.pin ? `${agentStatus?.pps?.nodes[node.id]?.device} · ${agentStatus?.pps?.nodes[node.id]?.pin?.name} · channel ${agentStatus?.pps?.nodes[node.id]?.channel}` : "Reading hardware PPS capability"}
                           >
                             <Zap size={8} /> {ppsNodeLabel(node.id)}
+                          </div>
+                          <div
+                            className={`node-temp ${node.temperatureC == null ? "unknown" : node.temperatureC >= 100 ? "critical" : node.temperatureC >= 90 ? "warning" : ""}`}
+                            title={node.temperatureC == null ? "No hardware-monitor reading for this adapter" : `Adapter die temperature ${node.temperatureC.toFixed(1)} °C`}
+                          >
+                            <Thermometer size={9} />{node.temperatureC == null ? "— °C" : `${node.temperatureC.toFixed(0)} °C`}
                           </div>
                           <div className="node-ports"><code>{node.ingress}</code><ArrowRight size={11} /><code>{node.egress}</code></div>
                         </button>

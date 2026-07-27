@@ -4,6 +4,24 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added per-adapter die temperature to the physical topology, shown behind a
+  thermometer beside each clock and tinted amber above 90 C and red above 100 C.
+  `GET /api/phc` now carries the collector's latest hardware-monitor reading per
+  node instead of keeping it only in the sample store.
+- Added oscillator temperature-coefficient analysis over
+  `GET /api/thermal`: the servo's applied frequency correction is regressed on
+  die temperature, which measures a tempco because the correction is the negated
+  oscillator error. Reports ordinary least squares with standard errors scaled by
+  residual autocorrelation, a Deming errors-in-variables slope because whole
+  degree readings attenuate least squares toward zero, a Theil-Sen robust slope,
+  AIC-ranked linear/quadratic/cubic order for the AT-cut S-curve, separate
+  heating and cooling branches for hysteresis, a bounded lag search for thermal
+  delay, and a joint temperature/time fit that separates a coefficient from
+  oscillator ageing. Seven evidence gates cover span, distinct levels,
+  time collinearity, residual independence, effective sample size, and slope
+  significance; a supported verdict requires deliberate thermal forcing, so
+  passive operation is reported as a candidate rather than a measured tempco.
+
 - Made the operator settings control in the sidebar footer open the System
   Observatory. It was a decorative icon with no behaviour; it is now a real
   focusable button with an accessible label.

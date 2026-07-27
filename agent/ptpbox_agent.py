@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import bisect
 import ctypes
 import errno
 import fcntl
@@ -41,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ptpbox_research import ExperimentStore, RollingResearchEngine, path_regime_analysis  # noqa: E402
 from ptpbox_phc_store import collector_quality, read_records  # noqa: E402
 import ptpbox_system  # noqa: E402
+import ptpbox_thermal  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -772,8 +774,13 @@ def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) ->
     now = time.time()
     cutoff = now - max(5.0, min(history_seconds, 900.0))
     records = read_records(PHC_STORE_FILE, history_seconds) if EXTERNAL_PHC_COLLECTOR else []
+    temperature_history: list[tuple[float, dict[str, float]]] = []
     if records:
         history = [record["sample"] for record in records]
+        for record in records:
+            readings = record.get("temperatures") or {}
+            if readings:
+                temperature_history.append((float(record["sample"]["observed_at"]), readings))
     else:
         with PHC_HISTORY_LOCK:
             history = list(PHC_HISTORY)
@@ -796,6 +803,14 @@ def phc_telemetry(history_seconds: float = 120.0, since: float | None = None) ->
                 "phc": item["measurement_phc"],
                 "measurement": measurement,
                 "samples": samples,
+                "temperature_c": next(
+                    (
+                        float(readings[item["id"]])
+                        for _, readings in reversed(temperature_history)
+                        if item["id"] in readings
+                    ),
+                    None,
+                ),
                 "window_sample_count": len(values),
                 "rms_ns": (
                     sum(offset * offset for offset in valid_offsets) / len(valid_offsets)
@@ -1212,6 +1227,72 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
             sample["observed_at"] = stat.st_mtime - (len(parsed) - index - 1) * 0.0625
         sample["sample_id"] = f"{stat.st_ino}:{sample['source_time'] if sample['source_time'] is not None else index}"
     return parsed
+
+
+def thermal_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
+    """Pair die temperature with the servo's applied frequency correction.
+
+    Temperature comes from the collector's hardware-monitor readings and the
+    correction from LinuxPTP, so the two arrive on independent cadences. Each
+    correction is matched to the nearest temperature reading, and a match is
+    rejected outright rather than interpolated when the nearest reading is too
+    far away: inventing a temperature would manufacture the very relationship
+    this analysis is meant to test.
+    """
+    window = max(60.0, min(float(history_seconds), 7200.0))
+    records = read_records(PHC_STORE_FILE, window) if EXTERNAL_PHC_COLLECTOR else []
+    readings: dict[str, list[tuple[float, float]]] = {}
+    for record in records:
+        stamp = float(record["sample"]["observed_at"])
+        for node, value in (record.get("temperatures") or {}).items():
+            try:
+                readings.setdefault(str(node), []).append((stamp, float(value)))
+            except (TypeError, ValueError):
+                continue
+    for series in readings.values():
+        series.sort()
+
+    telemetry_payload = telemetry(history_seconds=window, limit=TELEMETRY_MAX_SAMPLES)
+    tolerance = max(2.0, 2.0 / max(0.5, configured_phc_sample_rate_hz()))
+    paired: dict[str, list[tuple[float, float, float]]] = {}
+    for clock in telemetry_payload.get("clocks", []):
+        node = str(clock.get("id"))
+        series = readings.get(node)
+        if not series:
+            continue
+        stamps = [row[0] for row in series]
+        rows: list[tuple[float, float, float]] = []
+        for sample in clock.get("samples") or []:
+            if not sample.get("valid") or sample.get("frequency_ppb") is None:
+                continue
+            try:
+                stamp = float(sample["observed_at"])
+                frequency = float(sample["frequency_ppb"])
+            except (TypeError, ValueError):
+                continue
+            index = bisect.bisect_left(stamps, stamp)
+            best: tuple[float, float] | None = None
+            for candidate in (index - 1, index):
+                if 0 <= candidate < len(series):
+                    delta = abs(series[candidate][0] - stamp)
+                    if best is None or delta < best[0]:
+                        best = (delta, series[candidate][1])
+            if best is not None and best[0] <= tolerance:
+                rows.append((stamp, best[1], frequency))
+        if rows:
+            paired[node] = rows
+
+    result = ptpbox_thermal.thermal_analysis(paired)
+    result["window_s"] = window
+    result["pairing"] = {
+        "tolerance_s": tolerance,
+        "temperature_source": "collector hardware-monitor readings",
+        "frequency_source": "LinuxPTP applied frequency correction",
+        "method": "nearest reading within tolerance; unmatched corrections are dropped, never interpolated",
+        "paired_nodes": len(paired),
+    }
+    result["timestamp"] = time.time()
+    return result
 
 
 def system_snapshot() -> dict[str, Any]:
@@ -2476,6 +2557,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(hardware_capabilities(force=query.get("refresh") == ["1"]))
             elif route == "/api/system":
                 self.send_json(system_snapshot())
+            elif route == "/api/thermal":
+                try:
+                    window = float(query.get("history", ["1800"])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(thermal_snapshot(window))
             elif route == "/api/path-events":
                 try:
                     limit = int(query.get("limit", ["128"])[0])

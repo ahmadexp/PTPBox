@@ -156,6 +156,11 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .clock-node > strong { font-size: 11px; letter-spacing: .02em; }.node-offset { display: block; margin-top: 3px; color: #d8e7e8; font-size: 13px; font-weight: 550; letter-spacing: -.03em; }
 .node-state { display: flex; align-items: center; gap: 4px; margin-top: 7px; color: var(--mint); font-size: 7px; font-weight: 700; letter-spacing: .09em; }.node-state span { width: 5px; height: 5px; border-radius: 50%; background: var(--mint); }.tracking .node-state { color: var(--amber); }.tracking .node-state span { background: var(--amber); }
 .node-pps { min-height: 17px; display: flex; align-items: center; gap: 4px; margin-top: 4px; padding: 0 4px; border: 1px solid #21343c; border-radius: 3px; background: rgba(84,111,120,.045); color: #60777e; font-size: 5.7px; font-weight: 750; letter-spacing: .055em; white-space: nowrap; }.node-pps svg { flex: 0 0 auto; }.node-pps.source { color: var(--amber); }.node-pps.sink { color: #94b6c0; }.node-pps.active { border-color: rgba(119,226,179,.24); background: rgba(119,226,179,.055); color: var(--mint); box-shadow: inset 2px 0 rgba(119,226,179,.55); }.node-pps.starting, .node-pps.stopped { border-color: rgba(243,195,111,.2); color: var(--amber); }.node-pps.unavailable { color: #4c5d63; opacity: .7; }
+.node-temp { display: inline-flex; align-items: center; gap: 3px; margin-top: 4px; padding: 1px 5px; border-radius: 6px; font-size: 8px; letter-spacing: .02em; color: var(--muted); background: rgba(255,255,255,.045); }
+.node-temp svg { flex: 0 0 auto; }
+.node-temp.warning { color: #f2b84b; background: rgba(242,184,75,.12); }
+.node-temp.critical { color: #ff6b6b; background: rgba(255,107,107,.14); }
+.node-temp.unknown { opacity: .55; }
 .node-ports { margin: auto -3px -3px; height: 21px; display: flex; align-items: center; justify-content: space-between; gap: 2px; padding: 0 4px; border-top: 1px solid var(--line-soft); color: #5f767e; }.node-ports code { max-width: 35px; overflow: hidden; text-overflow: ellipsis; font-size: 6px; white-space: nowrap; }
 .hop-link { position: relative; z-index: 1; width: 34px; height: 1px; background: linear-gradient(90deg, #2c4650, #5abcc2, #2c4650); }
 .hop-link::after { content: ""; position: absolute; inset: -3px 0; border-top: 1px solid rgba(97, 220, 227, .07); }
