@@ -4,6 +4,16 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added a System Observatory: host identity and uptime, processor model with
+  delta-sampled utilisation and load, memory and swap, real filesystem capacity,
+  thermal sensors attributed to their owning PCI device, PCI inventory grouped
+  by driver, and verification of the declared cascade against observed link
+  state. Served by a new read-only `GET /api/system` that touches only `/proc`,
+  `/sys`, and mount statistics, so it needs no privilege and cannot reach a
+  clock. Link checking is explicitly not peer discovery: resolving which port is
+  cabled to which peer needs the raw-frame prober and a torn-down cascade, and
+  the payload reports that rather than implying discovery ran.
+
 - Upgraded PI autotuning to a replay-only safe Bayesian optimizer with a
   global plus log-local candidate set, settling/overshoot constraints,
   identified ARX stability penalties, optional H-infinity sensitivity

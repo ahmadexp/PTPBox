@@ -45,8 +45,9 @@ import {
   type IdentificationState,
 } from "./cascade-dynamics";
 import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
+import { SystemObservatory, type SystemPayload } from "./system-observatory";
 
-type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "Configuration" | "Event log";
+type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "System" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
@@ -797,6 +798,7 @@ const SECTION_META: Record<Section, { title: string; description: string }> = {
   "Path microscope": { title: "Path microscope", description: "Inspect raw LinuxPTP exchange timestamps, correction fields, directional residuals, and common-edge PPS comparisons." },
   Intelligence: { title: "Control intelligence", description: "Estimate drift, identify loop dynamics, detect regime changes, and tune controllers against captured data." },
   "Cascade dynamics": { title: "Cascade Dynamics Observatory", description: "Separate clock, transfer, servo, spatial, holdover, and nonlinear evidence across the complete timing chain." },
+  System: { title: "System Observatory", description: "Host resources, thermal sensors, PCI inventory, and verification of the declared cascade against observed link state." },
   Holdover: { title: "Holdover chamber", description: "Synchronize, release clock discipline, and measure raw free-running PHC wander against the captured release baseline." },
   Resilience: { title: "Resilience lab", description: "Validate timing profiles, expose DPLL and SyncE truth, authenticate messages, and inject bounded faults." },
   Analytics: { title: "Timing analytics", description: "Interrogate direct PHC differences alongside LinuxPTP servo state, frequency correction, and path delay." },
@@ -3704,6 +3706,7 @@ export default function PTPBoxDashboard() {
   const [time, setTime] = useState("");
   const [connection, setConnection] = useState<ConnectionMode>("checking");
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const [systemInfo, setSystemInfo] = useState<SystemPayload | null>(null);
   const [interfaceInventory, setInterfaceInventory] = useState<HostInterface[]>(FALLBACK_INTERFACES);
   const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
@@ -3784,6 +3787,20 @@ export default function PTPBoxDashboard() {
   const configuredServoTypeRef = useRef<ServoType>("pi");
   const notificationCenterRef = useRef<HTMLDivElement>(null);
   const commandInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshSystem = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/system`, { signal: controller.signal });
+      if (!response.ok) throw new Error("system inventory unavailable");
+      setSystemInfo(await response.json() as SystemPayload);
+    } catch {
+      // Leave the last good snapshot in place; the panel labels its own staleness.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
 
   const refreshInterfaces = useCallback(async () => {
     const controller = new AbortController();
@@ -3927,6 +3944,21 @@ export default function PTPBoxDashboard() {
     const timer = window.setInterval(() => void refreshInterfaces().catch(() => undefined), 5000);
     return () => window.clearInterval(timer);
   }, [refreshInterfaces]);
+
+  // Only poll host resources while the page is visible: CPU utilisation needs
+  // two readings, so the first sample after opening the page is intentionally
+  // reported as unknown rather than blocking the request.
+  useEffect(() => {
+    if (section !== "System") return;
+    // Defer the first read out of the effect body so opening the page does not
+    // set state during render.
+    const initial = window.setTimeout(() => void refreshSystem(), 0);
+    const timer = window.setInterval(() => void refreshSystem(), 3000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [section, refreshSystem]);
 
   useEffect(() => {
     if (!agentStatus || configHydratedRef.current) return;
@@ -4392,6 +4424,7 @@ export default function PTPBoxDashboard() {
     { id: "nav-metrology", group: "Navigate", label: "Metrology workbench", description: "Clock stability atlas, factor fusion, ensemble time, and run recorder", keywords: "adev mdev tdev hdev pdev totdev mtie tie rms theo1 allan hadamard parabolic stability uncertainty experiment", section: "Metrology", icon: TimerReset },
     { id: "nav-path", group: "Navigate", label: "Path microscope", description: "Raw t1/t2 and t3/t4 LinuxPTP exchange timestamps", keywords: "packet sync delay timestamps asymmetry pps", section: "Path microscope", icon: Radio },
     { id: "nav-intelligence", group: "Navigate", label: "Control intelligence", description: "Adaptive Kalman, bifurcation, recurrence, fractal scaling, and Koopman", keywords: "kalman drift model auto tune bocpd bifurcation gain sweep recurrence fractal higuchi correlation dimension multifractal mfdfa dmd holdover", section: "Intelligence", icon: Gauge },
+    { id: "nav-system", group: "Navigate", label: "System", description: "Host resources, temperatures, PCI inventory, and declared-cascade link verification", keywords: "cpu memory ram swap disk filesystem temperature thermal sensor pci hardware inventory uptime kernel topology cabling admin", section: "System", icon: Cpu },
     { id: "nav-dynamics", group: "Navigate", label: "Cascade dynamics", description: "Transfer noise, spatial amplification, coherent modes, robust loop evidence, and holdover risk", keywords: "dynamic allan davar ftu adevs spectrum coherence string stability mrcosts hybrid nis observability sensitivity disk margin iqc topology bicoherence", section: "Cascade dynamics", icon: Waves },
     { id: "nav-holdover", group: "Navigate", label: "Holdover chamber", description: "Qualify lock, release discipline, measure raw wander, and recover", keywords: "free run clock drift phase time error resume capture", section: "Holdover", icon: TimerReset },
     { id: "nav-resilience", group: "Navigate", label: "Resilience lab", description: "Profiles, DPLL, SyncE, authentication, and bounded faults", keywords: "security profile synce dpll fault injection netem", section: "Resilience", icon: ShieldCheck },
@@ -4778,6 +4811,7 @@ export default function PTPBoxDashboard() {
     { label: "Holdover", icon: TimerReset, badge: holdover?.session?.phase === "holdover" ? "LIVE" : holdover?.session?.phase === "synchronizing" ? "ARM" : undefined },
     { label: "Resilience", icon: ShieldCheck, badge: faultActive ? "LIVE" : undefined },
     { label: "Analytics", icon: BarChart3 },
+    { label: "System", icon: Cpu },
     { label: "Album", icon: Images },
     { label: "Experiments", icon: FlaskConical, badge: experimentRunning ? "RUN" : undefined },
     { label: "Interfaces", icon: Cable },
@@ -5170,6 +5204,10 @@ export default function PTPBoxDashboard() {
                 </div>
               </section>
             </div>
+          )}
+
+          {section === "System" && (
+            <SystemObservatory system={systemInfo} updatedAt={systemInfo?.timestamp ?? null} />
           )}
 
           {section === "Interfaces" && (
