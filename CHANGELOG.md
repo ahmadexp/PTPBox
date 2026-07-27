@@ -4,6 +4,23 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added temperature-compensated holdover as an evaluated option over
+  `GET /api/holdover/compensation`. During holdover the PHC free-runs; the
+  evaluator scores what the drift would have been had a temperature-driven
+  correction been applied instead, using the coefficient measured while locked
+  and, separately, the best coefficient obtainable in hindsight. That second
+  figure bounds what compensation could ever achieve on the record, so a drift
+  that is not temperature-driven is identified as such rather than fitted.
+  Arming is refused unless the coefficient's own evidence verdict is supported.
+  On the reference host the measured coefficient would have worsened five of six
+  clocks, one by 178 percent, so the gate is doing real work. The regressor is
+  smoothed first because whole-degree sensors dither a full step between reads,
+  and left raw that alternation lets a fitted coefficient cancel drift at the
+  sampling frequency, manufacturing an improvement no compensator could
+  reproduce. Live actuation is deliberately not implemented: applying a
+  correction during holdover needs the root-owned servo worker, and the payload
+  reports `implemented: false` rather than implying otherwise.
+
 - Added read-only network status to the System Observatory: per-interface
   addressing with the port carrying the default route marked, roles resolved
   against the declared topology, NetworkManager connection and state, default

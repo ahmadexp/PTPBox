@@ -862,6 +862,224 @@ def fleet_comparison(
     }
 
 
+# ---------------------------------------------------------------------------
+# Temperature-compensated holdover
+#
+# During holdover the PHC is left free-running and accumulates phase at the
+# oscillator's own frequency error. If that error moves with temperature by a
+# known coefficient, continuing to apply a temperature-driven correction should
+# cancel part of the drift.
+#
+# The coefficient sign needs care. The analysis above regresses the *applied
+# correction* on temperature, and the correction cancels the oscillator error, so
+# the oscillator's own coefficient is the negation of that slope.
+#
+# Compensation is only worth arming when the coefficient is trustworthy. A
+# confounded estimate injects error rather than removing it, so the evaluator
+# reports both what the measured coefficient would achieve and what the best
+# possible coefficient could achieve. If the second is small the idea cannot help
+# this oscillator, whatever coefficient is used.
+# ---------------------------------------------------------------------------
+
+MIN_COMPENSATION_BENEFIT_PCT = 10.0
+
+# A die has thermal mass, so its temperature cannot change materially between
+# consecutive samples. Whole-degree sensors nonetheless flap by a full step
+# between reads, and that dither is quantisation noise rather than heat. Left in
+# place it lets a fitted coefficient cancel drift by exploiting alternation at
+# the sampling frequency, which manufactures an improvement that no physical
+# compensator could reproduce. Smooth the regressor before modelling.
+COMPENSATION_SMOOTHING_SAMPLES = 5
+
+
+def _integrate(rates: Sequence[float], times: Sequence[float]) -> list[float]:
+    """Trapezoidal phase from a frequency-error series in ppb (ns per s)."""
+    phase = [0.0]
+    for index in range(1, len(rates)):
+        step = times[index] - times[index - 1]
+        phase.append(phase[-1] + 0.5 * (rates[index] + rates[index - 1]) * step)
+    return phase
+
+
+def _series_statistics(values: Sequence[float]) -> dict[str, Any]:
+    if not values:
+        return {"rms_ns": None, "peak_abs_ns": None, "final_ns": None}
+    return {
+        "rms_ns": math.sqrt(sum(value * value for value in values) / len(values)),
+        "peak_abs_ns": max(abs(value) for value in values),
+        "final_ns": values[-1],
+    }
+
+
+def holdover_compensation(
+    samples: Sequence[tuple[float, float, float]],
+    correction_tempco_ppb_per_c: float | None = None,
+    coefficient_verdict: str = "unknown",
+) -> dict[str, Any]:
+    """Evaluate temperature-compensated holdover against a recorded free run.
+
+    ``samples`` are (time, temperature_c, phase_ns) from a holdover record, where
+    phase is the accumulated time error from the release baseline.
+
+    Nothing here changes a clock. It answers whether compensation would have
+    reduced the drift that was actually observed, which is the question that has
+    to be settled before arming it on hardware.
+    """
+    ordered = sorted((float(t), float(temp), float(phase)) for t, temp, phase in samples)
+    if len(ordered) < 30:
+        return {"status": "learning", "samples": len(ordered),
+                "reason": "need at least 30 holdover samples with temperature"}
+    times = [row[0] for row in ordered]
+    temperature = [row[1] for row in ordered]
+    phase = [row[2] for row in ordered]
+    span = times[-1] - times[0]
+    if span <= EPSILON:
+        return {"status": "unavailable", "reason": "zero-length record"}
+
+    # Differentiate phase to get the free-running frequency error, then remove the
+    # release-instant value so only the change during holdover is modelled.
+    rates: list[float] = []
+    for index in range(len(ordered)):
+        if index == 0:
+            step = times[1] - times[0]
+            rates.append((phase[1] - phase[0]) / step if step > EPSILON else 0.0)
+        elif index == len(ordered) - 1:
+            step = times[-1] - times[-2]
+            rates.append((phase[-1] - phase[-2]) / step if step > EPSILON else 0.0)
+        else:
+            step = times[index + 1] - times[index - 1]
+            rates.append((phase[index + 1] - phase[index - 1]) / step if step > EPSILON else 0.0)
+
+    # Suppress sensor dither before it can be mistaken for thermal motion.
+    window = max(1, min(COMPENSATION_SMOOTHING_SAMPLES, len(temperature) // 4))
+    smoothed: list[float] = []
+    for index in range(len(temperature)):
+        low = max(0, index - window // 2)
+        high = min(len(temperature), low + window)
+        smoothed.append(_mean(temperature[low:high]))
+    reference_temperature = smoothed[0]
+    delta_temperature = [value - reference_temperature for value in smoothed]
+
+    def residual_phase(oscillator_tempco: float) -> list[float]:
+        """Phase left after cancelling the modelled thermal frequency term."""
+        corrected = [rates[index] - oscillator_tempco * delta_temperature[index] for index in range(len(rates))]
+        return _integrate(corrected, times)
+
+    measured = _series_statistics(phase)
+
+    # The oscillator coefficient is the negation of the correction coefficient.
+    predictive: dict[str, Any] = {"status": "unavailable", "reason": "no coefficient supplied"}
+    if correction_tempco_ppb_per_c is not None:
+        oscillator_tempco = -float(correction_tempco_ppb_per_c)
+        residual = residual_phase(oscillator_tempco)
+        stats = _series_statistics(residual)
+        improvement = None
+        if measured["rms_ns"] and measured["rms_ns"] > EPSILON and stats["rms_ns"] is not None:
+            improvement = 100.0 * (1.0 - stats["rms_ns"] / measured["rms_ns"])
+        predictive = {
+            "status": "ready",
+            "oscillator_tempco_ppb_per_c": oscillator_tempco,
+            "correction_tempco_ppb_per_c": float(correction_tempco_ppb_per_c),
+            **stats,
+            "improvement_pct": improvement,
+            "harmful": bool(improvement is not None and improvement < 0.0),
+        }
+
+    # Best achievable coefficient, fitted in sample. This is an upper bound, not
+    # a usable coefficient: it is chosen with knowledge of the very record it is
+    # scored against.
+    oracle: dict[str, Any] = {"status": "unavailable"}
+    leverage = sum(value * value for value in delta_temperature)
+    if leverage > EPSILON:
+        # Minimise the residual phase RMS over the coefficient by a short scan
+        # bracketing the least-squares rate solution.
+        rate_fit = sum(rates[index] * delta_temperature[index] for index in range(len(rates))) / leverage
+        best = None
+        for step in range(-20, 21):
+            candidate = rate_fit * (1.0 + step * 0.1)
+            stats = _series_statistics(residual_phase(candidate))
+            if stats["rms_ns"] is None:
+                continue
+            if best is None or stats["rms_ns"] < best[1]["rms_ns"]:
+                best = (candidate, stats)
+        if best:
+            candidate, stats = best
+            improvement = None
+            if measured["rms_ns"] and measured["rms_ns"] > EPSILON:
+                improvement = 100.0 * (1.0 - stats["rms_ns"] / measured["rms_ns"])
+            oracle = {
+                "status": "ready",
+                "oscillator_tempco_ppb_per_c": candidate,
+                **stats,
+                "improvement_pct": improvement,
+                "note": "fitted on the same record it is scored against; an upper bound on achievable benefit, not a coefficient to deploy",
+            }
+
+    achievable = oracle.get("improvement_pct") if oracle.get("status") == "ready" else None
+    coefficient_trusted = coefficient_verdict == "supported"
+    worth_arming = bool(
+        coefficient_trusted
+        and predictive.get("status") == "ready"
+        and not predictive.get("harmful")
+        and (predictive.get("improvement_pct") or 0.0) >= MIN_COMPENSATION_BENEFIT_PCT
+    )
+    if achievable is not None and achievable < MIN_COMPENSATION_BENEFIT_PCT:
+        recommendation = (
+            f"Do not compensate. Even the best possible coefficient recovers only "
+            f"{achievable:.1f}% of the observed wander, so this drift is not "
+            f"temperature-driven over the range seen."
+        )
+    elif not coefficient_trusted:
+        recommendation = (
+            "Do not arm yet. The temperature range in the locked record cannot support a "
+            "trustworthy coefficient, and compensating with a confounded one injects error. "
+            "Run a forced thermal cycle first."
+        )
+    elif worth_arming:
+        recommendation = "Compensation is supported by the record and would reduce holdover wander."
+    else:
+        recommendation = "Coefficient is trustworthy but the modelled benefit is below the arming threshold."
+
+    return {
+        "status": "ready",
+        "samples": len(ordered),
+        "record_span_s": span,
+        "temperature": {
+            "reference_c": reference_temperature,
+            "minimum_c": min(temperature),
+            "maximum_c": max(temperature),
+            "span_c": max(temperature) - min(temperature),
+            "smoothing_samples": window,
+            "smoothed_span_c": max(smoothed) - min(smoothed),
+            "note": (
+                "The regressor is smoothed because whole-degree sensors dither by a full step "
+                "between reads, which is quantisation noise and not thermal motion a compensator "
+                "could track"
+            ),
+        },
+        "measured_free_run": measured,
+        "compensated_predictive": predictive,
+        "compensated_best_possible": oracle,
+        "arming": {
+            "coefficient_verdict": coefficient_verdict,
+            "coefficient_trusted": coefficient_trusted,
+            "benefit_threshold_pct": MIN_COMPENSATION_BENEFIT_PCT,
+            "worth_arming": worth_arming,
+            "recommendation": recommendation,
+        },
+        "actuation": {
+            "implemented": False,
+            "mechanism": (
+                "Live compensation would keep applying a bounded clock_adjtime frequency "
+                "correction during holdover instead of leaving the PHC free-running, driven by "
+                "the live reading, which requires the root-owned servo worker rather than this "
+                "read-only analysis"
+            ),
+        },
+        "live_changes": 0,
+    }
+
+
 def thermal_analysis(paired: dict[str, Sequence[tuple[float, float, float]]]) -> dict[str, Any]:
     """Analyse every clock and summarise the fleet."""
     nodes = {node: analyse_node(samples, node) for node, samples in sorted(paired.items())}

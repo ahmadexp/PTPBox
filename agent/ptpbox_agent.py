@@ -1295,6 +1295,65 @@ def thermal_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
     return result
 
 
+def holdover_compensation_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
+    """Evaluate temperature-compensated holdover against the recorded free run.
+
+    Compensation is only meaningful for a clock whose adjustment is frozen, so
+    nodes that are actively disciplined are reported as not applicable rather
+    than scored against a servo-controlled record.
+    """
+    window = max(60.0, min(float(history_seconds), 7200.0))
+    records = read_records(PHC_STORE_FILE, window) if EXTERNAL_PHC_COLLECTOR else []
+    thermal = thermal_snapshot(window)
+    servo_nodes = (telemetry(history_seconds=60.0, limit=8).get("servo_control") or {}).get("nodes", {})
+
+    per_node: dict[str, Any] = {}
+    for node, analysis in (thermal.get("nodes") or {}).items():
+        control = servo_nodes.get(node) or {}
+        if control.get("enabled") is not False:
+            per_node[node] = {
+                "status": "not-applicable",
+                "reason": "clock is actively disciplined; compensation applies only in holdover",
+            }
+            continue
+        rows: list[tuple[float, float, float]] = []
+        for record in records:
+            readings = record.get("temperatures") or {}
+            if node not in readings:
+                continue
+            for clock in record["sample"].get("clocks", []):
+                if str(clock.get("id")) == node and clock.get("valid") and clock.get("offset_ns") is not None:
+                    rows.append((float(record["sample"]["observed_at"]), float(readings[node]), float(clock["offset_ns"])))
+        if not rows:
+            per_node[node] = {"status": "waiting", "reason": "no paired holdover samples yet"}
+            continue
+        rows.sort()
+        baseline = rows[0][2]
+        rebased = [(stamp, temperature, phase - baseline) for stamp, temperature, phase in rows]
+        coefficient = (analysis.get("ols") or {}).get("tempco_ppb_per_c") if analysis.get("status") == "ready" else None
+        verdict = (analysis.get("evidence") or {}).get("verdict", "unknown")
+        per_node[node] = ptpbox_thermal.holdover_compensation(rebased, coefficient, verdict)
+
+    armable = [name for name, value in per_node.items() if (value.get("arming") or {}).get("worth_arming")]
+    return {
+        "nodes": per_node,
+        "summary": {
+            "evaluated": sum(1 for value in per_node.values() if value.get("status") == "ready"),
+            "worth_arming": armable,
+        },
+        "window_s": window,
+        "actuation": {
+            "implemented": False,
+            "reason": (
+                "Applying a correction while the clock is in holdover requires the root-owned "
+                "servo worker. This endpoint only scores whether it would help."
+            ),
+        },
+        "live_changes": 0,
+        "timestamp": time.time(),
+    }
+
+
 def system_snapshot() -> dict[str, Any]:
     """Host resources, hardware inventory, and declared-topology verification."""
     return ptpbox_system.snapshot(
@@ -2564,6 +2623,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
                     return
                 self.send_json(thermal_snapshot(window))
+            elif route == "/api/holdover/compensation":
+                try:
+                    window = float(query.get("history", ["1800"])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(holdover_compensation_snapshot(window))
             elif route == "/api/path-events":
                 try:
                     limit = int(query.get("limit", ["128"])[0])

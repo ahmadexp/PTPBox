@@ -283,3 +283,94 @@ class FleetComparisonTests(unittest.TestCase):
         fleet = THERMAL.thermal_analysis({"BC2": forced_record(-10.0)})["fleet"]
 
         self.assertEqual("insufficient-clocks", fleet["status"])
+
+
+class HoldoverCompensationTests(unittest.TestCase):
+    """Compensation must help when drift is thermal and refuse when it is not."""
+
+    @staticmethod
+    def _holdover(oscillator_tempco, temp_profile, extra_rate=0.0, noise=0.0, seed=9, step=1.0):
+        """Build a holdover record whose drift follows a known thermal law."""
+        rnd = random.Random(seed)
+        rows = []
+        phase = 0.0
+        previous = None
+        for index, temperature in enumerate(temp_profile):
+            rate = oscillator_tempco * (temperature - temp_profile[0]) + extra_rate
+            if previous is not None:
+                phase += 0.5 * (rate + previous) * step
+            previous = rate
+            rows.append((index * step, temperature, phase + rnd.gauss(0.0, noise)))
+        return rows
+
+    def test_purely_thermal_drift_is_almost_entirely_recovered(self) -> None:
+        # Temperature ramps then falls; drift is exactly the thermal term.
+        profile = [40.0 + 15.0 * abs(((i / 400.0 * 2.0) % 2.0) - 1.0) for i in range(400)]
+        record = self._holdover(-8.0, profile)
+        # The correction coefficient is the negation of the oscillator's.
+        result = THERMAL.holdover_compensation(record, correction_tempco_ppb_per_c=8.0,
+                                              coefficient_verdict="supported")
+
+        self.assertEqual("ready", result["status"])
+        predictive = result["compensated_predictive"]
+        self.assertGreater(predictive["improvement_pct"], 90.0)
+        self.assertFalse(predictive["harmful"])
+        self.assertTrue(result["arming"]["worth_arming"])
+
+    def test_drift_that_is_not_thermal_cannot_be_recovered(self) -> None:
+        # Constant frequency offset with an essentially flat temperature, which
+        # is what a real non-thermal drift looks like.
+        profile = [85.0 + 0.4 * math.sin(i / 37.0) for i in range(400)]
+        record = self._holdover(0.0, profile, extra_rate=-40.0)
+        result = THERMAL.holdover_compensation(record, correction_tempco_ppb_per_c=8.0,
+                                              coefficient_verdict="supported")
+
+        best = result["compensated_best_possible"]
+        self.assertLess(best["improvement_pct"], THERMAL.MIN_COMPENSATION_BENEFIT_PCT)
+        self.assertIn("not temperature-driven", result["arming"]["recommendation"])
+        self.assertFalse(result["arming"]["worth_arming"])
+
+    def test_a_wrong_coefficient_is_reported_as_harmful(self) -> None:
+        profile = [40.0 + 15.0 * abs(((i / 400.0 * 2.0) % 2.0) - 1.0) for i in range(400)]
+        record = self._holdover(-8.0, profile)
+        # Sign error: compensating the wrong way must be flagged, not silently applied.
+        result = THERMAL.holdover_compensation(record, correction_tempco_ppb_per_c=-8.0,
+                                              coefficient_verdict="supported")
+
+        self.assertTrue(result["compensated_predictive"]["harmful"])
+        self.assertFalse(result["arming"]["worth_arming"])
+
+    def test_untrusted_coefficient_is_never_armed_even_if_it_would_help(self) -> None:
+        profile = [40.0 + 15.0 * abs(((i / 400.0 * 2.0) % 2.0) - 1.0) for i in range(400)]
+        record = self._holdover(-8.0, profile)
+        result = THERMAL.holdover_compensation(record, correction_tempco_ppb_per_c=8.0,
+                                              coefficient_verdict="candidate")
+
+        self.assertGreater(result["compensated_predictive"]["improvement_pct"], 90.0)
+        self.assertFalse(result["arming"]["worth_arming"],
+                         "a candidate coefficient must not arm compensation")
+        self.assertIn("forced thermal cycle", result["arming"]["recommendation"])
+
+    def test_best_possible_is_never_worse_than_the_measured_coefficient(self) -> None:
+        profile = [40.0 + 12.0 * abs(((i / 300.0 * 2.0) % 2.0) - 1.0) for i in range(300)]
+        record = self._holdover(-6.0, profile, extra_rate=-5.0, noise=2.0)
+        result = THERMAL.holdover_compensation(record, correction_tempco_ppb_per_c=4.0,
+                                              coefficient_verdict="supported")
+
+        predictive = result["compensated_predictive"]["rms_ns"]
+        best = result["compensated_best_possible"]["rms_ns"]
+        self.assertLessEqual(best, predictive + 1e-6)
+
+    def test_short_record_reports_learning_and_changes_nothing(self) -> None:
+        result = THERMAL.holdover_compensation([(float(i), 85.0, 0.0) for i in range(5)])
+
+        self.assertEqual("learning", result["status"])
+
+    def test_evaluator_never_claims_to_actuate(self) -> None:
+        profile = [40.0 + 15.0 * abs(((i / 200.0 * 2.0) % 2.0) - 1.0) for i in range(200)]
+        result = THERMAL.holdover_compensation(self._holdover(-8.0, profile),
+                                              correction_tempco_ppb_per_c=8.0,
+                                              coefficient_verdict="supported")
+
+        self.assertFalse(result["actuation"]["implemented"])
+        self.assertEqual(0, result["live_changes"])
