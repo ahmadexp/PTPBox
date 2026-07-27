@@ -210,3 +210,49 @@ class SnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NetworkStatusTests(unittest.TestCase):
+    """The network view must degrade to a clear state, never a crash.
+
+    The live path shells out to ip, nmcli, and resolvectl, so these tests cover
+    the shape and the classification logic rather than the parsing of tool
+    output, which is exercised against the appliance directly.
+    """
+
+    def test_shape_and_read_only_contract(self) -> None:
+        result = SYSTEM.network_status({"nodes": [], "management_interfaces": []})
+
+        for key in ("status", "interfaces", "default_routes", "resolvers", "editable", "observations"):
+            self.assertIn(key, result)
+        self.assertFalse(result["editable"], "the network view must never advertise itself as editable")
+        self.assertIn("rollback", result["interpretation"])
+
+    def test_namespaced_timing_ports_are_declared_but_not_expected_locally(self) -> None:
+        topology = {
+            "nodes": [
+                {"name": "BC1", "ingress": "p1in", "egress": "p1out"},
+                {"name": "BC2", "ingress": "p2in", "egress": "p2out"},
+            ],
+            "management_interfaces": ["mgmt0"],
+        }
+        result = SYSTEM.network_status(topology)
+        observations = result["observations"]
+
+        self.assertEqual(4, observations["declared_timing_ports"])
+        # Those ports live in namespaces, so absence here must be explained
+        # rather than looking like missing hardware.
+        self.assertIn("namespace", observations["note"])
+
+    def test_missing_tools_do_not_raise(self) -> None:
+        # network_status is called on hosts without ip/nmcli/resolvectl too.
+        result = SYSTEM.network_status({})
+
+        self.assertIn(result["status"], {"ready", "unavailable"})
+        self.assertIsInstance(result["interfaces"], list)
+
+    def test_snapshot_includes_the_network_section(self) -> None:
+        snapshot = SYSTEM.snapshot(interfaces=[], topology={})
+
+        self.assertIn("network", snapshot)
+        self.assertFalse(snapshot["network"]["editable"])

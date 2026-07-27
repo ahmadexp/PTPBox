@@ -12,6 +12,7 @@ against a synthetic tree in tests.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -321,6 +322,166 @@ def pci_devices(sysfs: Path = SYS) -> list[dict[str, Any]]:
     return out
 
 
+def _run_json(command: list[str], timeout: float = 5.0) -> Any:
+    """Run a read-only query that emits JSON, or return None."""
+    if not shutil.which(command[0]):
+        return None
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None
+        return json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+
+
+def _run_lines(command: list[str], timeout: float = 5.0) -> list[str]:
+    if not shutil.which(command[0]):
+        return []
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        return completed.stdout.splitlines() if completed.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def network_status(topology: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Layer-3 view of the host: addressing, routing, and resolver state.
+
+    This is strictly read-only and unprivileged. It deliberately reports rather
+    than configures: on an appliance whose only management path is also the path
+    serving this API, an editing surface needs rollback protection that a status
+    view does not.
+    """
+    declared = topology or {}
+    timing_ports = {
+        str(node.get(key))
+        for node in (declared.get("nodes") or [])
+        for key in ("ingress", "egress")
+        if node.get(key)
+    }
+    management = {str(name) for name in (declared.get("management_interfaces") or [])}
+
+    addresses = _run_json(["ip", "-json", "addr"]) or []
+    routes = _run_json(["ip", "-json", "route"]) or []
+
+    connections: dict[str, dict[str, str]] = {}
+    for line in _run_lines(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"]):
+        parts = line.split(":")
+        if len(parts) >= 4:
+            connections[parts[0]] = {"type": parts[1], "state": parts[2], "connection": parts[3] or None}
+
+    resolvers: list[dict[str, Any]] = []
+    for line in _run_lines(["resolvectl", "dns"]):
+        stripped = line.strip()
+        if stripped.startswith("Link ") and ":" in stripped:
+            label, _, servers = stripped.partition(":")
+            listed = servers.split()
+            if listed:
+                device = label.partition("(")[2].rstrip(")") if "(" in label else label
+                resolvers.append({"scope": device, "servers": listed})
+        elif stripped.startswith("Global:"):
+            listed = stripped.partition(":")[2].split()
+            if listed:
+                resolvers.append({"scope": "global", "servers": listed})
+    if not resolvers:
+        fallback = [
+            line.split()[1]
+            for line in _text(Path("/etc/resolv.conf")).splitlines()
+            if line.startswith("nameserver") and len(line.split()) > 1
+        ]
+        if fallback:
+            resolvers.append({"scope": "resolv.conf", "servers": fallback})
+
+    default_routes = [
+        {
+            "family": "inet6" if ":" in str(route.get("gateway") or "") else "inet",
+            "gateway": route.get("gateway"),
+            "device": route.get("dev"),
+            "source": route.get("prefsrc"),
+            "metric": route.get("metric"),
+            "protocol": route.get("protocol"),
+        }
+        for route in routes
+        if isinstance(route, dict) and route.get("dst") == "default"
+    ]
+    default_devices = {entry["device"] for entry in default_routes if entry.get("device")}
+
+    interfaces: list[dict[str, Any]] = []
+    for entry in addresses:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("ifname") or "")
+        if not name or name == "lo":
+            continue
+        assigned = [
+            {
+                "address": info.get("local"),
+                "prefix": info.get("prefixlen"),
+                "family": info.get("family"),
+                "scope": info.get("scope"),
+                "permanent": info.get("valid_life_time") in (None, 4294967295),
+            }
+            for info in (entry.get("addr_info") or [])
+            if isinstance(info, dict) and info.get("local")
+        ]
+        role = "timing" if name in timing_ports else "management" if name in management else "other"
+        interfaces.append({
+            "name": name,
+            "state": entry.get("operstate"),
+            "mac": entry.get("address"),
+            "mtu": entry.get("mtu"),
+            "flags": entry.get("flags"),
+            "addresses": assigned,
+            "role": role,
+            "carries_default_route": name in default_devices,
+            "connection": connections.get(name, {}).get("connection"),
+            "manager_state": connections.get(name, {}).get("state"),
+        })
+    # Management and default-route ports first: those are the ones an operator
+    # checking connectivity cares about.
+    interfaces.sort(key=lambda item: (0 if item["carries_default_route"] else 1 if item["role"] == "management" else 2, item["name"]))
+
+    addressed_timing = [
+        item["name"] for item in interfaces
+        if item["role"] == "timing" and item["addresses"]
+    ]
+    return {
+        "status": "ready" if interfaces else "unavailable",
+        "interfaces": interfaces,
+        "default_routes": default_routes,
+        "resolvers": resolvers,
+        "manager": "NetworkManager" if connections else "unknown",
+        "observations": {
+            # PTP runs over Layer 2 here, so an addressed timing port is worth
+            # noticing rather than assuming.
+            "addressed_timing_ports": addressed_timing,
+            # Timing ports are moved into per-stage namespaces, so they are not
+            # visible from the host namespace at all. Their absence from this
+            # list is expected and is not a fault.
+            "declared_timing_ports": len(timing_ports),
+            "timing_ports_visible_here": sum(
+                1 for item in interfaces if item["role"] == "timing"
+            ),
+            "management_without_default_route": [
+                item["name"] for item in interfaces
+                if item["role"] == "management" and not item["carries_default_route"] and item["addresses"]
+            ],
+            "note": (
+                "Only host-namespace interfaces appear here. Cascade timing ports live in "
+                "per-stage network namespaces and are listed by the topology panel instead."
+            ),
+        },
+        "editable": False,
+        "interpretation": (
+            "Read-only. The interface carrying the default route is also the one serving this "
+            "API, and this host exposes no out-of-band controller, so an address or gateway "
+            "change would risk locking out every remote path; editing therefore needs "
+            "apply-with-rollback rather than a plain form."
+        ),
+    }
+
+
 def snapshot(
     interfaces: list[dict[str, Any]] | None = None,
     topology: dict[str, Any] | None = None,
@@ -337,6 +498,7 @@ def snapshot(
         "thermal": thermal_info(sysfs=sysfs),
         "pci": pci_devices(sysfs=sysfs),
         "topology": topology_verification(interfaces or [], topology or {}),
+        "network": network_status(topology or {}),
         "provenance": (
             "read-only /proc, /sys, and mount statistics; no privileged call, "
             "no clock access, and no filesystem write"

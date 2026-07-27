@@ -50,6 +50,27 @@ export type SystemPayload = {
     driver?: string | null;
     description?: string | null;
   }> | null;
+  network?: {
+    status?: string;
+    manager?: string;
+    editable?: boolean;
+    interpretation?: string;
+    interfaces?: Array<{
+      name: string; state?: string | null; mac?: string | null; mtu?: number | null;
+      role?: string; carries_default_route?: boolean; connection?: string | null;
+      manager_state?: string | null;
+      addresses?: Array<{ address: string; prefix?: number; family?: string; scope?: string }>;
+    }>;
+    default_routes?: Array<{ family?: string; gateway?: string | null; device?: string | null; source?: string | null; metric?: number | null; protocol?: string | null }>;
+    resolvers?: Array<{ scope: string; servers: string[] }>;
+    observations?: {
+      addressed_timing_ports?: string[];
+      declared_timing_ports?: number;
+      timing_ports_visible_here?: number;
+      management_without_default_route?: string[];
+      note?: string;
+    };
+  } | null;
   topology?: {
     status?: string;
     declared_nodes?: string[];
@@ -134,6 +155,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
   const thermal = [...(system.thermal ?? [])].sort((a, b) => b.temperature_c - a.temperature_c);
   const pci = system.pci ?? [];
   const topology = system.topology ?? {};
+  const network = system.network ?? {};
   const links = topology.links ?? [];
   const hottest = thermal[0];
   // Group the PCI inventory by driver so seven identical timing adapters read as
@@ -253,6 +275,72 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
           <ShieldCheck size={14} />
           <span>Adapter sensors are attributed to their PCI device because identical cards expose identical sensor names.</span>
         </div>
+      </section>
+
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div><span className="section-kicker">NETWORK</span><h2><Network size={15} /> Addressing and routing</h2></div>
+          <span className="quality-badge">{network.editable === false ? "READ ONLY" : (network.status ?? "").toUpperCase()}</span>
+        </div>
+        {(network.interfaces ?? []).length ? (
+          <table className="sys-table">
+            <thead><tr><th>Interface</th><th>Role</th><th>State</th><th>Addresses</th><th>MTU</th><th>Connection</th></tr></thead>
+            <tbody>
+              {(network.interfaces ?? []).map((item) => (
+                <tr key={item.name}>
+                  <td>
+                    <code>{item.name}</code>
+                    {item.carries_default_route ? <span className="net-badge">default route</span> : null}
+                  </td>
+                  <td>{item.role}</td>
+                  <td className={item.state === "UP" ? "" : "sys-problem"}>{item.state ?? "—"}</td>
+                  <td>
+                    {item.addresses?.length
+                      ? item.addresses.map((entry) => (
+                          <div key={entry.address}><code>{entry.address}/{entry.prefix}</code></div>
+                        ))
+                      : <span className="sys-problem">no address</span>}
+                  </td>
+                  <td>{item.mtu ?? "—"}</td>
+                  <td>{item.connection ?? "—"}{item.manager_state ? ` · ${item.manager_state}` : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <div className="empty-analysis">No host-namespace interfaces reported</div>}
+        <div className="sys-grid">
+          <div>
+            {(network.default_routes ?? []).map((route) => (
+              <div className="sys-stat-row" key={`${route.family}-${route.gateway}`}>
+                <span>Default route ({route.family})</span>
+                <strong>via <code>{route.gateway}</code> on <code>{route.device}</code>{route.metric != null ? ` · metric ${route.metric}` : ""}{route.protocol ? ` · ${route.protocol}` : ""}</strong>
+              </div>
+            ))}
+            {(network.resolvers ?? []).map((entry) => (
+              <div className="sys-stat-row" key={entry.scope}>
+                <span>Resolvers ({entry.scope})</span>
+                <strong>{entry.servers.map((server) => <code key={server}>{server}</code>)}</strong>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="sys-stat-row"><span>Manager</span><strong>{network.manager ?? "unknown"}</strong></div>
+            <div className="sys-stat-row">
+              <span>Timing ports</span>
+              <strong>{network.observations?.declared_timing_ports ?? 0} declared · {network.observations?.timing_ports_visible_here ?? 0} visible here</strong>
+            </div>
+            {network.observations?.addressed_timing_ports?.length ? (
+              <div className="sys-stat-row"><span>Addressed timing ports</span><strong className="sys-problem">{network.observations.addressed_timing_ports.join(", ")}</strong></div>
+            ) : null}
+          </div>
+        </div>
+        {network.observations?.note ? (
+          <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{network.observations.note}</span></div>
+        ) : null}
+        {network.interpretation ? (
+          <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{network.interpretation}</span></div>
+        ) : null}
       </section>
 
       <section className="panel">

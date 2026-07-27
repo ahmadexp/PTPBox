@@ -4,6 +4,18 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added read-only network status to the System Observatory: per-interface
+  addressing with the port carrying the default route marked, roles resolved
+  against the declared topology, NetworkManager connection and state, default
+  routes with gateway and metric, and resolvers. Reported through `/api/system`
+  from unprivileged `ip`, `nmcli`, and `resolvectl` queries. It is explicitly
+  labelled read-only and reports `editable: false`: the interface carrying the
+  default route is also the one serving the API and this host exposes no
+  out-of-band controller, so an address change needs apply-with-rollback rather
+  than a form. Cascade timing ports are absent by design because they live in
+  per-stage namespaces, and the panel states that rather than looking like
+  missing hardware.
+
 - Extended the thermal section with cross-clock comparison. Adds a homogeneity
   of regression slopes test, which is the question actually worth asking:
   whether one fleet coefficient describes every card, rather than whether the

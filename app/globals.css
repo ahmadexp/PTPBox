@@ -774,3 +774,6 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .thm-loadings em { display: block; height: 6px; border-radius: 3px; background: rgba(255,255,255,.07); overflow: hidden; }
 .thm-loadings em i { display: block; height: 100%; background: var(--accent, #61dce3); }
 .thm-loadings b { font-size: 9px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.net-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 5px; font-size: 7.5px; letter-spacing: .04em; text-transform: uppercase; background: rgba(97,220,227,.14); color: var(--accent, #61dce3); }
+.sys-problem { color: #ff8a3d; }
