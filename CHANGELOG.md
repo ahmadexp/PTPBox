@@ -4,6 +4,14 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Fixed `/run/ptpbox` being recreated at every boot as `root:root 0755`, which
+  the unprivileged PHC collector cannot write. Its SQLite ring could not be
+  opened at all, so raw acquisition reported `0.0 Hz acquired` after every
+  reboot until the directory was widened by hand. The tmpfiles rule now renders
+  the operator group and uses mode 1775: the collector can create its own store,
+  while the sticky bit still prevents it from unlinking the root-owned control
+  state kept in the same directory.
+
 - Added `ptpbox-cascade.service` so the timing cascade comes back after a
   reboot. Previously nothing started the data plane at boot: the namespaces and
   `ptp4l` instances were gone, the isolated collector had no PHC to read, and

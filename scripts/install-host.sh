@@ -49,7 +49,9 @@ install -m 0755 "$SOURCE_DIR/scripts/ptpbox_kalman_servo.py" /usr/local/sbin/ptp
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_event_monitor.py" /usr/local/sbin/ptpbox-event-monitor
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_pps_compare.py" /usr/local/sbin/ptpbox-pps-compare
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
-install -m 0644 "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" /etc/tmpfiles.d/ptpbox.conf
+sed -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
+  "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" > /etc/tmpfiles.d/ptpbox.conf
+chmod 0644 /etc/tmpfiles.d/ptpbox.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/ptpbox.conf
 
 # Ubuntu confines ptp4l with AppArmor. Multi-PHC boundary clocks need the
