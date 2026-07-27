@@ -4848,7 +4848,7 @@ export default function PTPBoxDashboard() {
             <div className="host-row"><span>PTP ports</span><code>{agentStatus?.ptp_interfaces ?? 16}</code></div>
             <div className="host-row"><span>Cascade</span><code>{connection === "live" || agentStatus?.running ? "RUNNING" : "STOPPED"}</code></div>
           </div>
-          <div className="user-row"><div className="avatar">AB</div><div><strong>Lab operator</strong><small>Administrator</small></div><Settings2 size={16} /></div>
+          <div className="user-row"><div className="avatar">AB</div><div><strong>Lab operator</strong><small>Administrator</small></div><button type="button" className="user-row-action" onClick={() => setSection("System")} title="Open the System Observatory" aria-label="Open the System Observatory"><Settings2 size={16} /></button></div>
         </div>
       </aside>
 

@@ -4,6 +4,10 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Made the operator settings control in the sidebar footer open the System
+  Observatory. It was a decorative icon with no behaviour; it is now a real
+  focusable button with an accessible label.
+
 - Stopped the installer accumulating stale UI bundles. Asset filenames are
   content-hashed, and the static tree was copied over without being cleared, so
   every install left its predecessors on disk. A browser holding cached HTML kept

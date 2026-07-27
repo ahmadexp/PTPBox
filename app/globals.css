@@ -73,6 +73,9 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .host-row code { color: var(--text-soft); font-size: 9px; }
 .user-row { height: 64px; display: flex; align-items: center; gap: 9px; padding: 0 16px; border-top: 1px solid var(--line-soft); }
 .avatar { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid #29414b; border-radius: 50%; background: #112028; color: var(--cyan); font-size: 9px; }
+.user-row-action { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; transition: background .15s ease, color .15s ease; }
+.user-row-action:hover { background: var(--surface-raised, rgba(255,255,255,.06)); color: var(--text, #e8eef4); }
+.user-row-action:focus-visible { outline: 2px solid var(--accent, #61dce3); outline-offset: 1px; }
 .user-row > div:nth-child(2) { min-width: 0; flex: 1; }.user-row strong, .user-row small { display: block; }.user-row strong { font-size: 10px; }.user-row small { margin-top: 2px; color: var(--muted); font-size: 8px; }.user-row svg { color: var(--muted); }
 
 .main-shell { min-width: 0; min-height: 100vh; margin-left: var(--sidebar-width); }
