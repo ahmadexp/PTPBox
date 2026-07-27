@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ptpbox_research import ExperimentStore, RollingResearchEngine, path_regime_analysis  # noqa: E402
 from ptpbox_phc_store import collector_quality, read_records  # noqa: E402
+import ptpbox_system  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -1211,6 +1212,14 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
             sample["observed_at"] = stat.st_mtime - (len(parsed) - index - 1) * 0.0625
         sample["sample_id"] = f"{stat.st_ino}:{sample['source_time'] if sample['source_time'] is not None else index}"
     return parsed
+
+
+def system_snapshot() -> dict[str, Any]:
+    """Host resources, hardware inventory, and declared-topology verification."""
+    return ptpbox_system.snapshot(
+        interfaces=[asdict(item) for item in interfaces()],
+        topology=load_json(TOPOLOGY_FILE, {}) or {},
+    )
 
 
 def topology_nodes() -> list[dict[str, str]]:
@@ -2465,6 +2474,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(research_snapshot(max(30.0, min(7200.0, history_seconds))))
             elif route == "/api/capabilities":
                 self.send_json(hardware_capabilities(force=query.get("refresh") == ["1"]))
+            elif route == "/api/system":
+                self.send_json(system_snapshot())
             elif route == "/api/path-events":
                 try:
                     limit = int(query.get("limit", ["128"])[0])
