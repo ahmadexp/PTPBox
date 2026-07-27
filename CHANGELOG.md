@@ -4,6 +4,13 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Fixed the topology thermometer flickering. It read temperature from the
+  research snapshot, which is only polled on analysis pages, so on Overview the
+  value was stale and fell back to the deterministic model whose temperature map
+  is empty. Adapter temperatures now come from the cheap capability probe on
+  their own interval whenever the agent is reachable, and readings are merged
+  into the previous map so one slow or partial probe cannot blank a thermometer.
+
 - Fixed the installer not shipping `ptpbox_system.py` or `ptpbox_thermal.py`,
   which the agent imports. A clean install produced a `ModuleNotFoundError`
   crash loop that took the whole web surface down while systemd reported the unit

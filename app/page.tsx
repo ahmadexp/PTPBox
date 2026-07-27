@@ -3748,6 +3748,11 @@ export default function PTPBoxDashboard() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [systemInfo, setSystemInfo] = useState<SystemPayload | null>(null);
   const [thermalInfo, setThermalInfo] = useState<ThermalPayload | null>(null);
+  // Adapter temperatures come from the cheap capability probe rather than the
+  // research snapshot, which is only polled on analysis pages. Readings are
+  // merged into the previous map so one slow or partial probe cannot blank a
+  // thermometer that was reading a moment ago.
+  const [adapterTemperatures, setAdapterTemperatures] = useState<Record<string, number>>({});
   const [interfaceInventory, setInterfaceInventory] = useState<HostInterface[]>(FALLBACK_INTERFACES);
   const [interfaceUpdatedAt, setInterfaceUpdatedAt] = useState<number | null>(null);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryPayload | null>(null);
@@ -3828,6 +3833,24 @@ export default function PTPBoxDashboard() {
   const configuredServoTypeRef = useRef<ServoType>("pi");
   const notificationCenterRef = useRef<HTMLDivElement>(null);
   const commandInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshAdapterTemperatures = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/capabilities`, { signal: controller.signal });
+      if (!response.ok) throw new Error("capability probe unavailable");
+      const payload = await response.json() as { temperature?: { nodes?: Record<string, number> } };
+      const nodes = payload.temperature?.nodes;
+      if (nodes && Object.keys(nodes).length) {
+        setAdapterTemperatures((current) => ({ ...current, ...nodes }));
+      }
+    } catch {
+      // Keep the last known readings rather than blanking the topology.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
 
   const refreshThermal = useCallback(async () => {
     const controller = new AbortController();
@@ -4005,6 +4028,16 @@ export default function PTPBoxDashboard() {
   // reported as unknown rather than blocking the request.
   // The regression is recomputed server-side, so poll it slowly and only while
   // the page is open.
+  useEffect(() => {
+    if (!agentConnected) return;
+    const initial = window.setTimeout(() => void refreshAdapterTemperatures(), 0);
+    const timer = window.setInterval(() => void refreshAdapterTemperatures(), 10000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [agentConnected, refreshAdapterTemperatures]);
+
   useEffect(() => {
     if (section !== "Thermal") return;
     const initial = window.setTimeout(() => void refreshThermal(), 0);
@@ -5023,7 +5056,7 @@ export default function PTPBoxDashboard() {
                             // Prefer the capability probe, which every agent
                             // build reports, and fall back to the reading now
                             // carried alongside the PHC comparison.
-                            const reading = activeResearch.capabilities?.temperature?.nodes?.[node.id] ?? node.temperatureC ?? null;
+                            const reading = adapterTemperatures[node.id] ?? activeResearch.capabilities?.temperature?.nodes?.[node.id] ?? node.temperatureC ?? null;
                             return (
                               <div
                                 className={`node-temp ${reading == null ? "unknown" : reading >= 100 ? "critical" : reading >= 90 ? "warning" : ""}`}
