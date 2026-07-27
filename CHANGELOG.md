@@ -4,6 +4,13 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Fixed the installer not shipping `ptpbox_system.py` or `ptpbox_thermal.py`,
+  which the agent imports. A clean install produced a `ModuleNotFoundError`
+  crash loop that took the whole web surface down while systemd reported the unit
+  as activating. The installer now copies every agent module and refuses to
+  finish if `ptpbox_agent` imports one that was not installed, so the mismatch is
+  caught before the restart rather than after.
+
 - The topology thermometer is now tinted on a continuous scale from cyan through
   green, yellow, and amber to red, interpolated between stops placed for the
   range adapter ASICs actually occupy, so a card creeping from 96 to 104 C is
