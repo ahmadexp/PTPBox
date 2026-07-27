@@ -3876,7 +3876,7 @@ class ExperimentStore:
         name = str(payload.get("name") or f"{str(payload.get('kind') or payload.get('type') or 'capture').title()} {identifier[-6:]}")
         kind = str(payload.get("kind") or payload.get("type") or "capture")
         metadata = {key: value for key, value in payload.items() if key not in {"name", "kind", "type"}}
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.execute(
                 "UPDATE experiments SET state='completed', stopped_at=? WHERE state='running'",
                 (now,),
@@ -3892,7 +3892,7 @@ class ExperimentStore:
         if not active:
             return None
         now = time.time()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.execute(
                 "UPDATE experiments SET state='completed', stopped_at=? WHERE id=? AND state='running'",
                 (now, active["id"]),
@@ -3948,7 +3948,7 @@ class ExperimentStore:
             )
             for clock in sample.get("clocks", [])
         ]
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.executemany(
                 "INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
@@ -4089,7 +4089,7 @@ class ExperimentStore:
 
     def event(self, category: str, severity: str, message: str, payload: dict[str, Any] | None = None) -> None:
         active = self.active()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.execute(
                 "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)",
                 (

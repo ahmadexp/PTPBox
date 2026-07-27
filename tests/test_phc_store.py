@@ -1,3 +1,4 @@
+import gc
 import importlib.util
 import os
 import sys
@@ -22,6 +23,10 @@ RESEARCH_SPEC.loader.exec_module(RESEARCH)
 
 
 def _open_descriptors() -> int:
+    # Collect first: a descriptor still reachable after a full collection is a
+    # genuine leak, whereas one pending finalisation is only GC timing and
+    # differs between platforms.
+    gc.collect()
     for candidate in (f"/proc/{os.getpid()}/fd", "/dev/fd"):
         if os.path.isdir(candidate):
             return len(os.listdir(candidate))
@@ -91,13 +96,21 @@ class DescriptorLifetimeTests(unittest.TestCase):
 
     @staticmethod
     def _sample(index: int) -> dict:
+        observed_at = time.time() + index
         return {
-            "observed_at": time.time() + index,
+            "observed_at": observed_at,
             "sample_id": f"sample-{index}",
             "clocks": [
-                {"id": "BC1", "offset_ns": 0.0, "valid": True, "comparison_uncertainty_ns": 1.0},
+                {
+                    "id": "BC1",
+                    "observed_at": observed_at,
+                    "offset_ns": 0.0,
+                    "valid": True,
+                    "comparison_uncertainty_ns": 1.0,
+                },
                 {
                     "id": "BC2",
+                    "observed_at": observed_at,
                     "offset_ns": 4.0,
                     "previous_hop_offset_ns": 4.0,
                     "valid": True,
@@ -123,12 +136,24 @@ class DescriptorLifetimeTests(unittest.TestCase):
     def test_experiment_recorder_does_not_leak_descriptors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RESEARCH.ExperimentStore(Path(directory) / "experiments.sqlite3")
+            # record_phc returns immediately without an active run, so the run
+            # must exist or this test silently exercises nothing.
+            store.start({"kind": "capture", "name": "descriptor probe"}, {})
+            self.assertIsNotNone(store.active())
+
             store.record_phc(self._sample(0), {})
             before = _open_descriptors()
             for index in range(1, self.ITERATIONS):
                 store.record_phc(self._sample(index), {"BC1": 80.0})
             after = _open_descriptors()
 
+            run = store.active()
+            assert run is not None
+            self.assertEqual(
+                self.ITERATIONS * 2,  # two clocks per sample
+                len(store.phc_samples(str(run["id"]))),
+                "recorded rows missing: the write path was not exercised",
+            )
             self.assertLessEqual(after - before, 2, "descriptors grew across recorded samples")
 
 
