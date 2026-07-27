@@ -84,6 +84,7 @@ sed \
   -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
   -e "s|@PTPBOX_ROOT@|$PTPBOX_ROOT_DIR|g" \
   "$SOURCE_DIR/agent/ptpbox-phc-collector.service" > /etc/systemd/system/ptpbox-phc-collector.service
+install -m 0644 "$SOURCE_DIR/agent/ptpbox-cascade.service" /etc/systemd/system/ptpbox-cascade.service
 chmod 0644 /etc/systemd/system/ptpbox-agent.service
 chmod 0644 /etc/systemd/system/ptpbox-phc-collector.service
 chown "$PTPBOX_USER_NAME:$PTPBOX_GROUP_NAME" /run/ptpbox
@@ -105,6 +106,19 @@ fi
 
 systemctl daemon-reload
 systemctl enable ptpbox-phc-collector.service ptpbox-agent.service
+
+# Bring the timing cascade up at boot. Without this the namespaces and ptp4l
+# instances are gone after a reboot, the collector has no PHC to read, and the
+# raw graphs stay empty until an operator runs "ptpboxctl start" by hand.
+# Set PTPBOX_AUTOSTART_CASCADE=0 to install the unit without enabling it, for
+# hosts where moving NICs into namespaces unattended is not wanted.
+if [ "${PTPBOX_AUTOSTART_CASCADE:-1}" = "1" ]; then
+  systemctl enable ptpbox-cascade.service
+  echo "Cascade autostart: enabled (PTPBOX_AUTOSTART_CASCADE=0 to opt out)"
+else
+  systemctl disable ptpbox-cascade.service 2>/dev/null || true
+  echo "Cascade autostart: installed but disabled"
+fi
 systemctl restart ptpbox-phc-collector.service
 systemctl restart ptpbox-agent.service
 

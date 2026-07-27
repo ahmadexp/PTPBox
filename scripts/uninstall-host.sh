@@ -6,7 +6,8 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-systemctl disable --now ptpbox-agent.service ptpbox-phc-collector.service 2>/dev/null || true
+systemctl disable --now ptpbox-agent.service ptpbox-phc-collector.service ptpbox-cascade.service 2>/dev/null || true
+rm -f /etc/systemd/system/ptpbox-cascade.service
 rm -f /etc/systemd/system/ptpbox-agent.service
 rm -f /etc/systemd/system/ptpbox-phc-collector.service
 rm -f /etc/sudoers.d/ptpbox-web

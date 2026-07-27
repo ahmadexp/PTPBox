@@ -4,6 +4,15 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Added `ptpbox-cascade.service` so the timing cascade comes back after a
+  reboot. Previously nothing started the data plane at boot: the namespaces and
+  `ptp4l` instances were gone, the isolated collector had no PHC to read, and
+  the raw graphs stayed empty reporting `0.0 Hz acquired` until an operator ran
+  `ptpboxctl start` by hand. The unit is ordered before the collector and agent
+  so they do not race an absent PHC map, and the installer enables it by
+  default; set `PTPBOX_AUTOSTART_CASCADE=0` to install it without enabling on
+  hosts where moving NICs into namespaces unattended is not wanted.
+
 - Fixed a SQLite descriptor leak that silently stopped raw PHC acquisition a
   few minutes after the collector started. A `sqlite3.Connection` used directly
   as a context manager only manages the transaction, so every recorded sample

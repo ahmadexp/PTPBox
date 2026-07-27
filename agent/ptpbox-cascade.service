@@ -1,0 +1,23 @@
+[Unit]
+Description=PTPBox timing cascade (namespaces and LinuxPTP)
+Documentation=https://github.com/ahmadexp/PTPBox
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+# The collector has nothing to sample until the namespaces exist and the PHC
+# map has been written, so order it after this unit rather than racing it.
+Before=ptpbox-phc-collector.service ptpbox-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ptpboxctl validates the declared topology and refuses to move any interface
+# listed in management_interfaces before it creates a namespace.
+ExecStart=/usr/local/sbin/ptpboxctl start
+ExecStop=/usr/local/sbin/ptpboxctl stop
+TimeoutStartSec=180
+# A cascade that cannot start is a configuration problem that retrying will not
+# resolve, so fail visibly instead of looping.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
