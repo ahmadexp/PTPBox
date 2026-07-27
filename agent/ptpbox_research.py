@@ -9,6 +9,7 @@ Control decisions produced here are recommendations until the guarded
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -19,6 +20,7 @@ import statistics
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -3802,9 +3804,25 @@ class ExperimentStore:
         connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
+    @contextlib.contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        """Own the connection: commit or roll back, then always close it.
+
+        A ``sqlite3.Connection`` used directly as a context manager only manages
+        the transaction; it does not close the handle. Relying on that leaked a
+        descriptor pair per recorded sample, so a long-lived writer such as the
+        PHC collector eventually hit its descriptor limit.
+        """
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS experiments (
@@ -3846,7 +3864,7 @@ class ExperimentStore:
             )
 
     def active(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._session() as connection:
             row = connection.execute(
                 "SELECT * FROM experiments WHERE state='running' ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
@@ -3882,7 +3900,7 @@ class ExperimentStore:
         return self.get(str(active["id"]))
 
     def get(self, identifier: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._session() as connection:
             row = connection.execute(
                 """
                 SELECT e.*,
@@ -3900,7 +3918,7 @@ class ExperimentStore:
         return item
 
     def list(self, limit: int = 30) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(
                 "SELECT id FROM experiments ORDER BY started_at DESC LIMIT ?",
                 (max(1, min(200, limit)),),
@@ -3943,7 +3961,7 @@ class ExperimentStore:
         if since is not None:
             predicate = " AND observed_at>=?"
             parameters.append(float(since))
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT observed_at, cycle_id, clock_id, offset_ns, hop_offset_ns,
@@ -3966,7 +3984,7 @@ class ExperimentStore:
             return []
         placeholders = ",".join("?" for _clock in clock_ids)
         parameters: list[Any] = [identifier, float(since), *clock_ids]
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT clock_id,
@@ -4028,7 +4046,7 @@ class ExperimentStore:
         """Return uniformly decimated raw cycles while retaining the final cycle."""
         if not clock_ids:
             return [], 0, 1
-        with self._connect() as connection:
+        with self._session() as connection:
             cycle_count = int(
                 connection.execute(
                     """
@@ -4103,7 +4121,7 @@ class ExperimentStore:
                 "valid",
             ]
         )
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(
                 """
                 SELECT experiment_id, observed_at, cycle_id, clock_id, source,

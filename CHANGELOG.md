@@ -4,6 +4,18 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Fixed a SQLite descriptor leak that silently stopped raw PHC acquisition a
+  few minutes after the collector started. A `sqlite3.Connection` used directly
+  as a context manager only manages the transaction, so every recorded sample
+  leaked a descriptor pair across both the PHC ring store and the experiment
+  recorder. Once the limit was reached, `/dev/ptp*` could no longer be opened,
+  `take_phc_sample()` returned nothing, and the loop no-opped indefinitely while
+  systemd still reported the service as running: the Observatory showed
+  `0.0 Hz acquired` and "Waiting for direct PHC samples". Connections are now
+  owned by a context manager that commits or rolls back and always closes, and
+  the collector exits for a supervisor restart after a sustained run of cycles
+  that deliver nothing, so an unrecoverable acquisition stall self-heals instead
+  of persisting silently.
 - Upgraded PI autotuning to a replay-only safe Bayesian optimizer with a
   global plus log-local candidate set, settling/overshoot constraints,
   identified ARX stability penalties, optional H-infinity sensitivity

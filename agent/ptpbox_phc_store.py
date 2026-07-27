@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,23 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
+@contextlib.contextmanager
+def _session(path: Path) -> Iterator[sqlite3.Connection]:
+    """Own the connection: commit or roll back, then always close it.
+
+    A ``sqlite3.Connection`` used directly as a context manager only manages the
+    transaction; it does not close the handle. Depending on that leaked one file
+    descriptor pair per call, which exhausted the collector's descriptor limit
+    after a few minutes at the Sync cadence and silently stopped acquisition.
+    """
+    connection = _connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def append_sample(
     path: Path,
     sample: dict[str, Any],
@@ -48,7 +67,7 @@ def append_sample(
         {"sample": sample, "temperatures": temperatures or {}},
         separators=(",", ":"),
     )
-    with _connect(path) as connection:
+    with _session(path) as connection:
         connection.execute(
             "INSERT OR REPLACE INTO phc_samples(observed_at, sample_id, payload) VALUES(?, ?, ?)",
             (observed_at, str(sample["sample_id"]), payload),
@@ -79,7 +98,7 @@ def read_records(
     cutoff = time.time() - max(5.0, min(float(history_seconds), MAX_AGE_SECONDS))
     lower_bound = max(cutoff, float(since)) if since is not None else cutoff
     try:
-        with _connect(path) as connection:
+        with _session(path) as connection:
             rows = connection.execute(
                 "SELECT payload FROM phc_samples WHERE observed_at > ? ORDER BY observed_at",
                 (lower_bound,),
