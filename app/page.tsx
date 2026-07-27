@@ -4984,12 +4984,20 @@ export default function PTPBoxDashboard() {
                           >
                             <Zap size={8} /> {ppsNodeLabel(node.id)}
                           </div>
-                          <div
-                            className={`node-temp ${node.temperatureC == null ? "unknown" : node.temperatureC >= 100 ? "critical" : node.temperatureC >= 90 ? "warning" : ""}`}
-                            title={node.temperatureC == null ? "No hardware-monitor reading for this adapter" : `Adapter die temperature ${node.temperatureC.toFixed(1)} °C`}
-                          >
-                            <Thermometer size={9} />{node.temperatureC == null ? "— °C" : `${node.temperatureC.toFixed(0)} °C`}
-                          </div>
+                          {(() => {
+                            // Prefer the capability probe, which every agent
+                            // build reports, and fall back to the reading now
+                            // carried alongside the PHC comparison.
+                            const reading = activeResearch.capabilities?.temperature?.nodes?.[node.id] ?? node.temperatureC ?? null;
+                            return (
+                              <div
+                                className={`node-temp ${reading == null ? "unknown" : reading >= 100 ? "critical" : reading >= 90 ? "warning" : ""}`}
+                                title={reading == null ? "No hardware-monitor reading for this adapter" : `Adapter die temperature ${reading.toFixed(1)} °C`}
+                              >
+                                <Thermometer size={9} />{reading == null ? "— °C" : `${reading.toFixed(0)} °C`}
+                              </div>
+                            );
+                          })()}
                           <div className="node-ports"><code>{node.ingress}</code><ArrowRight size={11} /><code>{node.egress}</code></div>
                         </button>
                       </div>
