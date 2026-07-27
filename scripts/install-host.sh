@@ -70,6 +70,11 @@ if [[ -f /etc/apparmor.d/usr.sbin.ptp4l && -d /etc/apparmor.d/local ]]; then
 fi
 
 if [[ -d "$SOURCE_DIR/dist-standalone" ]]; then
+  # Asset filenames are content-hashed, so copying without clearing leaves every
+  # previously installed bundle behind. A browser holding cached HTML then keeps
+  # loading a stale bundle indefinitely, because the file it names still exists,
+  # and the UI silently stays several versions old. Replace the tree instead.
+  rm -rf "$INSTALL_DIR/static/assets"
   cp -R "$SOURCE_DIR/dist-standalone/." "$INSTALL_DIR/static/"
 else
   echo "dist-standalone is missing; run npm run build:standalone first." >&2

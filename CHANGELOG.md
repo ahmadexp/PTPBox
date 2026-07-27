@@ -4,6 +4,13 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Stopped the installer accumulating stale UI bundles. Asset filenames are
+  content-hashed, and the static tree was copied over without being cleared, so
+  every install left its predecessors on disk. A browser holding cached HTML kept
+  loading an old bundle indefinitely, because the file it referenced still
+  existed, leaving the interface silently several versions behind while appearing
+  to work. The assets directory is now replaced rather than merged.
+
 - Fixed `/run/ptpbox` being recreated at every boot as `root:root 0755`, which
   the unprivileged PHC collector cannot write. Its SQLite ring could not be
   opened at all, so raw acquisition reported `0.0 Hz acquired` after every
