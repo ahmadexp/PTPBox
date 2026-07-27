@@ -767,3 +767,10 @@ code, kbd, .node-offset, .metric-card > strong, .utc-clock { font-family: var(--
 .thm-gates .pass i { background: #5dd68a; }
 .thm-gates .fail i { background: #ff6b6b; }
 .thm-gates .fail { color: var(--text, #e8eef4); }
+
+.thm-loadings { display: flex; flex-direction: column; gap: 5px; padding: 12px 16px; }
+.thm-loadings > div { display: grid; grid-template-columns: 34px 1fr 40px; align-items: center; gap: 8px; }
+.thm-loadings small { font-size: 9px; color: var(--muted); }
+.thm-loadings em { display: block; height: 6px; border-radius: 3px; background: rgba(255,255,255,.07); overflow: hidden; }
+.thm-loadings em i { display: block; height: 100%; background: var(--accent, #61dce3); }
+.thm-loadings b { font-size: 9px; text-align: right; font-variant-numeric: tabular-nums; }

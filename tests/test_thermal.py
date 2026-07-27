@@ -175,3 +175,111 @@ class FleetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DistributionTailTests(unittest.TestCase):
+    """Hand-rolled tails must match published critical values."""
+
+    def test_f_tail_matches_tables(self) -> None:
+        self.assertAlmostEqual(0.05, THERMAL.f_survival(4.96, 1, 10), delta=0.002)
+        self.assertAlmostEqual(0.05, THERMAL.f_survival(3.10, 3, 20), delta=0.002)
+
+    def test_t_and_chi_square_tails_match_tables(self) -> None:
+        self.assertAlmostEqual(0.05, THERMAL.t_two_sided(2.228, 10), delta=0.002)
+        self.assertAlmostEqual(0.05, THERMAL.chi_square_survival(3.841, 1), delta=0.002)
+        self.assertAlmostEqual(0.05, THERMAL.chi_square_survival(11.070, 5), delta=0.002)
+
+    def test_benjamini_hochberg_is_monotone_and_bounded(self) -> None:
+        adjusted = THERMAL.benjamini_hochberg([0.001, 0.2, 0.5, 0.9])
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in adjusted))
+        self.assertLessEqual(adjusted[0], adjusted[1])
+        self.assertGreaterEqual(adjusted[3], adjusted[0])
+
+
+class FleetComparisonTests(unittest.TestCase):
+    @staticmethod
+    def _fleet(slopes, count=500, noise=4.0):
+        paired = {}
+        for index, (name, slope) in enumerate(slopes.items()):
+            rows = forced_record(slope, count=count, noise_ppb=noise, seed=index + 40)
+            # Give each clock its own frequency offset, as real oscillators have.
+            paired[name] = [(t, temp, freq + 500.0 * index) for t, temp, freq in rows]
+        return paired
+
+    def _run(self, slopes, **kwargs):
+        paired = self._fleet(slopes, **kwargs)
+        result = THERMAL.thermal_analysis(paired)
+        return result["fleet"]
+
+    def test_identical_slopes_are_not_reported_as_different(self) -> None:
+        fleet = self._run({"BC2": -10.0, "BC3": -10.0, "BC4": -10.0})
+
+        self.assertEqual("ready", fleet["status"])
+        self.assertFalse(fleet["slope_homogeneity"]["slopes_differ"],
+                         "equal slopes must not be flagged as differing")
+        self.assertFalse(any(item["differs"] for item in fleet["pairwise"]))
+
+    def test_a_clearly_different_slope_is_detected(self) -> None:
+        fleet = self._run({"BC2": -10.0, "BC3": -10.0, "BC6": -60.0})
+
+        self.assertTrue(fleet["slope_homogeneity"]["slopes_differ"])
+        flagged = {tuple(sorted((i["left"], i["right"]))) for i in fleet["pairwise"] if i["differs"]}
+        self.assertIn(("BC2", "BC6"), flagged)
+        self.assertIn(("BC3", "BC6"), flagged)
+        self.assertNotIn(("BC2", "BC3"), flagged, "the matching pair must not be flagged")
+
+    def test_offset_differences_alone_do_not_imply_differing_slopes(self) -> None:
+        # Same slope, wildly different intercepts: an analysis of means would
+        # scream, a slope-homogeneity test must not.
+        paired = self._fleet({"BC2": -12.0, "BC3": -12.0, "BC4": -12.0})
+        paired = {name: [(t, temp, freq + 9000.0 * index) for t, temp, freq in rows]
+                  for index, (name, rows) in enumerate(paired.items())}
+        fleet = THERMAL.thermal_analysis(paired)["fleet"]
+
+        self.assertFalse(fleet["slope_homogeneity"]["slopes_differ"])
+
+    def test_bootstrap_interval_brackets_the_slope(self) -> None:
+        fleet = self._run({"BC2": -10.0, "BC3": -14.0})
+        entry = fleet["per_clock"]["BC2"]
+        interval = entry["bootstrap_95_ppb_per_c"]
+
+        self.assertIsNotNone(interval)
+        low, high = interval
+        self.assertLess(low, high)
+        self.assertLessEqual(low, entry["slope_ppb_per_c"])
+        self.assertGreaterEqual(high, entry["slope_ppb_per_c"])
+
+    def test_variance_and_rank_tests_report(self) -> None:
+        fleet = self._run({"BC2": -10.0, "BC3": -11.0, "BC4": -12.0})
+
+        self.assertEqual("ready", fleet["residual_variance"]["status"])
+        self.assertEqual("ready", fleet["rank_test"]["status"])
+        for key in ("p_value",):
+            self.assertIsNotNone(fleet["residual_variance"][key])
+            self.assertIsNotNone(fleet["rank_test"][key])
+
+    def test_common_mode_finds_a_shared_component(self) -> None:
+        # Inject one shared disturbance across every clock.
+        rnd = random.Random(21)
+        shared = [rnd.gauss(0, 60) for _ in range(400)]
+        paired = {}
+        for index, name in enumerate(("BC2", "BC3", "BC4", "BC5")):
+            rows = forced_record(-10.0, count=400, noise_ppb=3.0, seed=index + 70)
+            paired[name] = [(t, temp, freq + shared[i]) for i, (t, temp, freq) in enumerate(rows)]
+        fleet = THERMAL.thermal_analysis(paired)["fleet"]
+        mode = fleet["common_mode"]
+
+        self.assertEqual("ready", mode["status"])
+        self.assertGreater(mode["explained_share"], 0.7,
+                           "a dominant shared disturbance must show as a dominant first mode")
+
+    def test_manova_is_explicitly_declared_inapplicable(self) -> None:
+        fleet = self._run({"BC2": -10.0, "BC3": -10.0})
+
+        self.assertIn("manova", fleet["not_applicable"])
+        self.assertIn("dependent variable", fleet["not_applicable"]["manova"])
+
+    def test_single_clock_cannot_be_compared(self) -> None:
+        fleet = THERMAL.thermal_analysis({"BC2": forced_record(-10.0)})["fleet"]
+
+        self.assertEqual("insufficient-clocks", fleet["status"])

@@ -4,6 +4,22 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- Extended the thermal section with cross-clock comparison. Adds a homogeneity
+  of regression slopes test, which is the question actually worth asking:
+  whether one fleet coefficient describes every card, rather than whether the
+  cards have different mean corrections, which they trivially do because they are
+  different oscillators. Adds block-bootstrap slope intervals that resample
+  contiguous blocks so serial dependence is preserved, pairwise slope differences
+  with a Benjamini-Hochberg adjustment across the whole family, Brown-Forsythe
+  equal-variance and Kruskal-Wallis rank tests as admissibility checks, a
+  common-mode eigen-decomposition separating chassis-shared motion from
+  card-specific motion, and a Spearman check for a temperature gradient along
+  slot order. F, t, and chi-square tails are implemented from the incomplete
+  beta and gamma functions since the agent carries no dependencies, and are
+  verified against published critical values. MANOVA is explicitly recorded as
+  inapplicable: it models several dependent variables on one unit, whereas one
+  dependent variable is measured on separate clocks here.
+
 - Fixed the topology thermometer flickering. It read temperature from the
   research snapshot, which is only polled on analysis pages, so on Overview the
   value was stale and fell back to the deterministic model whose temperature map

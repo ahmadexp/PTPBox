@@ -46,6 +46,138 @@ MAX_TIME_COLLINEARITY = 0.9
 MIN_EFFECTIVE_SAMPLES = 12.0
 
 
+# ---------------------------------------------------------------------------
+# Distribution tails
+#
+# The agent is dependency-free, so the incomplete beta and gamma functions that
+# F, chi-square, and t tails need are implemented here rather than imported.
+# ---------------------------------------------------------------------------
+
+def _log_gamma(value: float) -> float:
+    return math.lgamma(value)
+
+
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Lentz's method for the continued fraction of the incomplete beta."""
+    tiny = 1e-30
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    result = d
+    for iteration in range(1, 300):
+        m2 = 2 * iteration
+        aa = iteration * (b - iteration) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        result *= d * c
+        aa = -(a + iteration) * (qab + iteration) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        result *= delta
+        if abs(delta - 1.0) < 3e-12:
+            break
+    return result
+
+
+def _beta_incomplete(a: float, b: float, x: float) -> float:
+    """Regularised incomplete beta I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(_log_gamma(a + b) - _log_gamma(a) - _log_gamma(b) + a * math.log(x) + b * math.log(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+
+def f_survival(statistic: float, numerator_df: float, denominator_df: float) -> float | None:
+    """P(F > statistic); the p-value for a variance-ratio test."""
+    if statistic <= 0 or numerator_df <= 0 or denominator_df <= 0:
+        return None
+    x = denominator_df / (denominator_df + numerator_df * statistic)
+    return max(0.0, min(1.0, _beta_incomplete(denominator_df / 2.0, numerator_df / 2.0, x)))
+
+
+def t_two_sided(statistic: float, degrees: float) -> float | None:
+    """Two-sided p-value for Student's t."""
+    if degrees <= 0:
+        return None
+    x = degrees / (degrees + statistic * statistic)
+    return max(0.0, min(1.0, _beta_incomplete(degrees / 2.0, 0.5, x)))
+
+
+def _gamma_upper(shape: float, x: float) -> float:
+    """Regularised upper incomplete gamma Q(shape, x)."""
+    if x <= 0:
+        return 1.0
+    if x < shape + 1.0:
+        # Series for the lower tail, then complement.
+        total, term = 1.0 / shape, 1.0 / shape
+        for index in range(1, 300):
+            term *= x / (shape + index)
+            total += term
+            if abs(term) < abs(total) * 1e-14:
+                break
+        return max(0.0, min(1.0, 1.0 - total * math.exp(-x + shape * math.log(x) - _log_gamma(shape))))
+    # Continued fraction for the upper tail.
+    tiny = 1e-30
+    b = x + 1.0 - shape
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for index in range(1, 300):
+        an = -index * (index - shape)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < tiny:
+            d = tiny
+        c = b + an / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-14:
+            break
+    return max(0.0, min(1.0, h * math.exp(-x + shape * math.log(x) - _log_gamma(shape))))
+
+
+def chi_square_survival(statistic: float, degrees: float) -> float | None:
+    if statistic < 0 or degrees <= 0:
+        return None
+    return _gamma_upper(degrees / 2.0, statistic / 2.0)
+
+
+def benjamini_hochberg(p_values: Sequence[float]) -> list[float]:
+    """Step-up false-discovery-rate adjustment for a family of comparisons."""
+    count = len(p_values)
+    if not count:
+        return []
+    order = sorted(range(count), key=lambda index: p_values[index])
+    adjusted = [0.0] * count
+    running = 1.0
+    for rank, index in enumerate(reversed(order), start=1):
+        position = count - rank + 1
+        running = min(running, p_values[index] * count / position)
+        adjusted[index] = min(1.0, running)
+    return adjusted
+
+
 def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
@@ -405,6 +537,331 @@ def analyse_node(
     }
 
 
+def _block_bootstrap_slope(
+    temperature: Sequence[float],
+    frequency: Sequence[float],
+    block: int,
+    draws: int = 240,
+    seed: int = 12345,
+) -> tuple[float, float] | None:
+    """Percentile interval for the slope, resampling contiguous blocks.
+
+    Serial correlation makes an ordinary bootstrap far too optimistic, so whole
+    blocks are resampled to preserve the local dependence structure. A
+    deterministic generator keeps repeated snapshots reproducible.
+    """
+    count = len(temperature)
+    if count < 40 or block < 2:
+        return None
+    blocks = max(2, count // block)
+    state = seed
+    slopes: list[float] = []
+    for _ in range(draws):
+        xs: list[float] = []
+        ys: list[float] = []
+        for _ in range(blocks):
+            state = (1103515245 * state + 12345) & 0x7FFFFFFF
+            start = state % max(1, count - block)
+            xs.extend(temperature[start:start + block])
+            ys.extend(frequency[start:start + block])
+        fit = _polynomial_fit(xs, ys, 1)
+        if fit:
+            slopes.append(fit["coefficients"][1])
+    if len(slopes) < 20:
+        return None
+    slopes.sort()
+    low = slopes[int(0.025 * (len(slopes) - 1))]
+    high = slopes[int(0.975 * (len(slopes) - 1))]
+    return (low, high)
+
+
+def _brown_forsythe(groups: Sequence[Sequence[float]]) -> dict[str, Any]:
+    """Equal-variance test on absolute deviations from each group median.
+
+    The median form is used rather than Levene's mean form because residual
+    distributions here are not reliably symmetric.
+    """
+    usable = [list(group) for group in groups if len(group) >= 3]
+    if len(usable) < 2:
+        return {"status": "insufficient-groups"}
+    transformed: list[list[float]] = []
+    for group in usable:
+        ordered = sorted(group)
+        middle = len(ordered) // 2
+        median = ordered[middle] if len(ordered) % 2 else 0.5 * (ordered[middle - 1] + ordered[middle])
+        transformed.append([abs(value - median) for value in group])
+    total = [value for group in transformed for value in group]
+    grand = _mean(total)
+    k = len(transformed)
+    n = len(total)
+    between = sum(len(group) * (_mean(group) - grand) ** 2 for group in transformed)
+    within = sum((value - _mean(group)) ** 2 for group in transformed for value in group)
+    if within <= EPSILON or n - k <= 0:
+        return {"status": "degenerate"}
+    statistic = (between / (k - 1)) / (within / (n - k))
+    p_value = f_survival(statistic, k - 1, n - k)
+    return {
+        "status": "ready",
+        "statistic": statistic,
+        "numerator_df": k - 1,
+        "denominator_df": n - k,
+        "p_value": p_value,
+        "equal_variance": None if p_value is None else p_value > 0.05,
+    }
+
+
+def _kruskal_wallis(groups: Sequence[Sequence[float]]) -> dict[str, Any]:
+    """Distribution-free alternative when normality cannot be assumed."""
+    usable = [list(group) for group in groups if len(group) >= 3]
+    if len(usable) < 2:
+        return {"status": "insufficient-groups"}
+    pooled = sorted((value, index) for index, group in enumerate(usable) for value in group)
+    ranks: dict[int, list[float]] = {index: [] for index in range(len(usable))}
+    position = 0
+    while position < len(pooled):
+        end = position
+        while end + 1 < len(pooled) and pooled[end + 1][0] == pooled[position][0]:
+            end += 1
+        average = (position + end) / 2.0 + 1.0
+        for offset in range(position, end + 1):
+            ranks[pooled[offset][1]].append(average)
+        position = end + 1
+    n = len(pooled)
+    statistic = 12.0 / (n * (n + 1)) * sum(len(r) * (_mean(r) - (n + 1) / 2.0) ** 2 for r in ranks.values()) if n > 1 else 0.0
+    degrees = len(usable) - 1
+    return {
+        "status": "ready",
+        "statistic": statistic,
+        "degrees_of_freedom": degrees,
+        "p_value": chi_square_survival(statistic, degrees),
+    }
+
+
+def _leading_mode(matrix: list[list[float]]) -> tuple[float, list[float]] | None:
+    """Largest eigenvalue and vector by power iteration."""
+    size = len(matrix)
+    if size < 2:
+        return None
+    vector = [1.0 / math.sqrt(size)] * size
+    value = 0.0
+    for _ in range(400):
+        product = [sum(matrix[row][col] * vector[col] for col in range(size)) for row in range(size)]
+        norm = math.sqrt(sum(item * item for item in product))
+        if norm <= EPSILON:
+            return None
+        nxt = [item / norm for item in product]
+        if max(abs(nxt[index] - vector[index]) for index in range(size)) < 1e-12:
+            vector = nxt
+            value = norm
+            break
+        vector, value = nxt, norm
+    return value, vector
+
+
+def _spearman(left: Sequence[float], right: Sequence[float]) -> float | None:
+    def rank(values: Sequence[float]) -> list[float]:
+        order = sorted(range(len(values)), key=lambda index: values[index])
+        out = [0.0] * len(values)
+        position = 0
+        while position < len(order):
+            end = position
+            while end + 1 < len(order) and values[order[end + 1]] == values[order[position]]:
+                end += 1
+            average = (position + end) / 2.0 + 1.0
+            for offset in range(position, end + 1):
+                out[order[offset]] = average
+            position = end + 1
+        return out
+    return _pearson(rank(left), rank(right))
+
+
+def fleet_comparison(
+    paired: dict[str, Sequence[tuple[float, float, float]]],
+    nodes: dict[str, dict[str, Any]],
+    slot_order: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Compare the clocks against one another.
+
+    The question is not whether the cards have different mean corrections, which
+    they trivially do because they are different oscillators with different
+    offsets. It is whether their *slopes* differ, which is a test for homogeneity
+    of regression slopes rather than a one-way analysis of means.
+    """
+    usable = {
+        name: [(temp, freq) for _, temp, freq in rows]
+        for name, rows in paired.items()
+        if nodes.get(name, {}).get("status") == "ready"
+    }
+    if len(usable) < 2:
+        return {"status": "insufficient-clocks", "clocks": len(usable)}
+
+    # Pooled model with a single common slope versus one slope per clock. The
+    # extra parameters are the per-clock slope deviations.
+    pooled_rss = 0.0
+    separate_rss = 0.0
+    total_samples = 0
+    per_clock: dict[str, dict[str, Any]] = {}
+    residual_groups: list[list[float]] = []
+    all_temperature: list[float] = []
+    all_frequency: list[float] = []
+    centred_pairs: list[tuple[str, float, float]] = []
+    for name, rows in usable.items():
+        temps = [row[0] for row in rows]
+        freqs = [row[1] for row in rows]
+        fit = _polynomial_fit(temps, freqs, 1)
+        if not fit:
+            continue
+        separate_rss += fit["rss"]
+        total_samples += len(rows)
+        residual_groups.append(fit["residuals"])
+        effective = nodes[name]["serial_correlation"]["effective_samples"]
+        block = max(2, int(len(rows) / max(2.0, effective)))
+        per_clock[name] = {
+            "slope_ppb_per_c": fit["coefficients"][1],
+            "standard_error_ppb_per_c": nodes[name]["ols"]["standard_error_ppb_per_c"],
+            "effective_samples": effective,
+            "bootstrap_95_ppb_per_c": _block_bootstrap_slope(temps, freqs, block),
+            "block_length": block,
+            "mean_temperature_c": _mean(temps),
+        }
+        # Centre each clock's data so the pooled fit tests slope equality, not
+        # the offset differences that trivially exist between oscillators.
+        temp_mean, freq_mean = _mean(temps), _mean(freqs)
+        for index in range(len(rows)):
+            centred_pairs.append((name, temps[index] - temp_mean, freqs[index] - freq_mean))
+        all_temperature.extend(temps)
+        all_frequency.extend(freqs)
+
+    if len(per_clock) < 2:
+        return {"status": "insufficient-clocks", "clocks": len(per_clock)}
+
+    common = _polynomial_fit([row[1] for row in centred_pairs], [row[2] for row in centred_pairs], 1)
+    if common:
+        pooled_rss = common["rss"]
+    groups = len(per_clock)
+    # Naive degrees of freedom would treat every correlated sample as
+    # independent, so scale by the mean autocorrelation discount.
+    inflation = total_samples / max(1.0, sum(item["effective_samples"] for item in per_clock.values()))
+    numerator_df = groups - 1
+    denominator_df = max(1.0, (total_samples - 2 * groups) / max(1.0, inflation))
+    statistic = None
+    p_value = None
+    if pooled_rss > separate_rss and separate_rss > EPSILON and numerator_df > 0:
+        statistic = ((pooled_rss - separate_rss) / numerator_df) / (separate_rss / max(1.0, total_samples - 2 * groups))
+        statistic /= max(1.0, inflation)
+        p_value = f_survival(statistic, numerator_df, denominator_df)
+
+    # Pairwise slope differences with a false-discovery-rate adjustment.
+    names = sorted(per_clock)
+    raw: list[dict[str, Any]] = []
+    for left_index in range(len(names)):
+        for right_index in range(left_index + 1, len(names)):
+            left, right = names[left_index], names[right_index]
+            a, b = per_clock[left], per_clock[right]
+            se_a, se_b = a["standard_error_ppb_per_c"], b["standard_error_ppb_per_c"]
+            if se_a is None or se_b is None:
+                continue
+            pooled_se = math.sqrt(se_a * se_a + se_b * se_b)
+            if pooled_se <= EPSILON:
+                continue
+            difference = a["slope_ppb_per_c"] - b["slope_ppb_per_c"]
+            t_statistic = difference / pooled_se
+            degrees = max(1.0, a["effective_samples"] + b["effective_samples"] - 4.0)
+            raw.append({
+                "left": left, "right": right, "difference_ppb_per_c": difference,
+                "t_statistic": t_statistic,
+                # An exact 0.0 is the strongest possible evidence, so it must not
+                # be coalesced away as if the test had failed to run.
+                "p_value": p_pair if (p_pair := t_two_sided(t_statistic, degrees)) is not None else 1.0,
+            })
+    adjusted = benjamini_hochberg([item["p_value"] for item in raw])
+    for index, item in enumerate(raw):
+        item["p_adjusted"] = adjusted[index]
+        item["differs"] = adjusted[index] < 0.05
+
+    # How much of the frequency motion is shared across the chassis rather than
+    # specific to one card.
+    aligned = min((len(rows) for rows in usable.values()), default=0)
+    common_mode: dict[str, Any] = {"status": "insufficient-overlap"}
+    if aligned >= 30 and len(usable) >= 2:
+        series = [[row[1] for row in rows[-aligned:]] for rows in usable.values()]
+        size = len(series)
+        correlation = [[1.0] * size for _ in range(size)]
+        for row in range(size):
+            for col in range(row + 1, size):
+                value = _pearson(series[row], series[col]) or 0.0
+                correlation[row][col] = correlation[col][row] = value
+        mode = _leading_mode(correlation)
+        if mode:
+            value, vector = mode
+            common_mode = {
+                "status": "ready",
+                "clocks": list(usable.keys()),
+                "leading_eigenvalue": value,
+                "explained_share": value / size,
+                "loadings": {name: vector[index] for index, name in enumerate(usable.keys())},
+                "aligned_samples": aligned,
+                "interpretation": (
+                    "A dominant first mode means the clocks move together, which is what a "
+                    "shared chassis thermal and ambient environment produces; it does not by "
+                    "itself separate common heating from the cascade's own servo coupling"
+                ),
+            }
+
+    # Does temperature follow physical slot order? An airflow gradient shows up
+    # as a monotone relationship rather than a random spread.
+    gradient: dict[str, Any] = {"status": "unavailable"}
+    if slot_order:
+        pairs = [
+            (slot_order[name], nodes[name]["temperature"]["mean_c"])
+            for name in per_clock if name in slot_order
+        ]
+        if len(pairs) >= 4:
+            rho = _spearman([p[0] for p in pairs], [p[1] for p in pairs])
+            gradient = {
+                "status": "ready",
+                "spearman_rho": rho,
+                "samples": len(pairs),
+                "interpretation": "A strong monotone relationship with slot order suggests an airflow gradient rather than per-card variation",
+            }
+
+    return {
+        "status": "ready",
+        "clocks": len(per_clock),
+        "per_clock": per_clock,
+        "slope_homogeneity": {
+            "test": "homogeneity of regression slopes (ANCOVA interaction)",
+            "f_statistic": statistic,
+            "numerator_df": numerator_df,
+            "denominator_df": denominator_df,
+            "p_value": p_value,
+            "slopes_differ": bool(p_value is not None and p_value < 0.05),
+            "autocorrelation_inflation": inflation,
+            "interpretation": (
+                "Rejecting equality means one fleet-wide coefficient does not describe every "
+                "card. Degrees of freedom are discounted for serial correlation, without which "
+                "any difference would look significant."
+            ),
+        },
+        "pairwise": raw,
+        "residual_variance": _brown_forsythe(residual_groups),
+        "rank_test": _kruskal_wallis(residual_groups),
+        "common_mode": common_mode,
+        "slot_gradient": gradient,
+        "not_applicable": {
+            "manova": (
+                "MANOVA models several dependent variables measured on one unit. Here a single "
+                "dependent variable, the applied correction, is measured on separate clocks, so "
+                "the multivariate question is answered by the common-mode decomposition instead."
+            ),
+            "one_way_anova_on_means": (
+                "Comparing mean corrections only confirms that different oscillators sit at "
+                "different frequency offsets, which is expected and uninformative."
+            ),
+        },
+    }
+
+
 def thermal_analysis(paired: dict[str, Sequence[tuple[float, float, float]]]) -> dict[str, Any]:
     """Analyse every clock and summarise the fleet."""
     nodes = {node: analyse_node(samples, node) for node, samples in sorted(paired.items())}
@@ -415,8 +872,10 @@ def thermal_analysis(paired: dict[str, Sequence[tuple[float, float, float]]]) ->
         key=lambda item: item["temperature"]["maximum_c"],
         default=None,
     )
+    slot_order = {name: index for index, name in enumerate(sorted(paired))}
     return {
         "nodes": nodes,
+        "fleet": fleet_comparison(paired, nodes, slot_order),
         "summary": {
             "analysed": len(ready),
             "supported": len(supported),

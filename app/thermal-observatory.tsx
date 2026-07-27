@@ -34,8 +34,29 @@ export type ThermalNode = {
   scatter?: ScatterPoint[];
 };
 
+export type FleetComparison = {
+  status: string;
+  clocks?: number;
+  per_clock?: Record<string, {
+    slope_ppb_per_c: number; standard_error_ppb_per_c: number | null;
+    effective_samples: number; bootstrap_95_ppb_per_c: [number, number] | null;
+    block_length: number; mean_temperature_c: number;
+  }>;
+  slope_homogeneity?: {
+    test: string; f_statistic: number | null; numerator_df: number; denominator_df: number;
+    p_value: number | null; slopes_differ: boolean; autocorrelation_inflation: number; interpretation: string;
+  };
+  pairwise?: Array<{ left: string; right: string; difference_ppb_per_c: number; t_statistic: number; p_value: number; p_adjusted: number; differs: boolean }>;
+  residual_variance?: { status: string; statistic?: number; p_value?: number | null; equal_variance?: boolean | null };
+  rank_test?: { status: string; statistic?: number; degrees_of_freedom?: number; p_value?: number | null };
+  common_mode?: { status: string; clocks?: string[]; leading_eigenvalue?: number; explained_share?: number; loadings?: Record<string, number>; aligned_samples?: number; interpretation?: string };
+  slot_gradient?: { status: string; spearman_rho?: number | null; samples?: number; interpretation?: string };
+  not_applicable?: Record<string, string>;
+};
+
 export type ThermalPayload = {
   nodes?: Record<string, ThermalNode>;
+  fleet?: FleetComparison;
   summary?: { analysed: number; supported: number; hottest_node: string | null; hottest_c: number | null };
   pairing?: { tolerance_s: number; paired_nodes: number; method?: string; temperature_source?: string; frequency_source?: string };
   window_s?: number;
@@ -156,6 +177,152 @@ function GateList({ node }: { node: ThermalNode }) {
   );
 }
 
+
+function pval(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value === 0) return "<1e-300";
+  return value < 0.001 ? value.toExponential(1) : value.toFixed(3);
+}
+
+function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
+  if (fleet.status !== "ready") {
+    return (
+      <section className="panel">
+        <div className="panel-heading"><div><span className="section-kicker">CROSS COMPARISON</span><h2>Between clocks</h2></div></div>
+        <div className="empty-analysis">{fleet.status === "insufficient-clocks" ? "At least two analysed clocks are needed to compare" : fleet.status}</div>
+      </section>
+    );
+  }
+  const homogeneity = fleet.slope_homogeneity;
+  const pairwise = fleet.pairwise ?? [];
+  const perClock = fleet.per_clock ?? {};
+  const names = Object.keys(perClock).sort();
+  const differing = pairwise.filter((item) => item.differs);
+  const mode = fleet.common_mode;
+  const variance = fleet.residual_variance;
+  const loadings = mode?.loadings ?? {};
+  const maxLoading = Math.max(1e-9, ...Object.values(loadings).map(Math.abs));
+
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-heading">
+          <div><span className="section-kicker">CROSS COMPARISON</span><h2>Is one coefficient enough for the fleet?</h2></div>
+          <span className={`quality-badge ${homogeneity?.slopes_differ ? "warning" : ""}`}>
+            {homogeneity?.slopes_differ ? "SLOPES DIFFER" : "NO DIFFERENCE RESOLVED"}
+          </span>
+        </div>
+        <div className="thm-summary">
+          <div><small>F statistic</small><b>{num(homogeneity?.f_statistic, 2)}</b></div>
+          <div><small>p value</small><b>{pval(homogeneity?.p_value)}</b></div>
+          <div><small>Degrees of freedom</small><b>{homogeneity?.numerator_df} / {num(homogeneity?.denominator_df, 0)}</b></div>
+          <div><small>Autocorrelation inflation</small><b>{num(homogeneity?.autocorrelation_inflation, 2)}×</b></div>
+        </div>
+        <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{homogeneity?.interpretation}</span></div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div><span className="section-kicker">PER CLOCK</span><h2>Slope with block-bootstrap interval</h2></div>
+          <span className="panel-meta">blocks preserve serial dependence</span>
+        </div>
+        <table className="sys-table thm-table">
+          <thead><tr><th>Clock</th><th>Slope ppb/°C</th><th>Bootstrap 95%</th><th>Interval width</th><th>Block</th><th>N<sub>eff</sub></th><th>Mean °C</th></tr></thead>
+          <tbody>
+            {names.map((name) => {
+              const entry = perClock[name];
+              const interval = entry.bootstrap_95_ppb_per_c;
+              const width = interval ? interval[1] - interval[0] : null;
+              return (
+                <tr key={name}>
+                  <td><strong>{name}</strong></td>
+                  <td>{num(entry.slope_ppb_per_c)}</td>
+                  <td>{interval ? `${interval[0].toFixed(1)} … ${interval[1].toFixed(1)}` : "—"}</td>
+                  <td>{num(width)}</td>
+                  <td>{entry.block_length}</td>
+                  <td>{num(entry.effective_samples, 0)}</td>
+                  <td>{num(entry.mean_temperature_c, 0)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="dyn-evidence-note"><Activity size={14} /><span>
+          A wide interval means few effective samples, not a noisy card: the block length is set by that clock&apos;s own residual autocorrelation.
+        </span></div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div><span className="section-kicker">PAIRWISE</span><h2>Which clocks actually differ</h2></div>
+          <span className={`quality-badge ${differing.length ? "warning" : ""}`}>{differing.length}/{pairwise.length} AT 5% FDR</span>
+        </div>
+        <table className="sys-table thm-table">
+          <thead><tr><th>Pair</th><th>Difference ppb/°C</th><th>t</th><th>p raw</th><th>p adjusted</th><th></th></tr></thead>
+          <tbody>
+            {pairwise.map((item) => (
+              <tr key={`${item.left}-${item.right}`} className={item.differs ? "selected" : ""}>
+                <td><strong>{item.left}</strong> vs <strong>{item.right}</strong></td>
+                <td>{num(item.difference_ppb_per_c)}</td>
+                <td>{num(item.t_statistic, 2)}</td>
+                <td>{pval(item.p_value)}</td>
+                <td>{pval(item.p_adjusted)}</td>
+                <td>{item.differs ? <span className="thm-verdict insufficient-evidence">differs</span> : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>
+          Benjamini–Hochberg adjustment across all {pairwise.length} comparisons; without it roughly one pair in twenty would appear to differ by chance alone.
+        </span></div>
+      </section>
+
+      <div className="sys-grid">
+        <section className="panel">
+          <div className="panel-heading">
+            <div><span className="section-kicker">SHARED MOTION</span><h2>Common mode</h2></div>
+            {mode?.status === "ready" ? <span className="panel-meta">{num((mode.explained_share ?? 0) * 100, 1)} % of cross-clock variance</span> : null}
+          </div>
+          {mode?.status === "ready" ? (
+            <>
+              <div className="thm-loadings">
+                {Object.entries(loadings).map(([name, value]) => (
+                  <div key={name}>
+                    <small>{name}</small>
+                    <em><i style={{ width: `${Math.abs(value) / maxLoading * 100}%` }} /></em>
+                    <b>{value.toFixed(2)}</b>
+                  </div>
+                ))}
+              </div>
+              <div className="sys-stat-row"><span>Aligned samples</span><strong>{mode.aligned_samples}</strong></div>
+              <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{mode.interpretation}</span></div>
+            </>
+          ) : <div className="empty-analysis">Needs overlapping records across clocks</div>}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading"><div><span className="section-kicker">ASSUMPTIONS</span><h2>Are the tests admissible?</h2></div>
+            <span className={`quality-badge ${variance?.equal_variance === false ? "warning" : ""}`}>
+              {variance?.equal_variance === false ? "UNEQUAL VARIANCE" : "CHECKED"}
+            </span>
+          </div>
+          <div className="sys-stat-row"><span>Brown–Forsythe equal variance</span><strong>{variance?.equal_variance === false ? "rejected" : variance?.equal_variance === true ? "not rejected" : "—"} · p {pval(variance?.p_value)}</strong></div>
+          <div className="sys-stat-row"><span>Kruskal–Wallis (rank, distribution-free)</span><strong>p {pval(fleet.rank_test?.p_value)}</strong></div>
+          <div className="sys-stat-row"><span>Slot-order temperature gradient</span><strong>ρ {num(fleet.slot_gradient?.spearman_rho, 2)}</strong></div>
+          {variance?.equal_variance === false ? (
+            <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>
+              Residual variances differ between clocks, so the equal-variance assumption behind the F test is violated. Prefer the rank test and the bootstrap intervals over the F p-value here.
+            </span></div>
+          ) : null}
+          {fleet.not_applicable ? (
+            <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{fleet.not_applicable.manova}</span></div>
+          ) : null}
+        </section>
+      </div>
+    </>
+  );
+}
+
 export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null }) {
   const nodes = thermal?.nodes ?? {};
   const names = Object.keys(nodes);
@@ -221,6 +388,8 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
           </tbody>
         </table>
       </section>
+
+      {thermal.fleet ? <FleetComparisonPanels fleet={thermal.fleet} /> : null}
 
       {active && active.status === "ready" ? (
         <>
