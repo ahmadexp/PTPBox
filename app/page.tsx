@@ -3380,6 +3380,41 @@ function IntelligenceWorkbench({
   );
 }
 
+/** Continuous colour for a die temperature.
+ *
+ * Piecewise-linear interpolation between stops rather than fixed bands, so a
+ * card creeping from 96 to 104 C is visible as it happens instead of only when
+ * it crosses a threshold. Stops are placed for the range NIC ASICs actually
+ * occupy; ConnectX-6 Dx runs comfortably in the eighties and should not be
+ * approaching the top of this scale.
+ */
+const TEMPERATURE_STOPS: Array<[number, [number, number, number]]> = [
+  [40, [88, 199, 243]],   // cool cyan
+  [68, [93, 214, 138]],   // green
+  [82, [216, 224, 74]],   // yellow
+  [92, [242, 184, 75]],   // amber
+  [100, [255, 138, 61]],  // orange
+  [106, [255, 77, 77]],   // red
+];
+
+function temperatureColor(celsius: number | null | undefined) {
+  if (celsius == null || !Number.isFinite(celsius)) return undefined;
+  const first = TEMPERATURE_STOPS[0];
+  const last = TEMPERATURE_STOPS[TEMPERATURE_STOPS.length - 1];
+  if (celsius <= first[0]) return `rgb(${first[1].join(",")})`;
+  if (celsius >= last[0]) return `rgb(${last[1].join(",")})`;
+  for (let index = 0; index < TEMPERATURE_STOPS.length - 1; index += 1) {
+    const [lowTemp, lowRgb] = TEMPERATURE_STOPS[index];
+    const [highTemp, highRgb] = TEMPERATURE_STOPS[index + 1];
+    if (celsius >= lowTemp && celsius <= highTemp) {
+      const ratio = (celsius - lowTemp) / (highTemp - lowTemp);
+      const mixed = lowRgb.map((channel, position) => Math.round(channel + ratio * (highRgb[position] - channel)));
+      return `rgb(${mixed.join(",")})`;
+    }
+  }
+  return undefined;
+}
+
 function ThermometerFallback() {
   return <span className="thermometer-symbol" aria-hidden="true"><i /></span>;
 }
@@ -4994,7 +5029,7 @@ export default function PTPBoxDashboard() {
                                 className={`node-temp ${reading == null ? "unknown" : reading >= 100 ? "critical" : reading >= 90 ? "warning" : ""}`}
                                 title={reading == null ? "No hardware-monitor reading for this adapter" : `Adapter die temperature ${reading.toFixed(1)} °C`}
                               >
-                                <Thermometer size={9} />{reading == null ? "— °C" : `${reading.toFixed(0)} °C`}
+                                <Thermometer size={9} style={{ color: temperatureColor(reading) }} />{reading == null ? "— °C" : `${reading.toFixed(0)} °C`}
                               </div>
                             );
                           })()}

@@ -4,6 +4,11 @@ All notable changes will be documented in this file.
 
 ## Unreleased
 
+- The topology thermometer is now tinted on a continuous scale from cyan through
+  green, yellow, and amber to red, interpolated between stops placed for the
+  range adapter ASICs actually occupy, so a card creeping from 96 to 104 C is
+  visible while it happens instead of only when it crosses a band edge.
+
 - Added the Oscillator Thermal Response page: correction-against-temperature
   scatter with the least-squares and Deming fit lines overlaid and sample age
   encoded as opacity, a residual-against-temperature plot so unmodelled
