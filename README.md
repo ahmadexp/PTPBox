@@ -308,6 +308,129 @@ interpolation and reports `live_changes: 0`. A non-integer dimension, high fit
 quality, or broad multifractal spectrum is **not by itself evidence of
 deterministic chaos, exact self-similarity, or a strange attractor**.
 
+## Watch every adapter's temperature in the topology
+
+Each clock in the physical topology carries its adapter's die temperature behind
+a thermometer whose colour is interpolated continuously across the range NIC
+ASICs actually occupy, so a card creeping from 96 to 104 °C is visible while it
+happens rather than only when it crosses a band edge. Readings come from the
+capability probe on their own interval and are retained between polls, so a slow
+or partial probe leaves the last known value in place instead of blanking a
+sensor that was reading a moment ago.
+
+On the reference host this immediately separates the fleet. Four adapters cluster
+between 86 and 89 °C over a 30-minute window while two run hot, near 98 and
+101 °C, and the hottest card is also the worst free-running oscillator in the
+holdover trial. Sensors are attributed to their owning PCI device, because seven
+identical adapters otherwise report seven identically named sensors.
+
+<img src="docs/screenshots/topology-thermal-live.png" alt="Live PTPBox cascade overview whose seven-stage physical topology shows each adapter's die temperature behind a thermometer icon graded from neutral through amber to coral as the reading rises" width="100%">
+
+<sub>Live topology on the reference host. Each stage carries its adapter's die
+temperature, and the thermometer grades continuously with the reading, so the two
+hot cards separate from the 81 to 87 °C group at a glance.</sub>
+
+## Map oscillator correction against temperature
+
+The **Oscillator Thermal Response** page regresses each clock's applied
+frequency correction on its die temperature. That measures a temperature
+coefficient because the correction is the negation of the oscillator's own
+frequency error. The scatter carries both the least-squares and the Deming fit
+lines, so the attenuation caused by whole-degree readings is visible as the angle
+between them, and sample age is encoded as opacity so a temperature that merely
+tracks elapsed time appears as a gradient along the fit rather than an
+undifferentiated cloud. A residual-against-temperature plot sits beneath it,
+because with three to five quantised levels a cubic can win on AIC without any
+resolvable curvature.
+
+Three properties of passive data drive the design. Whole-degree sensors put
+about 0.29 °C of noise into the regressor and attenuate least squares toward
+zero, so a Deming errors-in-variables slope is reported beside it. Temperature is
+collinear with elapsed time, so a temperature-only fit absorbs oscillator
+ageing; a joint fit separates them. Consecutive samples are serially correlated,
+so standard errors are scaled by an effective sample size rather than a raw
+count.
+
+Seven evidence gates then decide whether a coefficient may be claimed at all,
+covering span, distinct levels, time collinearity, residual independence,
+effective samples, and slope significance. Passive operation cannot pass them:
+on the reference host every clock reports *candidate* or weaker across a two to
+four degree span, and the joint fit shows a coefficient falling from 251 to
+131 ppb/°C once a 0.61 ppb/s ageing term is separated out. Earning a defensible
+coefficient requires deliberate thermal forcing, and the page says so instead of
+publishing a number it cannot support.
+
+<img src="docs/screenshots/thermal-observatory-live.png" alt="Live PTPBox Oscillator Thermal Response page showing per-clock temperature coefficients from three estimators, evidence verdicts, a slope-homogeneity test, block-bootstrap intervals, and the common-mode eigen decomposition" width="100%">
+
+<sub>Live Oscillator Thermal Response. Every clock reports <em>candidate</em> or
+weaker, three estimators are shown side by side so quantisation attenuation is
+visible, and the fleet test reports that one coefficient does not describe every
+card.</sub>
+
+### Compare the oscillators against one another
+
+The cross-comparison asks the question worth asking. Whether the cards have
+different mean corrections is not interesting: they are different oscillators
+with different offsets. Whether their *slopes* differ is, so the page tests
+homogeneity of regression slopes on per-clock centred data, with degrees of
+freedom discounted by the measured autocorrelation inflation, which is about
+sixteen on the reference host and without which every pair would look
+significant.
+
+Alongside it: block-bootstrap slope intervals that resample contiguous blocks
+sized from each clock's own residual autocorrelation, pairwise differences with
+a Benjamini–Hochberg adjustment across the whole family, Brown–Forsythe and
+Kruskal–Wallis checks on the assumptions the F test rests on, and a common-mode
+eigen-decomposition. That last one carries the result: 84 % of the cross-clock
+frequency variance is shared, with near-equal loadings on every card, which is
+why they all show a similar apparent slope. They are responding to one shared
+influence, not exhibiting six independent coefficients.
+
+MANOVA is recorded as inapplicable rather than added. It models several dependent
+variables measured on one unit, whereas here a single dependent variable is
+measured on separate clocks; the multivariate question is answered by the
+common-mode decomposition instead.
+
+### Score temperature-compensated holdover before arming it
+
+During holdover the PHC free-runs and accumulates phase at the oscillator's own
+frequency error. If that error tracks temperature, continuing to apply a
+temperature-driven correction should cancel part of the drift. Whether it
+actually would is empirical, so the option is scored against a recorded free run
+rather than assumed.
+
+Two coefficients are evaluated: the one measured while locked, which a
+compensator could really use, and the best obtainable in hindsight, which bounds
+what compensation could ever achieve on that record. When the second is small the
+drift is not temperature-driven and no coefficient will help. Arming is refused
+unless the coefficient's own evidence verdict is supported, and on the reference
+host that gate earns its place: the measured coefficient would have worsened five
+of six clocks, one of them by 178 %.
+
+## Inspect the host itself
+
+The **System Observatory** reports host identity and uptime, processor model with
+delta-sampled utilisation and load, memory and swap, real filesystem capacity,
+thermal sensors sorted hottest first, and a PCI inventory grouped by driver.
+Everything is read from `/proc`, `/sys`, and mount statistics, so it needs no
+privilege and cannot reach a clock.
+
+It also verifies the declared cascade against observed link state, hop by hop,
+and reports host addressing, routing, and resolver state read-only. Neither is
+overstated: link checking is not physical peer discovery, which needs the
+raw-frame prober and a torn-down cascade, and the network view reports
+`editable: false` because the interface carrying the default route is also the
+one serving the API. Cascade timing ports are absent from that list by design,
+since the controller moves them into per-stage namespaces, and the panel counts
+declared against locally visible ports rather than letting their absence read as
+missing hardware.
+
+<img src="docs/screenshots/system-observatory-live.png" alt="Live PTPBox System Observatory showing host identity, processor and memory meters, filesystem capacity, per-device thermal sensors, read-only network addressing and routing, six of six verified cascade links, and the PCI inventory grouped by driver" width="100%">
+
+<sub>Live System Observatory. Sensors are attributed per PCI device and coloured by
+severity, all six declared cascade links verify against observed carrier and speed,
+and the network panel is explicitly read-only.</sub>
+
 ## What you can do
 
 | Surface | Purpose |
@@ -320,6 +443,11 @@ deterministic chaos, exact self-similarity, or a strange attractor**.
 | **Path microscope** | Inspect preserved `t1`/`t2`/`t3`/`t4` exchange timestamps, correction fields, independent sequence IDs, and scientifically qualified directional residuals. |
 | **Control intelligence** | Estimate phase/frequency/drift, switch among quiet/dynamic/holdover models, predict thermal holdover, identify loop dynamics, detect changes, rank replay-safe PI gains, inspect settled response branches, and compare correlation, Higuchi, and multifractal scaling. |
 | **Cascade Dynamics Observatory** | Follow dynamic stability, coherent spatial modes, passive hop amplification, estimator consistency, identifiability, timing OAM, holdover reachability, nonlinear structure, and evidence-gated active loop identification from one surface. |
+| **Oscillator thermal response** | Regress applied correction on die temperature with least-squares, Deming errors-in-variables, and Theil–Sen estimators; separate coefficient from ageing; rank polynomial order by AIC; split heating and cooling branches; and gate the claim on seven independent conditions. |
+| **Thermal cross comparison** | Test homogeneity of regression slopes with autocorrelation-discounted degrees of freedom, bootstrap each slope by contiguous blocks, adjust pairwise comparisons for false discovery, check equal variance and rank distribution, and decompose chassis-common from card-specific motion. |
+| **Compensated holdover scoring** | Score what temperature-compensated holdover would have achieved against a recorded free run, against both the measured and the best-possible coefficient, and refuse to arm on an unsupported coefficient. |
+| **System Observatory** | Read host identity, processor utilisation and load, memory, filesystem capacity, thermal sensors attributed to their PCI device, and PCI inventory; verify the declared cascade against link state; and read addressing, routing, and resolvers without any privileged call. |
+| **Topology thermometers** | See each adapter's die temperature in the physical topology, tinted continuously across the range the hardware occupies. |
 | **Holdover chamber** | Qualify continuous lock, capture a per-node release baseline, stop adjustment without stopping observation, plot raw wander, report rate error, and restore the exact saved servos. |
 | **Resilience lab** | Validate profile preset fields, expose kernel DPLL/SyncE state without inference, configure message authentication, and inject automatically expiring one-hop faults. |
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
@@ -499,6 +627,17 @@ state from sysfs and the managed process table.
   coordinates, and rolling eigenvalue shares
 - Recurrence rate/determinism, Koopman/DMD amplification, and Bayesian online
   change probability
+- Per-adapter die temperature, attributed to its owning PCI device
+- Oscillator temperature coefficient by least-squares, Deming, and Theil–Sen
+  estimators, with ageing separated by a joint temperature/time fit, polynomial
+  order ranked by AIC, hysteresis branches, thermal lag, and seven evidence gates
+- Between-clock slope homogeneity, block-bootstrap slope intervals,
+  false-discovery-adjusted pairwise differences, equal-variance and rank tests,
+  and the chassis-common share of cross-clock frequency motion
+- Modelled benefit of temperature-compensated holdover against both the measured
+  and the best-possible coefficient
+- Host processor, memory, filesystem, thermal, and PCI inventory, plus addressing,
+  routing, and resolver state, all read-only
 - NIC carrier, speed, driver, PCI bus, PHC, and timestamp capability
 - Per-node PPS availability, configured in/out role, live PHC pin function,
   channel, connector, and managed `ts2phc` state
@@ -560,7 +699,7 @@ shared-PHC behavior, interface mapping, and a preflight checklist.
 
 ```text
 app/                 Precision Observatory UI
-agent/               Read-only host API, topology, systemd template
+agent/               Read-only host API, thermal and system analysis, topology, systemd units
 scripts/             Safe lifecycle, install, and uninstall helpers
 standalone/          Static-host entrypoint for the on-box agent
 docs/                Installation, research, architecture, API, hardware, experiments

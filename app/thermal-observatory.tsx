@@ -187,7 +187,7 @@ function pval(value: number | null | undefined) {
 function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
   if (fleet.status !== "ready") {
     return (
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading"><div><span className="section-kicker">CROSS COMPARISON</span><h2>Between clocks</h2></div></div>
         <div className="empty-analysis">{fleet.status === "insufficient-clocks" ? "At least two analysed clocks are needed to compare" : fleet.status}</div>
       </section>
@@ -205,7 +205,7 @@ function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
 
   return (
     <>
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">CROSS COMPARISON</span><h2>Is one coefficient enough for the fleet?</h2></div>
           <span className={`quality-badge ${homogeneity?.slopes_differ ? "warning" : ""}`}>
@@ -221,7 +221,7 @@ function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
         <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{homogeneity?.interpretation}</span></div>
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">PER CLOCK</span><h2>Slope with block-bootstrap interval</h2></div>
           <span className="panel-meta">blocks preserve serial dependence</span>
@@ -252,7 +252,7 @@ function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
         </span></div>
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">PAIRWISE</span><h2>Which clocks actually differ</h2></div>
           <span className={`quality-badge ${differing.length ? "warning" : ""}`}>{differing.length}/{pairwise.length} AT 5% FDR</span>
@@ -278,7 +278,7 @@ function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
       </section>
 
       <div className="sys-grid">
-        <section className="panel">
+        <section className="instrument-panel">
           <div className="panel-heading">
             <div><span className="section-kicker">SHARED MOTION</span><h2>Common mode</h2></div>
             {mode?.status === "ready" ? <span className="panel-meta">{num((mode.explained_share ?? 0) * 100, 1)} % of cross-clock variance</span> : null}
@@ -300,7 +300,7 @@ function FleetComparisonPanels({ fleet }: { fleet: FleetComparison }) {
           ) : <div className="empty-analysis">Needs overlapping records across clocks</div>}
         </section>
 
-        <section className="panel">
+        <section className="instrument-panel">
           <div className="panel-heading"><div><span className="section-kicker">ASSUMPTIONS</span><h2>Are the tests admissible?</h2></div>
             <span className={`quality-badge ${variance?.equal_variance === false ? "warning" : ""}`}>
               {variance?.equal_variance === false ? "UNEQUAL VARIANCE" : "CHECKED"}
@@ -331,7 +331,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
 
   if (!thermal) {
     return (
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading"><div><span className="section-kicker">OSCILLATOR THERMAL RESPONSE</span><h2>Temperature coefficient</h2></div></div>
         <div className="empty-analysis">Waiting for <code>/api/thermal</code></div>
       </section>
@@ -342,7 +342,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
 
   return (
     <>
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">OSCILLATOR THERMAL RESPONSE</span><h2>Correction versus die temperature</h2></div>
           <span className={`quality-badge ${summary.supported ? "" : "warning"}`}>
@@ -358,7 +358,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
         <div className="dyn-evidence-note"><ShieldCheck size={14} /><span>{thermal.interpretation}</span></div>
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">PER-CLOCK ESTIMATE</span><h2>Temperature coefficient by estimator</h2></div>
           <span className="panel-meta">quantised regressor attenuates least squares</span>
@@ -393,7 +393,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
 
       {active && active.status === "ready" ? (
         <>
-          <section className="panel">
+          <section className="instrument-panel">
             <div className="panel-heading">
               <div><span className="section-kicker">{active.node}</span><h2><Thermometer size={15} /> Correction against temperature</h2></div>
               <span className="panel-meta">{active.samples} paired samples · {num(active.record_span_s, 0, " s")}</span>
@@ -404,7 +404,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
           </section>
 
           <div className="sys-grid">
-            <section className="panel">
+            <section className="instrument-panel">
               <div className="panel-heading"><div><span className="section-kicker">EVIDENCE</span><h2>Gates</h2></div>
                 <span className={`quality-badge ${active.evidence?.verdict === "supported" ? "" : "warning"}`}>
                   {active.evidence?.gates_passed}/{active.evidence?.gates_total}
@@ -416,7 +416,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
               ) : null}
             </section>
 
-            <section className="panel">
+            <section className="instrument-panel">
               <div className="panel-heading"><div><span className="section-kicker">CONFOUNDING</span><h2>Temperature or ageing?</h2></div></div>
               <div className="sys-stat-row"><span>Temperature ↔ time correlation</span><strong>{num(active.confounding?.temperature_time_correlation, 3)}</strong></div>
               <div className="sys-stat-row"><span>Joint-fit coefficient</span><strong>{num(active.confounding?.joint_fit?.tempco_ppb_per_c)} ppb/°C</strong></div>
@@ -427,7 +427,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
           </div>
 
           <div className="sys-grid">
-            <section className="panel">
+            <section className="instrument-panel">
               <div className="panel-heading"><div><span className="section-kicker">HYSTERESIS</span><h2>Heating versus cooling</h2></div></div>
               <div className="sys-stat-row"><span>Heating slope</span><strong>{num(active.hysteresis?.heating_slope_ppb_per_c)} ppb/°C <small>({active.hysteresis?.heating_samples} pts)</small></strong></div>
               <div className="sys-stat-row"><span>Cooling slope</span><strong>{num(active.hysteresis?.cooling_slope_ppb_per_c)} ppb/°C <small>({active.hysteresis?.cooling_samples} pts)</small></strong></div>
@@ -435,7 +435,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
               <div className="sys-stat-row"><span>Best lag</span><strong>{active.thermal_lag?.best_lag_samples ?? "—"} samples · r {num(active.thermal_lag?.best_correlation, 3)}</strong></div>
             </section>
 
-            <section className="panel">
+            <section className="instrument-panel">
               <div className="panel-heading"><div><span className="section-kicker">MODEL ORDER</span><h2>AIC ranking</h2></div>
                 <span className="panel-meta">preferred: {active.model_selection?.preferred ?? "—"}</span>
               </div>
@@ -448,7 +448,7 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
             </section>
           </div>
 
-          <section className="panel">
+          <section className="instrument-panel">
             <div className="panel-heading"><div><span className="section-kicker">IF COMPENSATED</span><h2>Residual after removing the fitted response</h2></div></div>
             <div className="thm-summary">
               <div><small>Raw σ</small><b>{num(active.compensation_preview?.raw_sigma_ppb)} ppb</b></div>

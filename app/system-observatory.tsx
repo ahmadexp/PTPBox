@@ -139,7 +139,7 @@ function Meter({ value, warn, critical }: { value?: number | null; warn?: number
 export function SystemObservatory({ system, updatedAt }: { system: SystemPayload | null; updatedAt?: number | null }) {
   if (!system) {
     return (
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">HOST</span><h2>System Observatory</h2></div>
         </div>
@@ -169,7 +169,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
 
   return (
     <>
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">HOST IDENTITY</span><h2>{host.hostname ?? "unknown host"}</h2></div>
           <span className="panel-meta">
@@ -185,7 +185,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
       </section>
 
       <div className="sys-grid">
-        <section className="panel">
+        <section className="instrument-panel">
           <div className="panel-heading">
             <div><span className="section-kicker">COMPUTE</span><h2><Cpu size={15} /> Processor</h2></div>
             <span className="panel-meta">
@@ -211,7 +211,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
           </div>
         </section>
 
-        <section className="panel">
+        <section className="instrument-panel">
           <div className="panel-heading">
             <div><span className="section-kicker">MEMORY</span><h2><MemoryStick size={15} /> RAM and swap</h2></div>
             <span className="panel-meta">{kb(memory.total_kb)} installed</span>
@@ -227,7 +227,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
         </section>
       </div>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">CAPACITY</span><h2><HardDrive size={15} /> Filesystems</h2></div>
           <span className="panel-meta">{storage.length} mounted</span>
@@ -253,7 +253,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
         ) : <div className="empty-analysis">No local filesystems reported</div>}
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">THERMAL</span><h2><Thermometer size={15} /> Sensors</h2></div>
           <span className="panel-meta">
@@ -278,7 +278,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
       </section>
 
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">NETWORK</span><h2><Network size={15} /> Addressing and routing</h2></div>
           <span className="quality-badge">{network.editable === false ? "READ ONLY" : (network.status ?? "").toUpperCase()}</span>
@@ -343,7 +343,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
         ) : null}
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">CABLING</span><h2><Network size={15} /> Declared cascade versus link state</h2></div>
           <span className="quality-badge">
@@ -368,7 +368,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
         {topology.management_excluded?.length ? (
           <div className="sys-stat-row">
             <span>Management excluded</span>
-            <strong>{topology.management_excluded.map((name) => <code key={name}>{name}</code>)}</strong>
+            <strong><code>{topology.management_excluded.join(", ")}</code></strong>
           </div>
         ) : null}
         <div className="dyn-evidence-note">
@@ -377,7 +377,7 @@ export function SystemObservatory({ system, updatedAt }: { system: SystemPayload
         </div>
       </section>
 
-      <section className="panel">
+      <section className="instrument-panel">
         <div className="panel-heading">
           <div><span className="section-kicker">HARDWARE</span><h2>PCI inventory</h2></div>
           <span className="panel-meta">{pci.length} devices · {timingCards.length} timing functions</span>
