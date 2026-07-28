@@ -450,6 +450,56 @@ the servo left behind so arming cannot step the oscillator. Arming needs the clo
 already released, and the agent refuses a model that failed validation, so the
 verdict cannot be overridden from the HTTP surface.
 
+## Does a servo want temperature too?
+
+The short answer for a well-fed servo is no, and the measurement says why. At the
+4 Hz Sync rate the phase change temperature predicts over one interval is 0.06 to
+0.09 ns, against 52 to 145 ns of offset noise: three to four orders of magnitude
+below what the loop already rejects. The three-state filter also carries drift as
+a state and estimates it directly from phase, so temperature would be an indirect,
+whole-degree proxy for something already observed better. None of the six servos
+(`pi`, `linreg`, `nullf`, `kalman`, `adaptive-kalman`, `imm`) reads temperature.
+
+Sparsity is what changes the balance, so the option exists for that case. The
+thermal term is not a tuned gain; it is a second observation of drift, fused by
+inverse variance against the filter's own drift covariance:
+
+```
+d_fused = (d_kf/s_kf^2 + d_th/s_th^2) / (1/s_kf^2 + 1/s_th^2)
+```
+
+The weight is derived, never configured. A sharp drift estimate drives the thermal
+contribution to nothing on its own, which is what makes it safe to leave enabled at
+a high packet rate, and the sensor keeps its own polling cadence so its slope stays
+sharp as the Sync rate thins.
+
+`scripts/replay_thermal_servo.py` scores it against the temperature-blind filter on
+recorded data, emulating sparse Sync by decimating a real record. It is an estimator
+comparison, not a closed-loop one: a recording was produced under the servo that was
+running, so only forecast quality can be compared honestly.
+
+| Update interval | Drift estimate | Phase forecast |
+|---|---|---|
+| 1 s | −4.6 % | −0.01 % |
+| 9 s | −5.3 % | −0.03 % |
+| 16 s | −5.3 % | +0.5 % |
+| 32 s | — | **+17.8 %** |
+| 64 s | — | **+160.8 %** |
+
+The drift state genuinely improves, and the gain is real rather than an artifact of
+blending: sign-flipping the coefficient makes it *worse* by 7.6 %, and halving it
+gives half the benefit, which shrinkage cannot produce. But the improvement never
+reaches phase, and past a 16 s interval the feedforward becomes actively harmful,
+because drift extrapolates as `½·d·T²` and that square amplifies any bias in the
+coefficient. The sparse regime the feature was built for is exactly where an
+unsupported coefficient does the most damage.
+
+So the feedforward requires a coefficient whose evidence verdict is `supported`,
+and on this host all six are `candidate`. It is present, wired, and inert, and the
+servo says so instead of quietly running blind. Earning a supported coefficient
+needs deliberate thermal forcing, which is the prerequisite for this and for
+compensated holdover alike.
+
 ## Inspect the host itself
 
 The **System Observatory** reports host identity and uptime, processor model with
@@ -496,6 +546,7 @@ and the network panel is explicitly read-only.</sub>
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |
 | **Servo & holdover control** | Select native PI/linear-regression/null-frequency discipline, classic Kalman, adaptive phase/frequency/drift Kalman, or quiet/dynamic/holdover IMM per clock; change discipline while read-only monitoring stays live. |
+| **Thermal servo feedforward** | Fuse a die-temperature drift observation into the three-state or IMM servo by inverse variance, so a sharp drift estimate gives it no weight and a sparse one gives it more; requires a `supported` coefficient, and refuses aloud otherwise. |
 | **Compensated holdover** | Fit frozen, ageing, temperature, and joint models on the locked window, rank them by forecasting rolling origins, and arm one only if it beats frozen holdover by 15 % across 80 % of folds; bounded in magnitude, slew rate, and extrapolation horizon, and off by default. |
 | **PPS & `ts2phc` control** | Select a PHC or external PPS source, configure pins and `ts2phc`, or compare two or more PHCs against one physical PPS edge in strictly measurement-only mode. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |

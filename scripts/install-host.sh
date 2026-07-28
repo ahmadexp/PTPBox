@@ -47,15 +47,20 @@ install -m 0644 "$SOURCE_DIR/agent/ptpbox_research.py" "$INSTALL_DIR/agent/ptpbo
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_system.py" "$INSTALL_DIR/agent/ptpbox_system.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_thermal.py" "$INSTALL_DIR/agent/ptpbox_thermal.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_holdover_control.py" "$INSTALL_DIR/agent/ptpbox_holdover_control.py"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox_thermal_servo.py" "$INSTALL_DIR/agent/ptpbox_thermal_servo.py"
 # Every module the agent imports must be installed beside it. Missing one turns
 # into a systemd crash loop that takes the whole web surface down, so check here
 # instead of after the restart.
 missing_modules=()
 while read -r module; do
   [ -f "$INSTALL_DIR/agent/$module.py" ] || missing_modules+=("$module")
-done < <(grep -hoE '^(import|from) ptpbox_[a-z_]+' "$SOURCE_DIR/agent/ptpbox_agent.py" | awk '{print $2}' | sort -u)
+done < <(grep -hoE '^(import|from) ptpbox_[a-z_]+' \
+  "$SOURCE_DIR/agent/ptpbox_agent.py" \
+  "$SOURCE_DIR/scripts/ptpbox_kalman_servo.py" \
+  "$SOURCE_DIR/scripts/ptpbox_holdover_compensator.py" \
+  | awk '{print $2}' | sort -u)
 if [ ${#missing_modules[@]} -gt 0 ]; then
-  echo "install incomplete: ptpbox_agent imports ${missing_modules[*]} but they were not installed" >&2
+  echo "install incomplete: ${missing_modules[*]} are imported from the agent directory but were not installed" >&2
   exit 1
 fi
 install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl

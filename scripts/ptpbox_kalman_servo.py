@@ -31,6 +31,7 @@ for candidate in (
         break
 
 from ptpbox_research import AdaptiveKalman3, InteractingMultipleModel  # noqa: E402
+import ptpbox_thermal_servo as thermal_servo  # noqa: E402
 
 
 LOG_PATTERN = re.compile(
@@ -250,8 +251,14 @@ class AdaptiveKalmanServo:
         max_frequency_ppb: float,
         innovation_gate_sigma: float,
         initial_correction_ppb: float = 0.0,
+        feedforward: Any | None = None,
     ) -> None:
         self.mode = mode
+        # Optional and inert unless a coefficient passed the evidence gate. The
+        # fusion weight is derived from the filter's own drift covariance, so at a
+        # high Sync rate the thermal term is driven to nothing without tuning.
+        self.feedforward = feedforward
+        self.last_fusion: dict[str, Any] = {}
         self.filter = (
             InteractingMultipleModel(measurement_noise_ns)
             if mode == "imm"
@@ -272,10 +279,18 @@ class AdaptiveKalmanServo:
         status = self.filter.update(measurement_ns, sample_time, self.last_correction_ppb)
         self.sample_count = int(status["sample_count"])
         if status["measurement_accepted"]:
+            drift = float(status.get("drift_estimate_ppb_s", 0.0))
+            if self.feedforward is not None:
+                self.last_fusion = thermal_servo.fuse_drift(
+                    drift,
+                    float(status.get("drift_sigma_ppb_s", 0.0)),
+                    self.feedforward.drift_prediction(),
+                )
+                drift = float(self.last_fusion["drift_ppb_s"])
             correction = (
                 float(status["frequency_estimate_ppb"])
                 + float(status["phase_estimate_ns"]) / self.phase_time_constant_s
-                + 0.5 * float(status.get("drift_estimate_ppb_s", 0.0)) * self.phase_time_constant_s
+                + 0.5 * drift * self.phase_time_constant_s
             )
             self.last_correction_ppb = max(-self.max_frequency_ppb, min(self.max_frequency_ppb, correction))
         if status["state"] == "locked" and self.locked_since_source_time is None:
@@ -284,7 +299,19 @@ class AdaptiveKalmanServo:
             **status,
             "correction_ppb": self.last_correction_ppb,
             "locked_since_source_time": self.locked_since_source_time,
+            "thermal_weight": self.last_fusion.get("thermal_weight", 0.0),
+            "thermal_drift_ppb_s": self.last_fusion.get("thermal_drift_ppb_s"),
         }
+
+
+def read_temperature(path: Path | None) -> float | None:
+    """One hwmon temperature input in degrees C, or None if unreadable."""
+    if path is None:
+        return None
+    try:
+        return float(path.read_text(encoding="utf-8").strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -398,6 +425,10 @@ def main() -> None:
     parser.add_argument("--innovation-gate-sigma", type=float, default=6.0)
     parser.add_argument("--first-step-threshold-ns", type=float, default=20_000.0)
     parser.add_argument("--identification-state", type=Path, default=Path("/run/ptpbox/identification-state.json"))
+    parser.add_argument("--thermal-model", type=Path, default=None,
+                        help="JSON coefficient that passed the evidence gate; omit to stay temperature-blind")
+    parser.add_argument("--temperature-file", type=Path, default=None,
+                        help="hwmon tempN_input for this adapter")
     args = parser.parse_args()
 
     for name in (
@@ -418,6 +449,22 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+    feedforward = None
+    if args.thermal_model and args.temperature_file:
+        payload = load_json(args.thermal_model)
+        model = thermal_servo.ThermalDriftModel(
+            float(payload.get("tempco_ppb_per_c", 0.0)),
+            float(payload.get("tempco_sigma_ppb_per_c", 0.0)),
+            evidence_supported=bool(payload.get("evidence_supported", False)),
+        )
+        if model.usable():
+            feedforward = thermal_servo.ThermalFeedforward(model)
+        else:
+            # Say so rather than silently running blind: an operator who asked for
+            # compensation needs to know the coefficient did not qualify.
+            print(json.dumps({"node": args.node, "thermal_feedforward": "refused",
+                              "model": model.as_dict()}), flush=True)
+
     adjuster = PhcAdjuster(args.phc)
     initial_servo_correction = -adjuster.kernel_frequency_ppb()
     servo = (
@@ -439,6 +486,7 @@ def main() -> None:
             args.max_frequency_ppb,
             args.innovation_gate_sigma,
             initial_servo_correction,
+            feedforward,
         )
     )
     stepped = False
@@ -446,6 +494,8 @@ def main() -> None:
         for offset_ns, source_time, path_delay_ns in follow_samples(args.log, stop):
             if stop[0]:
                 break
+            if feedforward is not None:
+                feedforward.observe(time.time(), read_temperature(args.temperature_file))
             if servo.sample_count == 0 and args.first_step_threshold_ns > 0 and abs(offset_ns) > args.first_step_threshold_ns:
                 adjuster.step_phase_ns(offset_ns)
                 stepped = True
