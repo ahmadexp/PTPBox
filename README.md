@@ -621,6 +621,30 @@ person their own token so one can be withdrawn without disturbing the others.
 
 ### 2. Publish through a tunnel, not a forwarded port
 
+`scripts/manage-public-tunnel.sh` wraps this and refuses to publish an appliance
+that cannot tell one caller from another:
+
+```bash
+sudo scripts/manage-public-tunnel.sh install       # fetch cloudflared
+scripts/manage-public-tunnel.sh preflight          # is the agent protected?
+scripts/manage-public-tunnel.sh quick-start        # internal preview URL
+CLOUDFLARE_TUNNEL_TOKEN=... scripts/manage-public-tunnel.sh token-start
+scripts/manage-public-tunnel.sh status
+scripts/manage-public-tunnel.sh stop
+```
+
+Every mode runs the preflight first and exits non-zero without starting
+`cloudflared` if the agent predates token access, or is running with no tokens
+configured. A Quick Tunnel URL is only useful with `?token=` appended, which is
+what makes a preview link safe to send: the token, not the URL, decides what the
+holder may do.
+
+Quick Tunnels are development-only. The hostname is random, changes on restart, and
+Cloudflare gives no uptime guarantee, so use `token-start` with a named tunnel and
+a Cloudflare Access policy for anything a customer sees.
+
+
+
 A tunnel needs no inbound firewall rule, keeps the appliance's address private, and
 terminates TLS for you. Cloudflare Tunnel is free and needs no fixed IP:
 
