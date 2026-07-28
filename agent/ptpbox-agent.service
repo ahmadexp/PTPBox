@@ -14,6 +14,9 @@ Environment=PTPBOX_LOG_DIR=/var/log/ptpbox
 Environment=PTPBOX_TOPOLOGY=/etc/ptpbox/topology.json
 Environment=PTPBOX_PHC_STORE=/run/ptpbox/phc-samples.sqlite3
 Environment=PTPBOX_EXTERNAL_PHC_COLLECTOR=1
+Environment=PTPBOX_TOKENS_FILE=/etc/ptpbox/tokens.json
+# Keep 0.0.0.0 for the lab LAN. Publishing the UI beyond it needs tokens in
+# the file above; without them forwarded requests are refused.
 Environment=PTPBOX_BIND=0.0.0.0
 Environment=PTPBOX_PORT=8090
 Environment=PTPBOX_WEB_ROOT=/opt/ptpbox-web/static

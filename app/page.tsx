@@ -46,6 +46,8 @@ import {
 } from "./cascade-dynamics";
 import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
 import { SystemObservatory, type SystemPayload } from "./system-observatory";
+import { agentFetch, adoptTokenFromLocation, probeAccess, type AccessState }
+  from "./agent-access";
 import { ThermalObservatory, HoldoverCompensator, type ThermalPayload,
   type CompensatorPayload } from "./thermal-observatory";
 
@@ -3750,6 +3752,7 @@ export default function PTPBoxDashboard() {
   const [systemInfo, setSystemInfo] = useState<SystemPayload | null>(null);
   const [thermalInfo, setThermalInfo] = useState<ThermalPayload | null>(null);
   const [compensator, setCompensator] = useState<CompensatorPayload | null>(null);
+  const [access, setAccess] = useState<AccessState>({ role: null, needsToken: false });
   // Adapter temperatures come from the cheap capability probe rather than the
   // research snapshot, which is only polled on analysis pages. Readings are
   // merged into the previous map so one slow or partial probe cannot blank a
@@ -3840,7 +3843,7 @@ export default function PTPBoxDashboard() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 6000);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/capabilities`, { signal: controller.signal });
+      const response = await agentFetch(`${agentBaseUrl()}/api/capabilities`, { signal: controller.signal });
       if (!response.ok) throw new Error("capability probe unavailable");
       const payload = await response.json() as { temperature?: { nodes?: Record<string, number> } };
       const nodes = payload.temperature?.nodes;
@@ -3858,7 +3861,7 @@ export default function PTPBoxDashboard() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/thermal?history=1800`, { signal: controller.signal });
+      const response = await agentFetch(`${agentBaseUrl()}/api/thermal?history=1800`, { signal: controller.signal });
       if (!response.ok) throw new Error("thermal analysis unavailable");
       setThermalInfo(await response.json() as ThermalPayload);
     } catch {
@@ -3868,11 +3871,22 @@ export default function PTPBoxDashboard() {
     }
   }, []);
 
+  useEffect(() => {
+    // Runs before the polling effects so a shared link authenticates its very
+    // first request rather than showing a flash of "unavailable".
+    adoptTokenFromLocation();
+    let cancelled = false;
+    void probeAccess(agentBaseUrl()).then((state) => {
+      if (!cancelled) setAccess(state);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const refreshCompensator = useCallback(async () => {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/holdover/compensator?history=1800`, { signal: controller.signal });
+      const response = await agentFetch(`${agentBaseUrl()}/api/holdover/compensator?history=1800`, { signal: controller.signal });
       if (!response.ok) throw new Error("compensator evaluation unavailable");
       setCompensator(await response.json() as CompensatorPayload);
     } catch {
@@ -3884,7 +3898,7 @@ export default function PTPBoxDashboard() {
 
   const armCompensation = useCallback(async (node: string, enabled: boolean) => {
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/holdover/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/holdover/control`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "compensate", target: node, enabled }),
@@ -3907,7 +3921,7 @@ export default function PTPBoxDashboard() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 4000);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/system`, { signal: controller.signal });
+      const response = await agentFetch(`${agentBaseUrl()}/api/system`, { signal: controller.signal });
       if (!response.ok) throw new Error("system inventory unavailable");
       setSystemInfo(await response.json() as SystemPayload);
     } catch {
@@ -3921,7 +3935,7 @@ export default function PTPBoxDashboard() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 1800);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/interfaces`, { signal: controller.signal });
+      const response = await agentFetch(`${agentBaseUrl()}/api/interfaces`, { signal: controller.signal });
       if (!response.ok) throw new Error("interface inventory unavailable");
       const payload = await response.json() as { interfaces?: HostInterface[]; timestamp?: number };
       if (Array.isArray(payload.interfaces) && payload.interfaces.length) {
@@ -4107,7 +4121,7 @@ export default function PTPBoxDashboard() {
     const controller = new AbortController();
     const hydrateConfiguration = async () => {
       try {
-        const response = await fetch(`${agentBaseUrl()}/api/config`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/config`, { signal: controller.signal });
         if (!response.ok) throw new Error("configuration unavailable");
         const value = await response.json() as {
           profile?: string;
@@ -4218,7 +4232,7 @@ export default function PTPBoxDashboard() {
       // for an unreachable host; steady-state status returns in milliseconds.
       const timeout = window.setTimeout(() => controller.abort(), 12_000);
       try {
-        const response = await fetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/status`, { signal: controller.signal });
         if (!response.ok) throw new Error("agent unavailable");
         const status = await response.json() as AgentStatus;
         if (disposed) return;
@@ -4268,7 +4282,7 @@ export default function PTPBoxDashboard() {
       try {
         const query = new URLSearchParams({ history: String(seconds), limit: String(Math.min(4096, Math.ceil(seconds * 10))) });
         if (latestTelemetryAtRef.current) query.set("since", String(latestTelemetryAtRef.current));
-        const response = await fetch(`${agentBaseUrl()}/api/telemetry?${query}`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/telemetry?${query}`, { signal: controller.signal });
         if (!response.ok) throw new Error("telemetry unavailable");
         const payload = await response.json() as TelemetryPayload;
         if (disposed) return;
@@ -4324,7 +4338,7 @@ export default function PTPBoxDashboard() {
       try {
         const query = new URLSearchParams({ history: String(seconds) });
         if (latestPhcAtRef.current) query.set("since", String(latestPhcAtRef.current));
-        const response = await fetch(`${agentBaseUrl()}/api/phc?${query}`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/phc?${query}`, { signal: controller.signal });
         if (!response.ok) throw new Error("PHC telemetry unavailable");
         const payload = await response.json() as PhcTelemetryPayload;
         if (disposed) return;
@@ -4363,7 +4377,7 @@ export default function PTPBoxDashboard() {
       if (polling) return;
       polling = true;
       try {
-        const response = await fetch(`${agentBaseUrl()}/api/research?history=900`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/research?history=900`, { signal: controller.signal });
         if (!response.ok) throw new Error("research snapshot unavailable");
         const payload = await response.json() as ResearchPayload;
         if (!disposed) {
@@ -4394,7 +4408,7 @@ export default function PTPBoxDashboard() {
       if (polling) return;
       polling = true;
       try {
-        const response = await fetch(`${agentBaseUrl()}/api/holdover`, { signal: controller.signal });
+        const response = await agentFetch(`${agentBaseUrl()}/api/holdover`, { signal: controller.signal });
         if (!response.ok) throw new Error("holdover session unavailable");
         const payload = await response.json() as HoldoverPayload;
         if (!disposed) {
@@ -4679,7 +4693,7 @@ export default function PTPBoxDashboard() {
   const controlCascade = async (action: "start" | "stop") => {
     setControlBusy(true);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
@@ -4704,7 +4718,7 @@ export default function PTPBoxDashboard() {
   const controlServo = async (enabled: boolean) => {
     setServoBusy(true);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/servo/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/servo/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: servoTarget, enabled, type: servoType }),
@@ -4725,7 +4739,7 @@ export default function PTPBoxDashboard() {
     setHoldoverBusy(true);
     try {
       const selected = holdoverTarget === "all" ? nodes.slice(1).map((node) => node.id) : [holdoverTarget];
-      const response = await fetch(`${agentBaseUrl()}/api/holdover/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/holdover/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4823,7 +4837,7 @@ export default function PTPBoxDashboard() {
     setApplyBusy(true);
     if (agentStatus) {
       try {
-        const response = await fetch(`${agentBaseUrl()}/api/config/apply`, {
+        const response = await agentFetch(`${agentBaseUrl()}/api/config/apply`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -4833,7 +4847,7 @@ export default function PTPBoxDashboard() {
         setActiveSyncFrequencyHz(effectiveSyncFrequencyHz);
         setPhcSampleRateHz(effectiveSyncFrequencyHz);
         if (agentStatus.running) {
-          const restartResponse = await fetch(`${agentBaseUrl()}/api/control`, {
+          const restartResponse = await agentFetch(`${agentBaseUrl()}/api/control`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "restart" }),
@@ -4864,7 +4878,7 @@ export default function PTPBoxDashboard() {
         setToast("Experiment controls require the live appliance");
         return;
       }
-      const response = await fetch(`${agentBaseUrl()}${starting ? "/api/experiments/start" : "/api/experiments/stop"}`, {
+      const response = await agentFetch(`${agentBaseUrl()}${starting ? "/api/experiments/start" : "/api/experiments/stop"}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(starting
@@ -4899,7 +4913,7 @@ export default function PTPBoxDashboard() {
   const controlFault = async (enabled: boolean) => {
     setFaultBusy(true);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/fault/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/fault/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: faultTarget, enabled, delay_us: faultDelayUs, jitter_us: faultJitterUs, loss_pct: faultLossPct, duration_s: faultDurationS }),
@@ -4925,7 +4939,7 @@ export default function PTPBoxDashboard() {
   }) => {
     setIdentificationBusy(true);
     try {
-      const response = await fetch(`${agentBaseUrl()}/api/identification/control`, {
+      const response = await agentFetch(`${agentBaseUrl()}/api/identification/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -4991,7 +5005,7 @@ export default function PTPBoxDashboard() {
             <div className="host-row"><span>PTP ports</span><code>{agentStatus?.ptp_interfaces ?? 16}</code></div>
             <div className="host-row"><span>Cascade</span><code>{connection === "live" || agentStatus?.running ? "RUNNING" : "STOPPED"}</code></div>
           </div>
-          <div className="user-row"><div className="avatar">AB</div><div><strong>Lab operator</strong><small>Administrator</small></div><button type="button" className="user-row-action" onClick={() => setSection("System")} title="Open the System Observatory" aria-label="Open the System Observatory"><Settings2 size={16} /></button></div>
+          <div className="user-row"><div className="avatar">{access.role === "viewer" ? "RO" : "AB"}</div><div><strong>{access.role === "viewer" ? "Shared viewer" : "Lab operator"}</strong><small>{access.role === "viewer" ? "Read-only \u00b7 cannot reach a clock" : access.needsToken ? "Access token required" : "Administrator"}</small></div><button type="button" className="user-row-action" onClick={() => setSection("System")} title="Open the System Observatory" aria-label="Open the System Observatory"><Settings2 size={16} /></button></div>
         </div>
       </aside>
 

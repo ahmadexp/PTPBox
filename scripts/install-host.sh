@@ -48,6 +48,7 @@ install -m 0644 "$SOURCE_DIR/agent/ptpbox_system.py" "$INSTALL_DIR/agent/ptpbox_
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_thermal.py" "$INSTALL_DIR/agent/ptpbox_thermal.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_holdover_control.py" "$INSTALL_DIR/agent/ptpbox_holdover_control.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_thermal_servo.py" "$INSTALL_DIR/agent/ptpbox_thermal_servo.py"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox_access.py" "$INSTALL_DIR/agent/ptpbox_access.py"
 # Every module the agent imports must be installed beside it. Missing one turns
 # into a systemd crash loop that takes the whole web surface down, so check here
 # instead of after the restart.
@@ -69,6 +70,15 @@ install -m 0755 "$SOURCE_DIR/scripts/ptpbox_event_monitor.py" /usr/local/sbin/pt
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_pps_compare.py" /usr/local/sbin/ptpbox-pps-compare
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_holdover_compensator.py" /usr/local/sbin/ptpbox-holdover-compensator
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
+
+# Seed an empty token file. Absent tokens keep today's behaviour on the lab LAN
+# and refuse anything arriving through a proxy or tunnel, so the UI cannot be
+# published by accident. Group-readable only: it holds bearer secrets.
+if [[ ! -f "$ETC_DIR/tokens.json" ]]; then
+  printf '{\n  "operator": [],\n  "viewer": []\n}\n' > "$ETC_DIR/tokens.json"
+fi
+chown root:"$PTPBOX_GROUP_NAME" "$ETC_DIR/tokens.json"
+chmod 0640 "$ETC_DIR/tokens.json"
 sed -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
   "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" > /etc/tmpfiles.d/ptpbox.conf
 chmod 0644 /etc/tmpfiles.d/ptpbox.conf

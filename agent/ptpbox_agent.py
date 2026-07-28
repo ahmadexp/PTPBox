@@ -44,6 +44,7 @@ from ptpbox_phc_store import collector_quality, read_records  # noqa: E402
 import ptpbox_system  # noqa: E402
 import ptpbox_thermal  # noqa: E402
 import ptpbox_holdover_control  # noqa: E402
+import ptpbox_access  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -2642,6 +2643,8 @@ def album_image_path(identifier: str) -> Path | None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    access_role: str | None = None
+
     server_version = "PTPBoxAgent/2.7.0"
 
     def end_headers(self) -> None:
@@ -2709,10 +2712,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
 
+    def _authorize(self, query: dict[str, list[str]], mutating: bool) -> bool:
+        """Gate every request once, at the entry to each HTTP method.
+
+        Placed here rather than per route so that adding a route cannot
+        accidentally add an unauthenticated one.
+        """
+        decision = ptpbox_access.authorize(
+            self.client_address[0] if self.client_address else "",
+            self.headers, query, mutating,
+        )
+        self.access_role = decision.role
+        if decision.allowed:
+            return True
+        body = {"error": decision.reason, "role": decision.role,
+                "access": ptpbox_access.summary()}
+        if decision.status == 401:
+            # Not WWW-Authenticate: a browser basic-auth prompt cannot supply a
+            # bearer token, and the UI handles the token itself.
+            self.send_json(body, HTTPStatus.UNAUTHORIZED)
+        else:
+            self.send_json(body, HTTPStatus.FORBIDDEN)
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path
         query = parse_qs(parsed.query)
+        # The bundle and its assets stay readable so the UI can load and then ask
+        # for a token; every /api route below is gated.
+        if route.startswith("/api/") and not self._authorize(query, mutating=False):
+            return
         try:
             if route == "/api/status":
                 self.send_json(status())
@@ -2748,6 +2778,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(research_snapshot(max(30.0, min(7200.0, history_seconds))))
             elif route == "/api/capabilities":
                 self.send_json(hardware_capabilities(force=query.get("refresh") == ["1"]))
+            elif route == "/api/access":
+                self.send_json({
+                    "role": self.access_role,
+                    "may_control": self.access_role == ptpbox_access.OPERATOR,
+                    **ptpbox_access.summary(),
+                    "timestamp": time.time(),
+                })
             elif route == "/api/system":
                 self.send_json(system_snapshot())
             elif route == "/api/thermal":
@@ -2813,6 +2850,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._authorize(parse_qs(urlparse(self.path).query), mutating=True):
+            return
         route = urlparse(self.path).path
         try:
             body = self.read_json(ALBUM_REQUEST_MAX_BYTES if route == "/api/album" else 1_000_000)
@@ -3026,6 +3065,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self._authorize(parse_qs(urlparse(self.path).query), mutating=True):
+            return
         route = urlparse(self.path).path
         match = re.fullmatch(r"/api/album/(shot-\d{13}-[0-9a-f]{8})", route)
         if not match:
@@ -3041,7 +3082,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="PTPBox observation and control API")
     parser.add_argument("--bind", default=os.environ.get("PTPBOX_BIND", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PTPBOX_PORT", "8090")))
+    parser.add_argument("--generate-token", action="store_true",
+                        help="print one access token and exit")
     args = parser.parse_args()
+    if args.generate_token:
+        print(ptpbox_access.generate_token())
+        return
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     stop_sampler = threading.Event()
     sampler = None if EXTERNAL_PHC_COLLECTOR else threading.Thread(

@@ -546,6 +546,7 @@ and the network panel is explicitly read-only.</sub>
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |
 | **Servo & holdover control** | Select native PI/linear-regression/null-frequency discipline, classic Kalman, adaptive phase/frequency/drift Kalman, or quiet/dynamic/holdover IMM per clock; change discipline while read-only monitoring stays live. |
+| **Shared remote access** | Two roles behind a bearer token: `operator` for full control, `viewer` for observation with every mutating route refused. Fails closed for forwarded requests, so a tunnel cannot publish an unauthenticated appliance. |
 | **Thermal servo feedforward** | Fuse a die-temperature drift observation into the three-state or IMM servo by inverse variance, so a sharp drift estimate gives it no weight and a sparse one gives it more; requires a `supported` coefficient, and refuses aloud otherwise. |
 | **Compensated holdover** | Fit frozen, ageing, temperature, and joint models on the locked window, rank them by forecasting rolling origins, and arm one only if it beats frozen holdover by 15 % across 80 % of folds; bounded in magnitude, slew rate, and extrapolation horizon, and off by default. |
 | **PPS & `ts2phc` control** | Select a PHC or external PPS source, configure pins and `ts2phc`, or compare two or more PHCs against one physical PPS edge in strictly measurement-only mode. |
@@ -585,6 +586,97 @@ and the network panel is explicitly read-only.</sub>
 The inventory above is read from the host: sixteen PTP-capable ports, fourteen
 active 100G timing links, PHC device providers, PCI functions, drivers, and
 hardware timestamp capability.
+
+## Share the Observatory outside the lab
+
+The UI and the control API answer on the same port, so publishing the UI publishes
+the ability to stop the cascade, switch servos, release holdover and inject faults.
+Access therefore has two roles.
+
+| Role | Can do | Intended for |
+|---|---|---|
+| `operator` | Everything the local UI can do | You and HJ |
+| `viewer` | Observe only; every mutating route returns 403 | A customer evaluating the box |
+
+### 1. Mint tokens
+
+```bash
+sudo python3 /opt/ptpbox-web/agent/ptpbox_agent.py --generate-token   # once per person
+sudoedit /etc/ptpbox/tokens.json
+```
+
+```json
+{
+  "operator": ["<hj-token>"],
+  "viewer": ["<customer-token>"]
+}
+```
+
+```bash
+sudo systemctl restart ptpbox-agent
+```
+
+The file is `root:ptpbox` mode 0640 because it holds bearer secrets. Give each
+person their own token so one can be withdrawn without disturbing the others.
+
+### 2. Publish through a tunnel, not a forwarded port
+
+A tunnel needs no inbound firewall rule, keeps the appliance's address private, and
+terminates TLS for you. Cloudflare Tunnel is free and needs no fixed IP:
+
+```bash
+sudo apt install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create ptpbox
+cloudflared tunnel route dns ptpbox ptpbox.example.com
+cloudflared tunnel run --url http://127.0.0.1:8090 ptpbox
+```
+
+Then share one link, and the UI moves the token out of the address bar into session
+storage on arrival:
+
+```
+https://ptpbox.example.com/?token=<customer-token>
+```
+
+For HJ specifically, [Tailscale](https://tailscale.com) is usually nicer than a
+public hostname: `sudo tailscale up` on the appliance puts it on a private mesh
+with no public exposure at all. He still needs an operator token, because a VPN
+address is not evidence of who is calling.
+
+### What stops an accident
+
+Absent tokens, the agent serves directly connected private-network clients exactly
+as before, and refuses everything else. That keeps the existing LAN workflow intact
+while making public exposure a decision rather than a side effect.
+
+The subtle part is that a tunnel daemon runs *on the appliance*, so a request that
+began on the public internet arrives from `127.0.0.1`. Trusting loopback would hand
+the control surface to the internet the moment a tunnel came up. Any request
+carrying proxy or tunnel headers (`X-Forwarded-For`, `CF-Connecting-IP`,
+`Ngrok-Trace-Id` and friends) is therefore treated as remote whatever its socket
+address says, and must present a token:
+
+```
+$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/api/access
+200
+$ curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 203.0.113.9' \
+    http://127.0.0.1:8090/api/access
+401
+```
+
+Trusted ranges are written out (loopback, RFC1918, link-local) rather than taken
+from Python's `is_private`, which also covers carrier-grade NAT: reaching the
+appliance over a VPN should still present a token. Tokens are compared with
+`secrets.compare_digest` and are never logged.
+
+### What this is not
+
+There is no TLS on the agent itself, no rate limiting, and no account system. The
+tunnel provides transport security, and the token is a bearer secret: anyone holding
+it has that role, so treat a viewer link like a password and rotate it after an
+evaluation. For anything beyond a shared demo, put an authenticating proxy in front
+(Cloudflare Access, or an SSO reverse proxy) and keep the tokens as a second factor.
 
 ## Two ways to run it
 

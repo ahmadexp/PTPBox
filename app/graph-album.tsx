@@ -3,6 +3,8 @@
 /* eslint-disable @next/next/no-img-element -- album sources are runtime host URLs or IndexedDB data URLs */
 
 import { Camera, Download, HardDrive, Image as ImageIcon, Images, Trash2, X } from "lucide-react";
+
+import { agentFetch } from "./agent-access";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { toPng } from "html-to-image";
@@ -123,7 +125,7 @@ async function saveCaptureToAlbum(
   payload: Omit<GraphAlbumItem, "id" | "created_at" | "storage" | "data_url" | "image_url"> & { data_url: string },
 ) {
   try {
-    const response = await fetch(`${agentBase}/api/album`, {
+    const response = await agentFetch(`${agentBase}/api/album`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -254,7 +256,7 @@ export function GraphAlbumView({ agentBase, revision }: { agentBase: string; rev
   const refresh = useCallback(async () => {
     setLoading(true);
     const [remote, local] = await Promise.all([
-      fetch(`${agentBase}/api/album`, { signal: AbortSignal.timeout(2_500) })
+      agentFetch(`${agentBase}/api/album`, { signal: AbortSignal.timeout(2_500) })
         .then(async (response) => response.ok ? (await response.json() as { items?: GraphAlbumItem[] }).items ?? [] : [])
         .catch(() => [] as GraphAlbumItem[]),
       localAlbumItems().catch(() => []),
@@ -287,7 +289,7 @@ export function GraphAlbumView({ agentBase, revision }: { agentBase: string; rev
     setError("");
     try {
       if (item.storage === "ptpbox-host") {
-        const response = await fetch(`${agentBase}/api/album/${item.id}`, { method: "DELETE", signal: AbortSignal.timeout(5_000) });
+        const response = await agentFetch(`${agentBase}/api/album/${item.id}`, { method: "DELETE", signal: AbortSignal.timeout(5_000) });
         if (!response.ok) throw new Error("The PTPBox host could not delete this capture");
       } else {
         await deleteLocalAlbumItem(item.id);
