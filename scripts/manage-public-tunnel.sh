@@ -37,6 +37,30 @@ note() { printf '%s\n' "$*"; }
 
 usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
+# Probes with python3 rather than curl. The agent is written in python3 so the
+# interpreter is always present, whereas a minimal appliance image may ship no
+# curl at all, which silently turned every probe into "cannot reach".
+probe_access() {
+  python3 - "$PROBE_URL" <<'PYPROBE'
+import json, sys, urllib.error, urllib.request
+url = sys.argv[1].rstrip("/") + "/api/access"
+try:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        status, body = response.status, response.read(4096).decode("utf-8", "replace")
+except urllib.error.HTTPError as error:
+    status, body = error.code, ""
+except Exception:
+    print("000 unreachable"); raise SystemExit
+if status != 200:
+    print(f"{status} gated"); raise SystemExit
+try:
+    payload = json.loads(body)
+except ValueError:
+    print("200 notjson"); raise SystemExit
+print("200 " + ("protected" if payload.get("tokens_configured") else "open"))
+PYPROBE
+}
+
 require_cloudflared() {
   [[ -x "$CLOUDFLARED" ]] || die "cloudflared is not installed. Run: sudo $0 install"
 }
@@ -44,59 +68,38 @@ require_cloudflared() {
 # --- the guard -----------------------------------------------------------------
 # Refuses to publish an appliance that cannot tell one caller from another.
 preflight() {
-  local response status body
+  local result status kind
+  result="$(probe_access)"
+  status="${result%% *}"
+  kind="${result##* }"
 
-  # Capture status and body together. -f is deliberately not used: a 401 is the
-  # single most informative answer here, because it proves the gate is live and
-  # demanding a token. Treating it as a failure would refuse exactly the
-  # configuration we want.
-  response="$(curl -sS -m 10 -w $'\n%{http_code}' "$PROBE_URL/api/access" 2>/dev/null || true)"
-  status="${response##*$'\n'}"
-  body="${response%$'\n'*}"
-
-  case "$status" in
-    401|403)
+  case "$status/$kind" in
+    401/gated|403/gated)
       note "preflight: agent demands a token (HTTP $status), access control is live"
-      return 0
       ;;
-    200) : ;;
-    "")
-      die "Cannot reach $PROBE_URL/api/access. Is the agent running?"
+    200/protected)
+      note "preflight: agent reports access tokens configured"
       ;;
-    *)
-      die "$PROBE_URL/api/access returned HTTP $status; refusing to publish."
-      ;;
-  esac
-
-  # A 200 from an old agent is the SPA fallback, which is HTML.
-  case "$body" in
-    '{'*) : ;;
-    *) die "$PROBE_URL/api/access returned HTTP 200 but not JSON, so this agent
-predates token access and has none. Deploy the current agent first:
-  cd ~/ptpbox-main && git pull && sudo PTPBOX_USER=user bash scripts/install-host.sh" ;;
-  esac
-
-  case "$(printf '%s' "$body" | python3 -c '
-import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("unreadable"); raise SystemExit
-print("protected" if d.get("tokens_configured") else "open")
-' 2>/dev/null || echo unreadable)" in
-    protected) note "preflight: agent reports access tokens configured" ;;
-    open) die "The agent is running but NO access tokens are configured, so every
+    200/open)
+      die "The agent is running but NO access tokens are configured, so every
 caller would be anonymous and could stop the cascade. Add tokens first:
 
   sudo python3 /opt/ptpbox-web/agent/ptpbox_agent.py --generate-token   # per person
   sudoedit /etc/ptpbox/tokens.json      # {\"operator\":[\"...\"],\"viewer\":[\"...\"]}
   sudo systemctl restart ptpbox-agent" ;;
-    *) die "Could not interpret $PROBE_URL/api/access; refusing to publish." ;;
+    200/notjson)
+      die "$PROBE_URL/api/access answered 200 but not JSON, so this agent predates
+token access and has none. Deploy the current agent first:
+  cd ~/ptpbox-main && sudo PTPBOX_USER=user bash scripts/install-host.sh" ;;
+    000/*)
+      die "Cannot reach $PROBE_URL/api/access. Is the agent running?" ;;
+    *)
+      die "$PROBE_URL/api/access returned HTTP $status; refusing to publish." ;;
   esac
 
   if [[ "$PROBE_URL" == http://127.0.0.1:* ]]; then
-    note "preflight: reminder, set PTPBOX_BIND=127.0.0.1 in the agent unit so the"
-    note "           tunnel is the only route in, then restart ptpbox-agent"
+    note "preflight: reminder, bind the agent to 127.0.0.1 so the tunnel is the"
+    note "           only route in"
   fi
 }
 
@@ -182,13 +185,14 @@ case "${1:-}" in
     else
       note "cloudflared is not running"
     fi
-    code="$(curl -sS -m 10 -o /tmp/.ptpbox-access -w '%{http_code}' "$PROBE_URL/api/access" 2>/dev/null || true)"
-    case "$code" in
-      401|403) note "agent access: protected (HTTP $code)" ;;
-      200) python3 -c 'import json,sys; d=json.load(open("/tmp/.ptpbox-access")); print("agent access:", "protected" if d.get("tokens_configured") else "OPEN")' 2>/dev/null || note "agent access: OPEN (no access route)" ;;
-      *) note "agent access: unknown (HTTP ${code:-none})" ;;
+    result="$(probe_access)"
+    case "$result" in
+      401*|403*) note "agent access: protected (${result%% *})" ;;
+      "200 protected") note "agent access: protected (tokens configured)" ;;
+      "200 open") note "agent access: OPEN - anyone reaching it can control the cascade" ;;
+      "200 notjson") note "agent access: OPEN - agent predates token access" ;;
+      *) note "agent access: unreachable" ;;
     esac
-    rm -f /tmp/.ptpbox-access
     ;;
 
   stop)

@@ -788,8 +788,14 @@ function agentBaseUrl() {
   if (typeof window === "undefined") return "";
   const override = new URLSearchParams(window.location.search).get("agent");
   if (override?.startsWith("http://") || override?.startsWith("https://")) return override.replace(/\/$/, "");
-  const hostname = override || (["localhost", "127.0.0.1"].includes(window.location.hostname) ? "192.168.1.60" : window.location.hostname);
-  return `http://${hostname}:8090`;
+  if (override) return `http://${override}:8090`;
+  // Served from a dev server on another port, so point at the appliance.
+  if (["localhost", "127.0.0.1"].includes(window.location.hostname)) return "http://192.168.1.60:8090";
+  // Otherwise the agent served this bundle, so it is the same origin. Rebuilding
+  // the URL as http://host:8090 breaks every HTTPS deployment: behind a tunnel or
+  // reverse proxy it is both the wrong scheme, which the browser blocks as mixed
+  // content, and the wrong port.
+  return "";
 }
 
 const TRACE_COLORS = ["#f3f8f8", "#71d9e3", "#4de1c1", "#9ed873", "#f2c96e", "#ee9070", "#d7a4f4", "#ff6f91"];
@@ -3753,6 +3759,7 @@ export default function PTPBoxDashboard() {
   const [thermalInfo, setThermalInfo] = useState<ThermalPayload | null>(null);
   const [compensator, setCompensator] = useState<CompensatorPayload | null>(null);
   const [access, setAccess] = useState<AccessState>({ role: null, needsToken: false });
+  const readOnly = access.role === "viewer";
   // Adapter temperatures come from the cheap capability probe rather than the
   // research snapshot, which is only polled on analysis pages. Readings are
   // merged into the previous map so one slow or partial probe cannot blank a
@@ -5047,7 +5054,7 @@ export default function PTPBoxDashboard() {
                 </section>
               )}
             </div>
-            <button className="primary-action" type="button" onClick={() => { setNotificationsOpen(false); setApplyOpen(true); }}><SlidersHorizontal size={15} /> Apply settings</button>
+            <button className="primary-action" type="button" disabled={readOnly} title={readOnly ? "Read-only access cannot change the configuration" : undefined} onClick={() => { setNotificationsOpen(false); setApplyOpen(true); }}><SlidersHorizontal size={15} /> Apply settings</button>
           </div>
         </header>
 
@@ -5074,7 +5081,8 @@ export default function PTPBoxDashboard() {
               <button
                 type="button"
                 className={`quiet-button cascade-control ${agentStatus.running ? "running" : ""}`}
-                disabled={controlBusy}
+                disabled={controlBusy || readOnly}
+                title={readOnly ? "Read-only access cannot start or stop the cascade" : undefined}
                 onClick={() => void controlCascade(agentStatus.running ? "stop" : "start")}
               >
                 {agentStatus.running ? <Square size={11} fill="currentColor" /> : <Play size={12} />}
