@@ -32,6 +32,11 @@ IDENTIFICATION_STATE_FILE = STATE_DIR / "identification-state.json"
 KALMAN_HELPER = Path(os.environ.get("PTPBOX_KALMAN_HELPER", "/usr/local/sbin/ptpbox-kalman-servo"))
 EVENT_MONITOR_HELPER = Path(os.environ.get("PTPBOX_EVENT_MONITOR_HELPER", "/usr/local/sbin/ptpbox-event-monitor"))
 PPS_COMPARE_HELPER = Path(os.environ.get("PTPBOX_PPS_COMPARE_HELPER", "/usr/local/sbin/ptpbox-pps-compare"))
+HOLDOVER_COMPENSATOR_HELPER = Path(os.environ.get(
+    "PTPBOX_HOLDOVER_COMPENSATOR_HELPER", "/usr/local/sbin/ptpbox-holdover-compensator"))
+COMPENSATE_REQUEST_FILE = CONFIG_FILE.with_name("compensate-request.json")
+HWMON_ROOT = Path("/sys/class/hwmon")
+COMPENSATOR_KINDS = {"frozen", "drift", "temperature", "temperature-drift"}
 PATH_EVENT_FILE = STATE_DIR / "path-events.jsonl"
 SUPPORTED_SERVOS = {"pi", "linreg", "nullf", "kalman", "adaptive-kalman", "imm"}
 LINUXPTP_NATIVE_SERVOS = {"pi", "linreg", "nullf"}
@@ -1192,6 +1197,136 @@ def identification_apply() -> dict[str, Any]:
     return {"ok": True, "identification": state}
 
 
+def _validated_temperature_file(raw: Any) -> Path:
+    """Confine an agent-proposed sensor path to real hwmon temperature inputs.
+
+    The agent discovers which hwmon input belongs to which adapter, so the path
+    arrives across the privilege boundary. Root must therefore treat it as
+    untrusted: anything outside /sys/class/hwmon, or not a tempN_input, is
+    rejected rather than opened.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("compensation request needs a temperature file")
+    candidate = Path(raw).resolve()
+    if not re.fullmatch(r"temp\d+_input", candidate.name):
+        raise ValueError(f"not a temperature input: {candidate}")
+    holder = candidate.parent
+    if not re.fullmatch(r"hwmon\d+", holder.name):
+        raise ValueError(f"not inside an hwmon device: {candidate}")
+    # A prefix test would be wrong: the agent discovers sensors through
+    # /sys/bus/pci/devices/<bus>/hwmon, which resolves into /sys/devices and
+    # never under /sys/class/hwmon. Prove instead that this really is the hwmon
+    # device the kernel registered under that name.
+    try:
+        registered = (HWMON_ROOT / holder.name).resolve()
+    except OSError as error:
+        raise ValueError(f"cannot resolve hwmon device for {candidate}") from error
+    if registered != holder:
+        raise ValueError(f"{candidate} is not the registered {holder.name}")
+    if not candidate.exists():
+        raise ValueError(f"temperature file is absent: {candidate}")
+    return candidate
+
+
+def _validated_model(raw: Any) -> dict[str, Any]:
+    """Bound every coefficient before a root process acts on it."""
+    if not isinstance(raw, dict):
+        raise ValueError("compensation request needs a model")
+    kind = raw.get("kind")
+    if kind not in COMPENSATOR_KINDS:
+        raise ValueError(f"unsupported compensation model: {kind!r}")
+    limits = {
+        "intercept_ppb": 5_000.0,
+        "tempco_ppb_per_c": 5_000.0,
+        "drift_ppb_per_s": 100.0,
+        "reference_temperature_c": 200.0,
+    }
+    model: dict[str, Any] = {"kind": kind}
+    for name, limit in limits.items():
+        value = float(raw.get(name, 0.0))
+        if not math.isfinite(value) or abs(value) > limit:
+            raise ValueError(f"{name} is out of range: {value}")
+        model[name] = value
+    span = raw.get("temperature_range_c") or [0.0, 0.0]
+    low, high = float(span[0]), float(span[1])
+    if not (math.isfinite(low) and math.isfinite(high)) or high < low or abs(high) > 200.0:
+        raise ValueError("temperature_range_c is not a usable interval")
+    model["temperature_range_c"] = [low, high]
+    return model
+
+
+def compensate_apply() -> dict[str, Any]:
+    """Arm or disarm temperature-compensated holdover on one released clock.
+
+    This never releases a clock itself. It only supplies a frequency forecast to
+    a clock the operator already put into holdover, so it cannot start a holdover
+    run as a side effect.
+    """
+    require_root()
+    request = load_json(COMPENSATE_REQUEST_FILE)
+    if not isinstance(request, dict):
+        raise ValueError("missing compensation request")
+    target = request.get("target")
+    enabled = request.get("enabled")
+    topo = topology()
+    receivers = {node["name"] for node in topo["nodes"][1:]}
+    if target not in receivers or not isinstance(enabled, bool):
+        raise ValueError("compensation target must be a downstream clock")
+
+    processes = load_json(PIDS_FILE, [])
+    if not isinstance(processes, list):
+        processes = []
+    label = f"{target}-HOLDOVER-COMP"
+    remaining = [item for item in processes if item.get("label") != label]
+    for item in processes:
+        if item.get("label") == label:
+            stop_process(item)
+
+    if not enabled:
+        PIDS_FILE.write_text(json.dumps(remaining, indent=2) + "\n", encoding="utf-8")
+        return {"ok": True, "target": target, "enabled": False,
+                "detail": "compensation disarmed; the clock stays in frozen holdover"}
+
+    if not HOLDOVER_COMPENSATOR_HELPER.exists():
+        raise RuntimeError(f"compensator helper is not installed: {HOLDOVER_COMPENSATOR_HELPER}")
+    control_node = servo_state(topo)["nodes"].get(str(target), {})
+    if control_node.get("enabled") is not False:
+        raise RuntimeError(
+            "temperature-compensated holdover requires the clock to be released first")
+
+    phc = request.get("phc")
+    if not isinstance(phc, str) or not re.fullmatch(r"ptp\d+", phc):
+        raise ValueError(f"compensation needs a mapped measurement PHC, got {phc!r}")
+    device = Path(f"/dev/{phc}")
+    if not device.exists():
+        raise ValueError(f"PHC device is unavailable for {target}: {device}")
+
+    temperature_file = _validated_temperature_file(request.get("temperature_file"))
+    model = _validated_model(request.get("model"))
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    model_path = STATE_DIR / f"holdover-model-{str(target).lower()}.json"
+    model_path.write_text(json.dumps({"model": model}, indent=2) + "\n", encoding="utf-8")
+    model_path.chmod(0o644)
+    state_path = STATE_DIR / f"holdover-comp-{str(target).lower()}.json"
+    state_path.unlink(missing_ok=True)
+
+    args = [
+        str(HOLDOVER_COMPENSATOR_HELPER),
+        "--node", str(target),
+        "--phc", str(device),
+        "--model", str(model_path),
+        "--state", str(state_path),
+        "--temperature-file", str(temperature_file),
+    ]
+    spawn(label, args, remaining)
+    remaining[-1].update({"kind": "holdover-compensator", "compensating": target,
+                          "phc": phc, "state": str(state_path)})
+    PIDS_FILE.write_text(json.dumps(remaining, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "target": target, "enabled": True, "model": model,
+            "state": str(state_path)}
+
+
 def discover() -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for interface in sorted(Path("/sys/class/net").iterdir(), key=lambda item: item.name):
@@ -1209,7 +1344,7 @@ def discover() -> dict[str, Any]:
 def main() -> None:
     enter_namespace_mount_context()
     parser = argparse.ArgumentParser(description="Manage the PTPBox namespace cascade")
-    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "fault", "identify", "teardown"])
+    parser.add_argument("action", choices=["discover", "setup", "start", "stop", "restart", "status", "servo", "fault", "identify", "compensate", "teardown"])
     args = parser.parse_args()
     try:
         if args.action == "discover":
@@ -1231,6 +1366,8 @@ def main() -> None:
             result = fault_apply()
         elif args.action == "identify":
             result = identification_apply()
+        elif args.action == "compensate":
+            result = compensate_apply()
         else:
             result = teardown()
         print(json.dumps(result))

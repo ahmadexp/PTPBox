@@ -43,6 +43,7 @@ from ptpbox_research import ExperimentStore, RollingResearchEngine, path_regime_
 from ptpbox_phc_store import collector_quality, read_records  # noqa: E402
 import ptpbox_system  # noqa: E402
 import ptpbox_thermal  # noqa: E402
+import ptpbox_holdover_control  # noqa: E402
 
 
 ROOT = Path(os.environ.get("PTPBOX_ROOT", Path.home() / "PTPBox"))
@@ -64,6 +65,7 @@ PATH_EVENT_FILE = Path(os.environ.get("PTPBOX_PATH_EVENTS", "/run/ptpbox/path-ev
 FAULT_REQUEST_FILE = STATE_DIR / "fault-request.json"
 FAULT_STATE_FILE = Path(os.environ.get("PTPBOX_FAULT_STATE", "/run/ptpbox/fault-state.json"))
 IDENTIFICATION_REQUEST_FILE = STATE_DIR / "identification-request.json"
+COMPENSATE_REQUEST_FILE = STATE_DIR / "compensate-request.json"
 IDENTIFICATION_STATE_FILE = Path(os.environ.get("PTPBOX_IDENTIFICATION_STATE", "/run/ptpbox/identification-state.json"))
 ALBUM_DIR = Path(os.environ.get("PTPBOX_ALBUM_DIR", STATE_DIR / "album"))
 ALLOW_ORIGIN = os.environ.get("PTPBOX_ALLOW_ORIGIN", "*")
@@ -406,6 +408,38 @@ def experiment_store() -> ExperimentStore:
         return store
 
 
+def node_temperature_sensors(node_item: dict[str, Any]) -> list[Path]:
+    """hwmon temperature inputs belonging to one stage's adapter."""
+    candidates: list[Path] = []
+    for direction in ("ingress_interface", "egress_interface"):
+        details = node_item.get(direction)
+        bus = details.get("bus") if isinstance(details, dict) else None
+        if isinstance(bus, str) and bus:
+            candidates.extend(Path("/sys/bus/pci/devices", bus, "hwmon").glob("hwmon*/temp*_input"))
+    return sorted(candidates)
+
+
+def node_temperature_sensor(node: str) -> str | None:
+    """One stable sensor path for a stage, for the holdover compensator to poll.
+
+    The compensator follows a single input rather than a median across the
+    adapter's sensors: the model was fitted against whatever the collector
+    reported, and switching sensors mid-holdover would move the regressor
+    underneath the model.
+    """
+    for item in phc_inventory():
+        if str(item.get("id")) != str(node):
+            continue
+        for path in node_temperature_sensors(item):
+            try:
+                reading = float(path.read_text(encoding="utf-8").strip()) / 1000.0
+            except (OSError, ValueError):
+                continue
+            if -40.0 <= reading <= 150.0:
+                return str(path)
+    return None
+
+
 def clock_temperatures(force: bool = False) -> dict[str, float]:
     """Read NIC-adjacent hwmon sensors and map them to topology clocks."""
     global _TEMPERATURE_CACHE
@@ -414,12 +448,7 @@ def clock_temperatures(force: bool = False) -> dict[str, float]:
         return dict(_TEMPERATURE_CACHE[1])
     values: dict[str, float] = {}
     for item in phc_inventory():
-        candidates: list[Path] = []
-        for direction in ("ingress_interface", "egress_interface"):
-            details = item.get(direction)
-            bus = details.get("bus") if isinstance(details, dict) else None
-            if isinstance(bus, str) and bus:
-                candidates.extend(Path("/sys/bus/pci/devices", bus, "hwmon").glob("hwmon*/temp*_input"))
+        candidates = node_temperature_sensors(item)
         readings: list[float] = []
         for path in candidates:
             try:
@@ -1229,7 +1258,7 @@ def parse_log_measurements(path: Path, limit: int = TELEMETRY_MAX_SAMPLES) -> li
     return parsed
 
 
-def thermal_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
+def paired_temperature_frequency(history_seconds: float = 1800.0) -> tuple[dict[str, list[tuple[float, float, float]]], dict[str, Any]]:
     """Pair die temperature with the servo's applied frequency correction.
 
     Temperature comes from the collector's hardware-monitor readings and the
@@ -1282,17 +1311,122 @@ def thermal_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
         if rows:
             paired[node] = rows
 
-    result = ptpbox_thermal.thermal_analysis(paired)
-    result["window_s"] = window
-    result["pairing"] = {
+    return paired, {
         "tolerance_s": tolerance,
         "temperature_source": "collector hardware-monitor readings",
         "frequency_source": "LinuxPTP applied frequency correction",
         "method": "nearest reading within tolerance; unmatched corrections are dropped, never interpolated",
         "paired_nodes": len(paired),
+        "window_s": window,
     }
+
+
+def thermal_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
+    """Evidence-gated temperature-coefficient analysis over the locked window."""
+    paired, pairing = paired_temperature_frequency(history_seconds)
+    result = ptpbox_thermal.thermal_analysis(paired)
+    result["window_s"] = pairing["window_s"]
+    result["pairing"] = pairing
     result["timestamp"] = time.time()
     return result
+
+
+def arm_holdover_compensation(body: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+    """Arm or disarm the compensator on one already-released clock.
+
+    Arming is refused unless the selector reached ``ready`` for that clock, so a
+    coefficient that failed held-out validation cannot be forced onto a clock
+    from the HTTP surface. Disarming is always allowed: it returns the clock to
+    ordinary frozen holdover.
+    """
+    target = str(body.get("target") or "")
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return {"error": "enabled must be a boolean"}, HTTPStatus.BAD_REQUEST
+
+    request: dict[str, Any] = {"target": target, "enabled": enabled}
+    if enabled:
+        snapshot = holdover_controller_snapshot()
+        node = (snapshot.get("nodes") or {}).get(target)
+        if node is None:
+            return {"error": f"no compensation evaluation for {target}"}, HTTPStatus.UNPROCESSABLE_ENTITY
+        if node.get("status") != "ready":
+            return (
+                {"error": "compensation has not earned arming for this clock",
+                 "reason": node.get("reason"), "evaluation": node},
+                HTTPStatus.CONFLICT,
+            )
+        if not node.get("released"):
+            return (
+                {"error": f"{target} must be released into holdover before compensating"},
+                HTTPStatus.CONFLICT,
+            )
+        sensor = node.get("sensor")
+        if not sensor:
+            return ({"error": f"no temperature sensor resolved for {target}"},
+                    HTTPStatus.UNPROCESSABLE_ENTITY)
+        phc = None
+        for item in phc_inventory():
+            if str(item.get("id")) == target:
+                phc = item.get("measurement_phc")
+                break
+        if not phc:
+            return ({"error": f"no measurement PHC mapped for {target}"},
+                    HTTPStatus.UNPROCESSABLE_ENTITY)
+        request.update({"model": node.get("model"), "sensor_reason": node.get("reason"),
+                        "temperature_file": sensor, "phc": phc})
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    pending = COMPENSATE_REQUEST_FILE.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    pending.replace(COMPENSATE_REQUEST_FILE)
+    code, response = control("compensate")
+    if code == HTTPStatus.OK:
+        experiment_store().event(
+            "holdover",
+            "warning" if enabled else "info",
+            f"{'Armed' if enabled else 'Disarmed'} temperature-compensated holdover on {target}",
+            {"target": target, "enabled": enabled, "model": request.get("model")},
+        )
+    return response, code
+
+
+def holdover_controller_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
+    """Decide, per clock, whether a compensated holdover model has earned arming.
+
+    The locked window doubles as training data because the applied correction is
+    the negated oscillator error. Each candidate is scored by forecasting a
+    held-out tail, so a coefficient is armed only when it demonstrably beats
+    frozen holdover rather than merely fitting.
+    """
+    paired, pairing = paired_temperature_frequency(history_seconds)
+    servo = load_servo_state()
+    nodes: dict[str, Any] = {}
+    for node, rows in sorted(paired.items()):
+        evaluation = ptpbox_holdover_control.evaluate(
+            [(stamp, temperature, correction) for stamp, temperature, correction in rows]
+        ).as_dict()
+        control_node = (servo.get("nodes") or {}).get(node) or {}
+        evaluation["released"] = control_node.get("enabled") is False
+        evaluation["sensor"] = node_temperature_sensor(node)
+        evaluation["armable"] = bool(
+            evaluation["status"] == "ready"
+            and evaluation["released"]
+            and evaluation["sensor"]
+        )
+        nodes[node] = evaluation
+    ready = [name for name, item in nodes.items() if item["status"] == "ready"]
+    return {
+        "nodes": nodes,
+        "pairing": pairing,
+        "ready_nodes": ready,
+        "default_state": "frozen holdover; compensation is opt-in per clock",
+        "summary": (
+            f"{len(ready)} of {len(nodes)} clocks have a model that beat frozen holdover "
+            f"by at least {ptpbox_holdover_control.MIN_BENEFIT_PCT:.0f}% on held-out forecast"
+        ),
+        "timestamp": time.time(),
+    }
 
 
 def holdover_compensation_snapshot(history_seconds: float = 1800.0) -> dict[str, Any]:
@@ -2316,7 +2450,7 @@ def status() -> dict[str, Any]:
 
 
 def control(action: str) -> tuple[int, dict[str, Any]]:
-    if action not in {"start", "stop", "restart", "status", "servo", "fault", "identify"}:
+    if action not in {"start", "stop", "restart", "status", "servo", "fault", "identify", "compensate"}:
         return HTTPStatus.BAD_REQUEST, {"error": "unsupported control action"}
     if not CONTROL.exists():
         return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "privileged control helper is not installed", "observer_only": True}
@@ -2630,6 +2764,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
                     return
                 self.send_json(holdover_compensation_snapshot(window))
+            elif route == "/api/holdover/compensator":
+                try:
+                    window = float(query.get("history", ["1800"])[0])
+                except (TypeError, ValueError):
+                    self.send_json({"error": "history must be numeric"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(holdover_controller_snapshot(window))
             elif route == "/api/path-events":
                 try:
                     limit = int(query.get("limit", ["128"])[0])
@@ -2735,8 +2876,13 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "abort":
                     response = resume_holdover_session(aborted=True)
                     code = HTTPStatus.OK
+                elif action == "compensate":
+                    response, code = arm_holdover_compensation(body)
                 else:
-                    self.send_json({"error": "action must be start, release, resume, or abort"}, HTTPStatus.BAD_REQUEST)
+                    self.send_json(
+                        {"error": "action must be start, release, resume, abort, or compensate"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
                     return
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)

@@ -463,3 +463,106 @@ export function ThermalObservatory({ thermal }: { thermal: ThermalPayload | null
     </>
   );
 }
+
+export type CompensatorPayload = {
+  nodes?: Record<string, {
+    status?: string;
+    armed_kind?: string | null;
+    reason?: string;
+    frozen_rms_ppb?: number | null;
+    best_rms_ppb?: number | null;
+    benefit_pct?: number | null;
+    released?: boolean;
+    armable?: boolean;
+    sensor?: string | null;
+    candidates?: Array<{ kind?: string; holdout_rms_ppb?: number; benefit_pct?: number | null; implied_phase_ns?: number }>;
+    diagnostics?: Record<string, number | boolean | null>;
+    interpretation?: string;
+  }>;
+  ready_nodes?: string[];
+  summary?: string;
+  default_state?: string;
+};
+
+const STATUS_TONE: Record<string, string> = {
+  ready: "supported",
+  refused: "insufficient-evidence",
+  learning: "candidate",
+  unavailable: "candidate",
+};
+
+export function HoldoverCompensator({
+  compensator,
+  onArm,
+}: {
+  compensator: CompensatorPayload | null;
+  onArm?: (node: string, enabled: boolean) => void;
+}) {
+  const nodes = Object.entries(compensator?.nodes ?? {});
+  return (
+    <section className="instrument-panel">
+      <div className="panel-heading">
+        <div>
+          <span className="section-kicker">COMPENSATED HOLDOVER</span>
+          <h2><Thermometer size={15} /> Has a model earned the right to steer?</h2>
+        </div>
+        <span className={`quality-badge ${compensator?.ready_nodes?.length ? "" : "warning"}`}>
+          {compensator?.ready_nodes?.length ?? 0}/{nodes.length} ARMABLE
+        </span>
+      </div>
+      {nodes.length ? (
+        <>
+          <table className="sys-table thm-table">
+            <thead>
+              <tr>
+                <th>Clock</th><th>Frozen RMS</th><th>Best RMS</th><th>Benefit</th>
+                <th>Best candidate</th><th>Released</th><th>Verdict</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {nodes.map(([name, item]) => (
+                <tr key={name}>
+                  <td><strong>{name}</strong></td>
+                  <td>{num(item.frozen_rms_ppb)} ppb</td>
+                  <td>{num(item.best_rms_ppb)} ppb</td>
+                  <td>{item.benefit_pct == null ? "—" : `${item.benefit_pct >= 0 ? "+" : ""}${item.benefit_pct.toFixed(1)} %`}</td>
+                  <td>{item.candidates?.[0]?.kind ?? "—"}</td>
+                  <td>{item.released ? "yes" : "no"}</td>
+                  <td>
+                    <span className={`thm-verdict ${STATUS_TONE[item.status ?? ""] ?? ""}`}>
+                      {item.armed_kind ?? item.status}
+                    </span>
+                  </td>
+                  <td>
+                    {onArm ? (
+                      <button className="quiet-button" type="button" disabled={!item.armable}
+                              title={item.armable ? "Arm compensated holdover" : item.reason}
+                              onClick={() => onArm(name, true)}>
+                        Arm
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="thm-reasons">
+            {nodes.map(([name, item]) => (
+              <div key={name}><b>{name}</b><span>{item.reason}</span></div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="empty-analysis">Waiting for <code>/api/holdover/compensator</code></div>
+      )}
+      <div className="dyn-evidence-note">
+        <ShieldCheck size={14} />
+        <span>
+          {nodes[0]?.[1]?.interpretation ??
+            "Candidates are scored by forecasting a held-out tail of the locked window."}{" "}
+          {compensator?.default_state}
+        </span>
+      </div>
+    </section>
+  );
+}

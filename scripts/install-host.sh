@@ -46,6 +46,7 @@ install -m 0644 "$SOURCE_DIR/agent/ptpbox_phc_store.py" "$INSTALL_DIR/agent/ptpb
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_research.py" "$INSTALL_DIR/agent/ptpbox_research.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_system.py" "$INSTALL_DIR/agent/ptpbox_system.py"
 install -m 0644 "$SOURCE_DIR/agent/ptpbox_thermal.py" "$INSTALL_DIR/agent/ptpbox_thermal.py"
+install -m 0644 "$SOURCE_DIR/agent/ptpbox_holdover_control.py" "$INSTALL_DIR/agent/ptpbox_holdover_control.py"
 # Every module the agent imports must be installed beside it. Missing one turns
 # into a systemd crash loop that takes the whole web surface down, so check here
 # instead of after the restart.
@@ -61,6 +62,7 @@ install -m 0755 "$SOURCE_DIR/scripts/ptpboxctl.py" /usr/local/sbin/ptpboxctl
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_kalman_servo.py" /usr/local/sbin/ptpbox-kalman-servo
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_event_monitor.py" /usr/local/sbin/ptpbox-event-monitor
 install -m 0755 "$SOURCE_DIR/scripts/ptpbox_pps_compare.py" /usr/local/sbin/ptpbox-pps-compare
+install -m 0755 "$SOURCE_DIR/scripts/ptpbox_holdover_compensator.py" /usr/local/sbin/ptpbox-holdover-compensator
 install -m 0644 "$SOURCE_DIR/agent/topology.json" "$ETC_DIR/topology.json"
 sed -e "s|@PTPBOX_GROUP@|$PTPBOX_GROUP_NAME|g" \
   "$SOURCE_DIR/agent/ptpbox-tmpfiles.conf" > /etc/tmpfiles.d/ptpbox.conf
@@ -114,7 +116,7 @@ ln -sfn "$PTPBOX_ROOT_DIR/runtime/servo-request.json" "$ETC_DIR/servo-request.js
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/fault-request.json" "$ETC_DIR/fault-request.json"
 ln -sfn "$PTPBOX_ROOT_DIR/runtime/identification-request.json" "$ETC_DIR/identification-request.json"
 
-printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo, /usr/local/sbin/ptpboxctl fault, /usr/local/sbin/ptpboxctl identify" > /etc/sudoers.d/ptpbox-web
+printf '%s\n' "$PTPBOX_USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/ptpboxctl start, /usr/local/sbin/ptpboxctl stop, /usr/local/sbin/ptpboxctl restart, /usr/local/sbin/ptpboxctl status, /usr/local/sbin/ptpboxctl servo, /usr/local/sbin/ptpboxctl fault, /usr/local/sbin/ptpboxctl identify, /usr/local/sbin/ptpboxctl compensate" > /etc/sudoers.d/ptpbox-web
 chmod 0440 /etc/sudoers.d/ptpbox-web
 visudo -cf /etc/sudoers.d/ptpbox-web >/dev/null
 

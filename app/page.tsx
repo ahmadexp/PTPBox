@@ -46,7 +46,8 @@ import {
 } from "./cascade-dynamics";
 import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
 import { SystemObservatory, type SystemPayload } from "./system-observatory";
-import { ThermalObservatory, type ThermalPayload } from "./thermal-observatory";
+import { ThermalObservatory, HoldoverCompensator, type ThermalPayload,
+  type CompensatorPayload } from "./thermal-observatory";
 
 type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "System" | "Thermal" | "Configuration" | "Event log";
 type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
@@ -3748,6 +3749,7 @@ export default function PTPBoxDashboard() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [systemInfo, setSystemInfo] = useState<SystemPayload | null>(null);
   const [thermalInfo, setThermalInfo] = useState<ThermalPayload | null>(null);
+  const [compensator, setCompensator] = useState<CompensatorPayload | null>(null);
   // Adapter temperatures come from the cheap capability probe rather than the
   // research snapshot, which is only polled on analysis pages. Readings are
   // merged into the previous map so one slow or partial probe cannot blank a
@@ -3865,6 +3867,41 @@ export default function PTPBoxDashboard() {
       window.clearTimeout(timeout);
     }
   }, []);
+
+  const refreshCompensator = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/holdover/compensator?history=1800`, { signal: controller.signal });
+      if (!response.ok) throw new Error("compensator evaluation unavailable");
+      setCompensator(await response.json() as CompensatorPayload);
+    } catch {
+      // Keep the previous decision; the panel states its own evidence.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
+  const armCompensation = useCallback(async (node: string, enabled: boolean) => {
+    try {
+      const response = await fetch(`${agentBaseUrl()}/api/holdover/control`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "compensate", target: node, enabled }),
+      });
+      const payload = await response.json() as { error?: string; reason?: string };
+      if (!response.ok) {
+        // The agent refuses a model that failed held-out validation; surface its
+        // reason rather than retrying.
+        setToast(payload.reason ?? payload.error ?? "Compensation was refused");
+        return;
+      }
+      setToast(`${enabled ? "Armed" : "Disarmed"} compensated holdover on ${node}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Compensation request failed");
+    }
+    await refreshCompensator();
+  }, [refreshCompensator]);
 
   const refreshSystem = useCallback(async () => {
     const controller = new AbortController();
@@ -4040,13 +4077,17 @@ export default function PTPBoxDashboard() {
 
   useEffect(() => {
     if (section !== "Thermal") return;
-    const initial = window.setTimeout(() => void refreshThermal(), 0);
-    const timer = window.setInterval(() => void refreshThermal(), 20000);
+    const poll = () => {
+      void refreshThermal();
+      void refreshCompensator();
+    };
+    const initial = window.setTimeout(poll, 0);
+    const timer = window.setInterval(poll, 20000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [section, refreshThermal]);
+  }, [section, refreshThermal, refreshCompensator]);
 
   useEffect(() => {
     if (section !== "System") return;
@@ -5323,7 +5364,10 @@ export default function PTPBoxDashboard() {
           )}
 
           {section === "Thermal" && (
-            <ThermalObservatory thermal={thermalInfo} />
+            <>
+              <ThermalObservatory thermal={thermalInfo} />
+              <HoldoverCompensator compensator={compensator} onArm={armCompensation} />
+            </>
           )}
 
           {section === "System" && (
