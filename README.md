@@ -407,6 +407,49 @@ unless the coefficient's own evidence verdict is supported, and on the reference
 host that gate earns its place: the measured coefficient would have worsened five
 of six clocks, one of them by 178 %.
 
+## Steer holdover with temperature, if a model earns it
+
+Scoring says whether compensation *could* help. The **compensated holdover
+controller** is the thing that would actually do it. While a stage is locked, the
+correction its servo applies is the negated oscillator error, so the locked window
+is a labelled training set: what correction this oscillator needed at a given die
+temperature and a given age. Four candidates are fitted on it, and after release a
+timer-driven worker applies the winner through `clock_adjtime`. Holdover removes
+the offsets every other servo reacts to, which is why this one is driven by a
+clock rather than by samples.
+
+| Candidate | What it assumes |
+|---|---|
+| `frozen` | Hold the last correction. The baseline everything must beat. |
+| `drift` | Frequency ages linearly with time. |
+| `temperature` | Frequency follows die temperature. |
+| `temperature-drift` | Both, fitted jointly because they are collinear here. |
+
+Candidates are ranked by forecasting stretches of the locked window they never
+saw, never by fit. One held-out split turned out not to be enough: the winner
+changes with where the split falls. On BC6 a split at 25 % reports a 51 % gain for
+a temperature model while splits either side of it refuse outright. Selection
+therefore runs over five rolling origins, and a model is armed only if its median
+gain reaches 15 % **and** it wins 80 % of folds.
+
+Under that rule the reference host is unanimous, across two windows and every fold
+count: every clock refuses. The best candidates reach +19 % to +30 % but win only
+three folds of five, and several median gains are negative. Compensation here
+would be worse than freezing, so the controller stays out of the way and says why.
+
+<img src="docs/screenshots/holdover-compensator-live.png" alt="Live PTPBox compensated holdover panel showing per-clock frozen and best forecast RMS, median benefit, winning candidate, and a refusal reason for each of the six downstream clocks" width="100%">
+
+<sub>Live controller verdict. Every clock is refused, each with the fold count it
+actually won and the reason, so the operator can see what evidence would be
+needed rather than a bare failure.</sub>
+
+What reaches a clock is bounded regardless: correction magnitude and slew rate are
+capped, the ageing ramp stops extrapolating past its fitted horizon, temperature is
+clamped near the observed range, and the first tick after release keeps exactly what
+the servo left behind so arming cannot step the oscillator. Arming needs the clock
+already released, and the agent refuses a model that failed validation, so the
+verdict cannot be overridden from the HTTP surface.
+
 ## Inspect the host itself
 
 The **System Observatory** reports host identity and uptime, processor model with
@@ -453,6 +496,7 @@ and the network panel is explicitly read-only.</sub>
 | **Analytics** | Compare unsmoothed read-only PHC measurements, inspect the endpoint distribution, and export raw timestamped samples. |
 | **Durable experiments** | Capture configuration and raw PHC samples in a SQLite/WAL run ledger, stop without losing data, and export an immutable CSV by run ID. |
 | **Servo & holdover control** | Select native PI/linear-regression/null-frequency discipline, classic Kalman, adaptive phase/frequency/drift Kalman, or quiet/dynamic/holdover IMM per clock; change discipline while read-only monitoring stays live. |
+| **Compensated holdover** | Fit frozen, ageing, temperature, and joint models on the locked window, rank them by forecasting rolling origins, and arm one only if it beats frozen holdover by 15 % across 80 % of folds; bounded in magnitude, slew rate, and extrapolation horizon, and off by default. |
 | **PPS & `ts2phc` control** | Select a PHC or external PPS source, configure pins and `ts2phc`, or compare two or more PHCs against one physical PPS edge in strictly measurement-only mode. |
 | **Lifecycle control** | Start or stop the real namespace cascade from the UI after the guarded host helper is installed. |
 | **Hardware inventory** | Discover NICs, PCI addresses, drivers, link rates, PHCs, and hardware timestamping capability. |
