@@ -46,13 +46,13 @@ import {
 } from "./cascade-dynamics";
 import { GraphAlbumView, GraphCaptureControls, type GraphAlbumItem } from "./graph-album";
 import { SystemObservatory, type SystemPayload } from "./system-observatory";
-import { agentFetch, adoptTokenFromLocation, probeAccess, type AccessState }
+import { agentFetch, adoptTokenFromLocation, probeAccess, AuthError, type AccessState }
   from "./agent-access";
 import { ThermalObservatory, HoldoverCompensator, type ThermalPayload,
   type CompensatorPayload } from "./thermal-observatory";
 
 type Section = "Overview" | "Multi-pendulum" | "Covariance" | "State space" | "Metrology" | "Path microscope" | "Intelligence" | "Cascade dynamics" | "Holdover" | "Resilience" | "Analytics" | "Album" | "Experiments" | "Interfaces" | "System" | "Thermal" | "Configuration" | "Event log";
-type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation";
+type ConnectionMode = "checking" | "live" | "waiting" | "stale" | "simulation" | "unauthorized";
 type ClockState = "LOCKED" | "TRACKING" | "UNLOCKED" | "REFERENCE" | "HOLDOVER" | "NO DATA" | "STALE" | "FAULTY";
 type NativeServoType = "pi" | "linreg" | "nullf";
 type ServoType = NativeServoType | "kalman" | "adaptive-kalman" | "imm";
@@ -3978,8 +3978,23 @@ export default function PTPBoxDashboard() {
         ? "Zero frequency correction · SyncE"
         : `Kp ${kp.toFixed(2)} · Ki ${ki.toFixed(2)}`;
   const selectedServoRail = activeNode.servoEnabled === false ? 0 : activeNode.servoType === "imm" ? 96 : activeNode.servoType === "adaptive-kalman" ? 94 : activeNode.servoType === "kalman" ? 92 : activeNode.servoType === "linreg" ? 82 : activeNode.servoType === "nullf" ? 4 : Math.min(100, kp * 76);
-  const hostStateLabel = connection === "live" ? "Live raw stream" : connection === "waiting" ? "Waiting for PTP" : connection === "stale" ? "Raw stream stale" : connection === "checking" ? "Finding host…" : "Simulation fallback";
-  const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED" : connection === "waiting" ? "HARDWARE · WAITING FOR PTP" : connection === "stale" ? "HARDWARE · RAW DATA STALE" : connection === "checking" ? "FINDING PTPBOX AGENT" : "SIMULATION · NOT MEASURED";
+  // The final branch used to be "Simulation fallback", which mislabelled an
+  // unauthenticated session as modelled data even though nothing was simulated.
+  const hostStateLabel = connection === "live" ? "Live raw stream"
+    : connection === "waiting" ? "Waiting for PTP"
+    : connection === "stale" ? "Raw stream stale"
+    : connection === "checking" ? "Finding host…"
+    : connection === "unauthorized" ? "Access token required"
+    : "Simulation fallback";
+  // Same trap as hostStateLabel: an unauthenticated session is not simulated
+  // data, and calling it that invites the reader to distrust the instrument
+  // rather than go and fetch a token.
+  const dataModeLabel = connection === "live" ? "LIVE · RAW · UNSMOOTHED"
+    : connection === "waiting" ? "HARDWARE · WAITING FOR PTP"
+    : connection === "stale" ? "HARDWARE · RAW DATA STALE"
+    : connection === "checking" ? "FINDING PTPBOX AGENT"
+    : connection === "unauthorized" ? "ACCESS TOKEN REQUIRED"
+    : "SIMULATION · NOT MEASURED";
   const newestSampleAt = nodes.reduce((latest, node) => Math.max(latest, node.lastSampleAt ?? 0), 0);
   const newestSampleAge = newestSampleAt && telemetryStatus ? Math.max(0, telemetryStatus.timestamp - newestSampleAt) : null;
   const invalidWindowSamples = telemetryStatus?.clocks.reduce((total, clock) => total + clock.window_invalid_sample_count, 0) ?? 0;
@@ -4255,8 +4270,16 @@ export default function PTPBoxDashboard() {
           setHistory([]);
           setNodes(waitingNodes("Waiting for LinuxPTP"));
         }
-      } catch {
-        if (!disposed && initialProbe) {
+      } catch (error) {
+        if (disposed) {
+          /* nothing to do */
+        } else if (error instanceof AuthError) {
+          // Refused, not unreachable. Showing the simulator here would hand a
+          // visitor plausible fabricated numbers and call them measurements.
+          setConnection("unauthorized");
+          setNodes(waitingNodes("Access token required"));
+          setHistory([]);
+        } else if (initialProbe) {
           setConnection("simulation");
           setNodes(INITIAL_NODES);
           setHistory(buildHistory());
@@ -5010,9 +5033,9 @@ export default function PTPBoxDashboard() {
             <div className="host-row"><span>PTPBox</span><code>192.168.1.60</code></div>
             <div className="host-row"><span>LinuxPTP</span><code>{agentStatus?.linuxptp ?? "4.4"}</code></div>
             <div className="host-row"><span>PTP ports</span><code>{agentStatus?.ptp_interfaces ?? 16}</code></div>
-            <div className="host-row"><span>Cascade</span><code>{connection === "live" || agentStatus?.running ? "RUNNING" : "STOPPED"}</code></div>
+            <div className="host-row"><span>Cascade</span><code>{connection === "live" || agentStatus?.running ? "RUNNING" : connection === "unauthorized" ? "UNKNOWN" : "STOPPED"}</code></div>
           </div>
-          <div className="user-row"><div className="avatar">{access.role === "viewer" ? "RO" : "AB"}</div><div><strong>{access.role === "viewer" ? "Shared viewer" : "Lab operator"}</strong><small>{access.role === "viewer" ? "Read-only \u00b7 cannot reach a clock" : access.needsToken ? "Access token required" : "Administrator"}</small></div><button type="button" className="user-row-action" onClick={() => setSection("System")} title="Open the System Observatory" aria-label="Open the System Observatory"><Settings2 size={16} /></button></div>
+          <div className="user-row"><div className="avatar">{access.role === "viewer" ? "RO" : "AB"}</div><div><strong>{access.role === "viewer" ? "Shared viewer" : access.role === "operator" ? "Lab operator" : "Not signed in"}</strong><small>{access.role === "viewer" ? "Read-only \u00b7 cannot reach a clock" : access.role === "operator" ? "Administrator" : "Ask for a link that includes a token"}</small></div><button type="button" className="user-row-action" onClick={() => setSection("System")} title="Open the System Observatory" aria-label="Open the System Observatory"><Settings2 size={16} /></button></div>
         </div>
       </aside>
 

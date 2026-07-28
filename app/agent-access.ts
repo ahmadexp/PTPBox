@@ -3,14 +3,25 @@
  *
  * A shared link is the point of this: someone outside the lab is handed one URL
  * carrying a token. The token is taken out of the address bar immediately and
- * kept in session storage, because a token left in the URL ends up in browser
- * history, server logs and referrer headers, and would be copied along with any
- * screenshot of the address bar.
+ * stored, because a token left in the URL ends up in browser history, server logs
+ * and referrer headers, and would be copied along with any screenshot of the
+ * address bar.
  *
- * Session storage rather than local storage, so closing the tab ends the loan.
+ * Local rather than session storage: sessionStorage is scoped to a single tab, so
+ * a reload or following the link into a second tab dropped the token and every
+ * request started failing, which is indistinguishable from an outage.
  */
 
 const TOKEN_KEY = "ptpbox.access-token";
+
+/** Raised on 401/403 so callers can tell "not allowed" from "not reachable". */
+export class AuthError extends Error {
+  constructor(readonly status: number) {
+    super(status === 403 ? "this token is read-only" : "an access token is required");
+    this.name = "AuthError";
+  }
+}
+
 const TOKEN_HEADER = "X-PTPBox-Token";
 
 export type AgentRole = "operator" | "viewer" | null;
@@ -18,7 +29,7 @@ export type AgentRole = "operator" | "viewer" | null;
 export function readToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.sessionStorage.getItem(TOKEN_KEY);
+    return window.localStorage.getItem(TOKEN_KEY);
   } catch {
     // Private browsing modes can refuse storage; the query token still works for
     // the life of the page.
@@ -29,8 +40,8 @@ export function readToken(): string | null {
 export function storeToken(token: string | null): void {
   if (typeof window === "undefined") return;
   try {
-    if (token) window.sessionStorage.setItem(TOKEN_KEY, token);
-    else window.sessionStorage.removeItem(TOKEN_KEY);
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
   } catch {
     /* nothing to do; the in-memory fallback below still applies */
   }
@@ -54,11 +65,15 @@ export function adoptTokenFromLocation(): string | null {
   return readToken() ?? memoryToken;
 }
 
-export function agentFetch(url: string, init: RequestInit = {}): Promise<Response> {
+export async function agentFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const token = readToken() ?? memoryToken;
   const headers = new Headers(init.headers ?? {});
   if (token) headers.set(TOKEN_HEADER, token);
-  return fetch(url, { ...init, headers });
+  const response = await fetch(url, { ...init, headers });
+  // Raised rather than returned so no caller can mistake "refused" for
+  // "unreachable" and quietly substitute simulated data for measurements.
+  if (response.status === 401 || response.status === 403) throw new AuthError(response.status);
+  return response;
 }
 
 export type AccessState = {
@@ -71,14 +86,11 @@ export type AccessState = {
 export async function probeAccess(base: string): Promise<AccessState> {
   try {
     const response = await agentFetch(`${base}/api/access`);
-    if (response.status === 401) {
-      const body = await response.json().catch(() => ({}));
-      return { role: null, needsToken: true, reason: body?.error };
-    }
     if (!response.ok) return { role: null, needsToken: false };
     const body = await response.json() as { role?: AgentRole };
     return { role: body.role ?? null, needsToken: false };
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthError) return { role: null, needsToken: true, reason: error.message };
     return { role: null, needsToken: false };
   }
 }
