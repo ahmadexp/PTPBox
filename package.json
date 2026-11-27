@@ -52,11 +52,9 @@
     "url": "https://github.com/ahmadexp/PTPBox/issues"
   },
   "overrides": {
+    "fflate": "0.7.5",
     "postcss": "8.5.34",
-    "sharp": "0.35.5",
-    "vinext": {
-      "fflate": "0.7.5"
-    }
+    "sharp": "0.35.5"
   },
   "keywords": [
     "ptp",
