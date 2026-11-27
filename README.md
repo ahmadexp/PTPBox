@@ -926,6 +926,9 @@ npm run dev          # local application server
 make check           # lint, tests, both builds, Python and shell validation
 ```
 
+Run `npm run build && npm start` to preview the hosted build locally in the
+Cloudflare Workers runtime.
+
 The main application uses React 19, TypeScript, Vinext/Vite, and Canvas-based
 telemetry charts. The host agent uses only the Python standard library.
 
